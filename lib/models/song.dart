@@ -39,6 +39,8 @@ class Song {
   final double? recommendationScore;
   final int? playCount;
   final int? popularity;
+  final String? songUrl;
+  final bool? hasLyrics;
 
   Song({
     required this.id,
@@ -61,6 +63,8 @@ class Song {
     this.recommendationScore,
     this.playCount,
     this.popularity,
+    this.songUrl,
+    this.hasLyrics,
   });
 
   factory Song.fromJson(Map<String, dynamic> json) {
@@ -140,6 +144,8 @@ class Song {
       recommendationScore: json['_recommendationScore']?.toDouble(),
       playCount: playCount,
       popularity: popularity,
+      songUrl: json['url']?.toString() ?? json['perma_url']?.toString(),
+      hasLyrics: json['hasLyrics'] == true || json['has_lyrics'] == true,
     );
   }
 
@@ -163,6 +169,8 @@ class Song {
     Object? recommendationScore = _unset,
     Object? playCount = _unset,
     Object? popularity = _unset,
+    Object? songUrl = _unset,
+    Object? hasLyrics = _unset,
   }) {
     return Song(
       id: id ?? this.id,
@@ -194,6 +202,8 @@ class Song {
           : recommendationScore as double?,
       playCount: playCount == _unset ? this.playCount : playCount as int?,
       popularity: popularity == _unset ? this.popularity : popularity as int?,
+      songUrl: songUrl == _unset ? this.songUrl : songUrl as String?,
+      hasLyrics: hasLyrics == _unset ? this.hasLyrics : hasLyrics as bool?,
     );
   }
 

@@ -226,7 +226,7 @@ class LyricsManager extends ChangeNotifier {
       for (final res in results) {
         if (res != null && res.hasAny) {
           found = res;
-          providerSource = 'lrclib';
+          providerSource = res.provider ?? 'lrclib';
           break;
         }
       }

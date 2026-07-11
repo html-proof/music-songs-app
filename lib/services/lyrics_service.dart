@@ -16,12 +16,14 @@ class LyricsPayload {
   final String? syncedLyrics;
   final String? translationPlainLyrics;
   final String? translationSyncedLyrics;
+  final String? provider;
 
   const LyricsPayload({
     required this.plainLyrics,
     required this.syncedLyrics,
     this.translationPlainLyrics,
     this.translationSyncedLyrics,
+    this.provider,
   });
 
   bool get hasPlain => plainLyrics != null && plainLyrics!.trim().isNotEmpty;
@@ -41,6 +43,7 @@ class LyricsPayload {
       'syncedLyrics': syncedLyrics,
       'translationPlainLyrics': translationPlainLyrics,
       'translationSyncedLyrics': translationSyncedLyrics,
+      'provider': provider,
     };
   }
 
@@ -53,6 +56,7 @@ class LyricsPayload {
       syncedLyrics: syncedLyrics?.toString(),
       translationPlainLyrics: json['translationPlainLyrics']?.toString(),
       translationSyncedLyrics: json['translationSyncedLyrics']?.toString(),
+      provider: json['provider']?.toString(),
     );
   }
 }
@@ -217,7 +221,81 @@ class LyricsService {
     if (lookup.title.isEmpty) return null;
 
     final candidates = await _fetchCandidates(lookup);
-    return _selectBestPayload(lookup, candidates);
+    final bestPayload = _selectBestPayload(lookup, candidates);
+    if (bestPayload != null && bestPayload.hasAny) {
+      return bestPayload;
+    }
+
+    if (song.songUrl != null && song.songUrl!.isNotEmpty) {
+      debugPrint('[LyricsService] Falling back to JioSaavn scrape for: ${song.name}');
+      final scraped = await _scrapeJioSaavnLyrics(song.songUrl!);
+      if (scraped != null && scraped.hasAny) {
+        return scraped;
+      }
+    }
+
+    return null;
+  }
+
+  static Future<LyricsPayload?> _scrapeJioSaavnLyrics(String songUrl) async {
+    try {
+      final uri = Uri.parse(songUrl);
+      final segments = uri.pathSegments;
+      if (segments.length < 3 || segments[0] != 'song') {
+        return null;
+      }
+      final slug = segments[1];
+      final id = segments[2];
+      final lyricsUrl = 'https://www.jiosaavn.com/lyrics/$slug-lyrics/$id';
+
+      final res = await http.get(
+        Uri.parse(lyricsUrl),
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept-Language': 'en-US,en;q=0.9',
+        },
+      ).timeout(const Duration(seconds: 4));
+
+      if (res.statusCode != 200) return null;
+
+      final html = res.body;
+      final lyricsMatch = RegExp(
+        r'<p class="u-margin-bottom-none[^"]*">(.*?)</p>',
+        caseSensitive: false,
+        dotAll: true,
+      ).firstMatch(html);
+
+      if (lyricsMatch == null) {
+        return null;
+      }
+
+      var rawLyrics = lyricsMatch.group(1) ?? '';
+      if (rawLyrics.isEmpty) return null;
+
+      rawLyrics = rawLyrics.replaceAll(RegExp(r'</?span>'), '');
+      rawLyrics = rawLyrics.replaceAll(RegExp(r'</?br/?>'), '\n');
+      rawLyrics = rawLyrics.replaceAll(RegExp(r'<[^>]*>'), '');
+      
+      rawLyrics = rawLyrics
+          .replaceAll('&amp;', '&')
+          .replaceAll('&quot;', '"')
+          .replaceAll('&#039;', "'")
+          .replaceAll('&apos;', "'")
+          .replaceAll('&lt;', '<')
+          .replaceAll('&gt;', '>');
+
+      final cleaned = rawLyrics.trim();
+      if (cleaned.isEmpty) return null;
+
+      return LyricsPayload(
+        plainLyrics: cleaned,
+        syncedLyrics: null,
+        provider: 'jiosaavn',
+      );
+    } catch (e) {
+      debugPrint('[LyricsService] JioSaavn scrape failed: $e');
+      return null;
+    }
   }
 
   /// Search for lyrics by a raw query string.
@@ -756,6 +834,7 @@ class LyricsService {
       syncedLyrics: originalSynced,
       translationPlainLyrics: translationPlain,
       translationSyncedLyrics: translationSynced,
+      provider: 'lrclib',
     );
   }
 
@@ -773,13 +852,28 @@ class LyricsService {
     final titleScore = _similarityScore(expectedTitle, candidateTitle);
     if (titleScore < (relaxed ? 0.38 : 0.55)) return null;
 
+    final expectedDuration = lookup.durationSeconds;
+    final candidateDuration = candidate.durationSeconds;
+    final durationDiff = (expectedDuration != null &&
+            expectedDuration > 0 &&
+            candidateDuration != null &&
+            candidateDuration > 0)
+        ? (expectedDuration - candidateDuration).abs()
+        : null;
+
+    if (durationDiff != null && durationDiff > (relaxed ? 8 : 1)) {
+      return null;
+    }
+
     final expectedArtist = _normalizeMatchText(_cleanArtist(lookup.artist));
     final candidateArtist = _normalizeMatchText(
       _cleanArtist(candidate.artistName),
     );
     if (expectedArtist.isNotEmpty) {
       final artistScore = _similarityScore(expectedArtist, candidateArtist);
-      if (artistScore < (relaxed ? 0.18 : 0.35)) return null;
+      final isVeryStrongMatch = titleScore >= 0.85 && durationDiff != null && durationDiff <= 3;
+      final requiredArtistScore = isVeryStrongMatch ? 0.0 : (relaxed ? 0.18 : 0.35);
+      if (artistScore < requiredArtistScore) return null;
     }
 
     final expectedVersion = _detectVersionType(
@@ -793,16 +887,6 @@ class LyricsService {
       candidateVersion,
       relaxed: relaxed,
     )) {
-      return null;
-    }
-
-    final expectedDuration = lookup.durationSeconds;
-    final candidateDuration = candidate.durationSeconds;
-    if (expectedDuration != null &&
-        expectedDuration > 0 &&
-        candidateDuration != null &&
-        candidateDuration > 0 &&
-        (expectedDuration - candidateDuration).abs() > (relaxed ? 8 : 1)) {
       return null;
     }
 
@@ -1074,7 +1158,11 @@ class LyricsService {
         : (syncedLyrics != null ? _stripTimestamps(syncedLyrics) : null);
 
     if (!_isValidLyrics(plainLyrics) && syncedLyrics == null) return null;
-    return LyricsPayload(plainLyrics: plainLyrics, syncedLyrics: syncedLyrics);
+    return LyricsPayload(
+      plainLyrics: plainLyrics,
+      syncedLyrics: syncedLyrics,
+      provider: 'lrclib',
+    );
   }
 
   static String? _normalizeSyncedLyrics(String? rawSyncedLyrics) {

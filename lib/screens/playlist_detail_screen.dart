@@ -387,14 +387,30 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
                             ),
                             child: ListTile(
                               enabled: isPlayableNow,
-                              leading: ReorderableDragStartListener(
-                                index: index,
-                                child: Icon(
-                                  Icons.drag_handle_rounded,
-                                  color: AppTheme.textMuted.withValues(
-                                    alpha: 0.9,
+                              leading: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  ReorderableDragStartListener(
+                                    index: index,
+                                    child: Icon(
+                                      Icons.drag_handle_rounded,
+                                      color: AppTheme.textMuted.withValues(
+                                        alpha: 0.9,
+                                      ),
+                                    ),
                                   ),
-                                ),
+                                  const SizedBox(width: 8),
+                                  ClipRRect(
+                                    borderRadius: BorderRadius.circular(6),
+                                    child: OfflineArtwork(
+                                      songId: song.id,
+                                      imageUrl: song.imageUrl,
+                                      width: 36,
+                                      height: 36,
+                                      fit: BoxFit.cover,
+                                    ),
+                                  ),
+                                ],
                               ),
                               title: Text(
                                 song.name,

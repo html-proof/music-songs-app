@@ -7,6 +7,7 @@ import '../models/song.dart';
 import '../services/download_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/mini_player.dart';
+import '../widgets/offline_artwork.dart';
 
 class DownloadsScreen extends StatefulWidget {
   const DownloadsScreen({super.key});
@@ -391,16 +392,14 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
                                 horizontal: 20,
                                 vertical: 4,
                               ),
-                              leading: Container(
-                                width: 50,
-                                height: 50,
-                                decoration: BoxDecoration(
-                                  color: AppTheme.surfaceDark,
-                                  borderRadius: BorderRadius.circular(8),
-                                ),
-                                child: const Icon(
-                                  Icons.music_note,
-                                  color: AppTheme.accentPurple,
+                              leading: ClipRRect(
+                                borderRadius: BorderRadius.circular(8),
+                                child: OfflineArtwork(
+                                  songId: song.id,
+                                  imageUrl: song.imageUrl,
+                                  width: 50,
+                                  height: 50,
+                                  fit: BoxFit.cover,
                                 ),
                               ),
                               title: Text(

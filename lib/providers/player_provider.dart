@@ -100,7 +100,11 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
     int lastNotifiedMs = -1;
     PlayerService.positionStream.listen((pos) {
       if (_ignorePositionUntilZero) {
-        if (pos == Duration.zero || pos.inMilliseconds < 800) {
+        // Only clear the guard once the player confirms it is genuinely at/near
+        // the start of the new track. 300ms is tight enough to distinguish a
+        // true fresh start from a stale audio-buffer position carried over from
+        // the previous song (which typically shows up as 5–15 seconds).
+        if (pos == Duration.zero || pos.inMilliseconds < 300) {
           _ignorePositionUntilZero = false;
         } else {
           return;
@@ -186,6 +190,16 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
     PlayerService.resolvingSongStream.listen((song) {
       _resolvingSong = song;
       if (song != null) {
+        // A new song is being resolved — force position to 0:00 and block any
+        // position stream events from the old audio buffer.
+        _position = Duration.zero;
+        _ignorePositionUntilZero = true;
+      } else {
+        // Resolution finished (song → null). Keep the guard active and hold
+        // position at 0:00 until positionStream confirms the player is truly
+        // at/near zero. Without this, the stale buffer position from the
+        // previous song can slip through in the brief gap between this event
+        // and the first tick of the new track's positionStream.
         _position = Duration.zero;
         _ignorePositionUntilZero = true;
       }

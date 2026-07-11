@@ -9,6 +9,7 @@ import '../providers/playlist_provider.dart';
 import '../providers/preferences_provider.dart';
 import '../screens/album_detail_screen.dart';
 import '../screens/playlist_detail_screen.dart';
+import '../screens/playlist_import_screen.dart';
 import '../services/api_service.dart';
 import '../services/offline_service.dart';
 import '../theme/app_theme.dart';
@@ -745,12 +746,30 @@ class _LibrarySideDrawerState extends State<LibrarySideDrawer> {
                               }),
                             const SizedBox(height: 20),
                             Row(
-                              children: [
+                                  children: [
                                 _sectionHeader(
                                   'Playlists',
                                   Icons.queue_music_rounded,
                                 ),
                                 const Spacer(),
+                                TextButton.icon(
+                                  onPressed: () {
+                                    Navigator.pop(context); // Close drawer
+                                    Navigator.push(
+                                      context,
+                                      MaterialPageRoute(
+                                        builder: (_) =>
+                                            const PlaylistImportScreen(),
+                                      ),
+                                    );
+                                  },
+                                  icon: const Icon(
+                                    Icons.playlist_add_rounded,
+                                    size: 16,
+                                  ),
+                                  label: const Text('Import'),
+                                ),
+                                const SizedBox(width: 8),
                                 TextButton.icon(
                                   onPressed: () async {
                                     final name = await _promptPlaylistName();

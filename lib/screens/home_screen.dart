@@ -857,6 +857,112 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     );
   }
 
+  Widget _buildQuickActions(BuildContext context) {
+    final actions = [
+      {
+        'title': 'Import Playlist',
+        'icon': Icons.playlist_add_rounded,
+        'color': AppTheme.accentPurple,
+        'onTap': () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const PlaylistImportScreen()),
+            ),
+      },
+      {
+        'title': 'Offline Library',
+        'icon': Icons.offline_pin_rounded,
+        'color': Colors.greenAccent,
+        'onTap': () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const OfflineLibraryScreen()),
+            ),
+      },
+      {
+        'title': 'Downloads',
+        'icon': Icons.download_for_offline_rounded,
+        'color': Colors.orangeAccent,
+        'onTap': () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const DownloadsScreen()),
+            ),
+      },
+      {
+        'title': 'Preferences',
+        'icon': Icons.tune_rounded,
+        'color': Colors.blueAccent,
+        'onTap': () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const PreferencesScreen()),
+            ),
+      },
+    ];
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Quick Actions',
+            style: TextStyle(
+              fontSize: 18,
+              fontWeight: FontWeight.bold,
+              color: Colors.white,
+            ),
+          ),
+          const SizedBox(height: 12),
+          SizedBox(
+            height: 48,
+            child: ListView.builder(
+              scrollDirection: Axis.horizontal,
+              itemCount: actions.length,
+              itemBuilder: (context, index) {
+                final action = actions[index];
+                final color = action['color'] as Color;
+                return Container(
+                  margin: const EdgeInsets.only(right: 12),
+                  child: InkWell(
+                    onTap: action['onTap'] as VoidCallback,
+                    borderRadius: BorderRadius.circular(24),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withValues(alpha: 0.05),
+                        borderRadius: BorderRadius.circular(24),
+                        border: Border.all(
+                          color: Colors.white.withValues(alpha: 0.03),
+                        ),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            action['icon'] as IconData,
+                            color: color,
+                            size: 20,
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            action['title'] as String,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 13,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildPersonalizedMixes(PlayerProvider player) {
     if (_recommendations.isEmpty) return const SizedBox.shrink();
 
@@ -1485,6 +1591,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                             physics: const BouncingScrollPhysics(),
                             children: [
                               _buildContinueListening(player),
+                              const SizedBox(height: 12),
+                              _buildQuickActions(context),
                               const SizedBox(height: 12),
                               _buildRecentlyPlayedGrid(player),
                               const SizedBox(height: 24),

@@ -21,6 +21,8 @@ import 'services/preferences_service.dart';
 import 'services/offline_service.dart';
 import 'services/session_state_service.dart';
 import 'services/download_service.dart';
+import 'services/lyrics_cache.dart';
+import 'services/lyrics_manager.dart';
 import 'screens/splash_screen.dart';
 import 'theme/app_theme.dart';
 import 'providers/playlist_provider.dart';
@@ -74,6 +76,7 @@ Future<void> _initializeAppServices() async {
     PreferencesService.init(),
     SessionStateService.init(),
     DownloadService.getDownloadsDirPath(),
+    LyricsCache.init(),
   ]);
 
   // Background audio + notification + firebase initialization.
@@ -218,6 +221,7 @@ class MusicHubApp extends StatelessWidget {
           },
         ),
         ChangeNotifierProvider(create: (_) => PlaylistProvider()),
+        ChangeNotifierProvider(create: (_) => LyricsManager()),
       ],
       child: MaterialApp(
         title: 'Music Hub',

@@ -11,7 +11,7 @@ import '../providers/playlist_provider.dart';
 import '../screens/album_detail_screen.dart';
 import '../services/api_service.dart';
 import '../services/listening_safety_service.dart';
-import '../services/lyrics_service.dart';
+import '../services/lyrics_manager.dart';
 import 'package:fluttertoast/fluttertoast.dart';
 import '../theme/app_theme.dart';
 import '../widgets/offline_artwork.dart';
@@ -24,24 +24,9 @@ class PlayerScreen extends StatefulWidget {
 }
 
 class _PlayerScreenState extends State<PlayerScreen> {
-  LyricsPayload? _lyricsPayload;
-  List<_TimedLyricLine> _syncedLyrics = const <_TimedLyricLine>[];
-  List<_TimedLyricLine> _originalSyncedLyrics = const <_TimedLyricLine>[];
-  List<_TimedLyricLine> _translationSyncedLyrics = const <_TimedLyricLine>[];
+  // Lyrics display state — everything else is in LyricsManager
   _LyricsDisplayMode _lyricsDisplayMode = _LyricsDisplayMode.original;
-  bool _loadingLyrics = false;
-  bool _lyricsSearchFailed = false;
-  bool _isSearchingInBackground = false;
-  bool _initialSearchFailed = false;
-  bool _lyricsPermanentlyUnavailable = false;
-  int _currentStatusIndex = 0;
-  Timer? _statusTimer;
-  Timer? _backgroundRetryTimer;
-  Timer? _hardStopTimer;
   bool _showLyrics = false;
-  String? _lastLyricsRequestKey;
-  DateTime? _lastLyricsFetchAt;
-  String? _currentSongId;
   final ValueNotifier<double?> _scrubNotifier = ValueNotifier<double?>(null);
   final ScrollController _lyricsScrollController = ScrollController();
   int _lastScrolledLyricIndex = -1;
@@ -52,13 +37,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   static const double _lyricLineExtent = 46.0;
 
-  static const List<String> _loadingStatusSteps = [
-    '🎵 Searching lyrics...',
-    'Trying another source...',
-    'Matching song...',
-    '✓ Almost there...',
-  ];
-
   String _formatDuration(Duration d) {
     final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
     final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
@@ -68,9 +46,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
   @override
   void dispose() {
     _programmaticLyricScrollResetTimer?.cancel();
-    _statusTimer?.cancel();
-    _backgroundRetryTimer?.cancel();
-    _hardStopTimer?.cancel();
     _lyricsScrollController.dispose();
     _scrubNotifier.dispose();
     super.dispose();
@@ -89,356 +64,21 @@ class _PlayerScreenState extends State<PlayerScreen> {
     return lookupKey;
   }
 
-  void _startStatusAnimation() {
-    _statusTimer?.cancel();
-    _hardStopTimer?.cancel();
-    _currentStatusIndex = 0;
-
-    // Advance status label every 2 seconds through the 4 steps
-    _statusTimer = Timer.periodic(const Duration(milliseconds: 2000), (timer) {
-      if (!mounted || !_loadingLyrics) {
-        timer.cancel();
-        return;
-      }
-      setState(() {
-        if (_currentStatusIndex < _loadingStatusSteps.length - 1) {
-          _currentStatusIndex++;
-        }
-      });
-    });
-
-    // Hard deadline: if still in foreground-loading after 10s, transition to
-    // background-searching state so the UI never stays stuck on a spinner.
-    _hardStopTimer = Timer(const Duration(seconds: 10), () {
-      if (!mounted || !_loadingLyrics) return;
-      _statusTimer?.cancel();
-      setState(() {
-        _loadingLyrics = false;
-        _isSearchingInBackground = true;
-        _initialSearchFailed = true;
-      });
-    });
-  }
-
-  void _applyLyrics(LyricsPayload payload, String lookupKey, DateTime now) {
-    final originalSyncedLines = payload.syncedLyrics != null
-        ? _parseSyncedLyrics(payload.syncedLyrics!)
-        : const <_TimedLyricLine>[];
-    final translationSyncedLines = payload.translationSyncedLyrics != null
-        ? _parseSyncedLyrics(payload.translationSyncedLyrics!)
-        : const <_TimedLyricLine>[];
-
-    _lastLyricsRequestKey = lookupKey;
-    _lastLyricsFetchAt = now;
-    setState(() {
-      _lyricsPayload = payload;
-      _originalSyncedLyrics = originalSyncedLines;
-      _translationSyncedLyrics = translationSyncedLines;
-      _syncedLyrics = originalSyncedLines;
-      _lyricsDisplayMode = _LyricsDisplayMode.original;
-      _activeLyricIndexCache = -1;
-      _lastScrolledLyricIndex = -1;
-      _loadingLyrics = false;
-      _lyricsSearchFailed = false;
-      _isSearchingInBackground = false;
-      _initialSearchFailed = false;
-      _lyricsPermanentlyUnavailable = false;
-    });
-  }
-
-  Future<void> _fetchLyrics(Song song, {bool forceRetry = false}) async {
-    final artist = (song.artist ?? '').trim();
-    final title = song.name.trim();
-    final lookupKey = _lyricsLookupKeyForSong(song);
-    if (lookupKey == null) return;
-
-    final isSameLookup = _lastLyricsRequestKey == lookupKey;
-    final now = DateTime.now();
-
-    // Guard: don't restart if already loading this exact song
-    if (_loadingLyrics && isSameLookup && !forceRetry) return;
-    // Guard: already have lyrics for this song
-    if (isSameLookup && _lyricsPayload != null && !forceRetry) return;
-    // Guard: searched recently and found nothing — wait at least 15s before
-    // allowing a non-forced retry so we don't hammer the API
-    if (!forceRetry &&
-        isSameLookup &&
-        _lyricsPayload == null &&
-        _lastLyricsFetchAt != null &&
-        now.difference(_lastLyricsFetchAt!) < const Duration(seconds: 15)) {
-      return;
-    }
-
-    // --- Fast path: serve from cache immediately ---
-    if (!forceRetry) {
-      final cachedPayload = LyricsService.getCachedLyricsForSong(song);
-      if (cachedPayload != null) {
-        _applyLyrics(cachedPayload, lookupKey, now);
-        return;
-      }
-    }
-
-    // Cancel any pending background-retry timer from a previous search
-    _backgroundRetryTimer?.cancel();
-    _backgroundRetryTimer = null;
-
-    _lastLyricsRequestKey = lookupKey;
-    _lastLyricsFetchAt = now;
-
-    // Start the UI status animation with a built-in 10s hard stop
-    _startStatusAnimation();
-
-    setState(() {
-      _loadingLyrics = true;
-      _lyricsSearchFailed = false;
-      _isSearchingInBackground = false;
-      _initialSearchFailed = false;
-      _lyricsPermanentlyUnavailable = false;
-      _lyricsPayload = null;
-      _syncedLyrics = const <_TimedLyricLine>[];
-      _originalSyncedLyrics = const <_TimedLyricLine>[];
-      _translationSyncedLyrics = const <_TimedLyricLine>[];
-      _lyricsDisplayMode = _LyricsDisplayMode.original;
-      _lastScrolledLyricIndex = -1;
-      _activeLyricIndexCache = -1;
-      _lyricsAutoScrollPausedByUser = false;
-      _isProgrammaticLyricScroll = false;
-    });
-
-    bool isCurrentSong() {
-      if (!mounted) return false;
-      final currentActive = context.read<PlayerProvider>().activeSong;
-      if (currentActive == null) return false;
-      return _lyricsLookupKeyForSong(currentActive) == lookupKey;
-    }
-
-    // ─────────────────────────────────────────────────────────────
-    // PHASE 1 — Foreground search (≤ 8 seconds total)
-    // Three quick attempts run concurrently to maximise hit rate.
-    // If any one resolves with lyrics we are done immediately.
-    // ─────────────────────────────────────────────────────────────
-    LyricsPayload? found;
-
-    try {
-      final results = await Future.wait(<Future<LyricsPayload?>>[
-        // Attempt 1: full song-aware lookup (Saavn + LRC exact + search)
-        LyricsService.getLyricsPayloadForSong(song),
-        // Attempt 2: plain title search
-        LyricsService.getLyricsByQuery(title, song),
-        // Attempt 3: title + artist
-        LyricsService.getLyricsByQuery('$title $artist'.trim(), song),
-      ]).timeout(
-        const Duration(seconds: 8),
-        onTimeout: () => const <LyricsPayload?>[null, null, null],
-      );
-
-      for (final res in results) {
-        if (res != null && res.hasAny) {
-          found = res;
-          break;
-        }
-      }
-    } catch (e) {
-      debugPrint('[Lyrics] Phase 1 search error: $e');
-    }
-
-    if (!isCurrentSong()) return;
-
-    // Phase 1 succeeded — show lyrics right away
-    if (found != null && found.hasAny) {
-      _statusTimer?.cancel();
-      _hardStopTimer?.cancel();
-      _applyLyrics(found, lookupKey, now);
-      return;
-    }
-
-    // ─────────────────────────────────────────────────────────────
-    // PHASE 1 FAILED — Transition to background-searching state.
-    // The UI immediately shows "We're still looking..." instead of
-    // a stuck spinner. Phase 2 retries fire asynchronously via
-    // Timer so they never block the UI or playback.
-    // ─────────────────────────────────────────────────────────────
-    _statusTimer?.cancel();
-    _hardStopTimer?.cancel();
-
-    if (!isCurrentSong()) return;
-
-    setState(() {
-      _loadingLyrics = false;
-      _isSearchingInBackground = true;
-      _initialSearchFailed = true;
-      _lyricsPermanentlyUnavailable = false;
-    });
-
-    // ─────────────────────────────────────────────────────────────
-    // PHASE 2 — Background retries: 20 s / 40 s / 60 s
-    // Each retry fires independently via a chained Timer so there
-    // is no blocking await in the UI. If the user changes songs,
-    // _backgroundRetryTimer is cancelled immediately.
-    // ─────────────────────────────────────────────────────────────
-    var bgAttempt = 1;
-    const bgDelays = [20, 40, 60]; // seconds between each retry
-    const bgMaxAttempts = 3;
-
-    void scheduleNextBgRetry() {
-      if (bgAttempt > bgMaxAttempts) {
-        // All background attempts exhausted — mark permanently unavailable
-        if (mounted && isCurrentSong()) {
-          setState(() {
-            _isSearchingInBackground = false;
-            _lyricsPermanentlyUnavailable = true;
-            _lyricsSearchFailed = true;
-          });
-        }
-        return;
-      }
-
-      final delaySeconds = bgAttempt <= bgDelays.length
-          ? bgDelays[bgAttempt - 1]
-          : bgDelays.last;
-
-      _backgroundRetryTimer?.cancel();
-      _backgroundRetryTimer = Timer(Duration(seconds: delaySeconds), () async {
-        if (!isCurrentSong()) return;
-
-        LyricsPayload? bgResult;
-        try {
-          final albumName = song.album ?? song.sourceAlbumName ?? '';
-          final queries = <String>[
-            '$title $artist'.trim(),
-            if (albumName.isNotEmpty) '$title $artist $albumName'.trim(),
-            title,
-          ];
-          final queryToUse = queries[((bgAttempt - 1) % queries.length).clamp(0, queries.length - 1)];
-          bgResult = await LyricsService.getLyricsByQuery(queryToUse, song)
-              .timeout(const Duration(seconds: 8), onTimeout: () => null);
-        } catch (e) {
-          debugPrint('[Lyrics] Background retry $bgAttempt failed: $e');
-        }
-
-        if (!isCurrentSong()) return;
-
-        if (bgResult != null && bgResult.hasAny) {
-          // Found it in the background — update the screen automatically
-          _applyLyrics(bgResult, lookupKey, DateTime.now());
-          return;
-        }
-
-        bgAttempt++;
-        scheduleNextBgRetry();
-      });
-    }
-
-    scheduleNextBgRetry();
-  }
-
-  List<_TimedLyricLine> _parseSyncedLyrics(String rawSyncedLyrics) {
-    final lineRegex = RegExp(r'\[(\d{1,2}):(\d{2})(?:[.:](\d{1,3}))?\]');
-    final parsed = <_TimedLyricLine>[];
-    final seenEntries = <String>{};
-    final rows = rawSyncedLyrics.split('\n');
-
-    for (final row in rows) {
-      final matches = lineRegex.allMatches(row).toList(growable: false);
-      if (matches.isEmpty) continue;
-
-      final text = row.replaceAll(lineRegex, '').trim();
-      if (text.isEmpty) continue;
-
-      for (final match in matches) {
-        final minute = int.tryParse(match.group(1) ?? '') ?? 0;
-        final second = int.tryParse(match.group(2) ?? '') ?? 0;
-        if (minute < 0 || second < 0 || second >= 60) continue;
-
-        final fractionRaw = match.group(3);
-        var millisecond = 0;
-        if (fractionRaw != null && fractionRaw.isNotEmpty) {
-          if (fractionRaw.length == 3) {
-            millisecond = int.tryParse(fractionRaw) ?? 0;
-          } else if (fractionRaw.length == 2) {
-            millisecond = (int.tryParse(fractionRaw) ?? 0) * 10;
-          } else {
-            millisecond = (int.tryParse(fractionRaw) ?? 0) * 100;
-          }
-        }
-
-        final timestampMs =
-            (minute * 60 * 1000) + (second * 1000) + millisecond;
-        final dedupeKey = '$timestampMs|$text';
-        if (seenEntries.contains(dedupeKey)) {
-          continue;
-        }
-        seenEntries.add(dedupeKey);
-
-        parsed.add(
-          _TimedLyricLine(
-            time: Duration(milliseconds: timestampMs),
-            text: text,
-          ),
-        );
-      }
-    }
-
-    parsed.sort((a, b) => a.time.compareTo(b.time));
-    return parsed;
+  List<TimedLyricLine> get _currentSyncedLyrics {
+    final manager = context.read<LyricsManager>();
+    return _lyricsDisplayMode == _LyricsDisplayMode.original
+        ? manager.originalSyncedLines
+        : manager.translationSyncedLines;
   }
 
   int _activeIndexForPosition(Duration position) {
-    final index = _activeIndexForPositionIn(
-      _syncedLyrics,
+    final index = LyricsManager.activeIndexForPosition(
+      _currentSyncedLyrics,
       position,
       cachedIndex: _activeLyricIndexCache,
     );
     _activeLyricIndexCache = index;
     return index;
-  }
-
-  int _activeIndexForPositionIn(
-    List<_TimedLyricLine> syncedLyrics,
-    Duration position, {
-    int cachedIndex = -1,
-  }) {
-    if (syncedLyrics.isEmpty) return -1;
-    final millis = position.inMilliseconds;
-    final firstMillis = syncedLyrics.first.time.inMilliseconds;
-    if (millis < firstMillis) return -1;
-
-    int binarySearch() {
-      var left = 0;
-      var right = syncedLyrics.length - 1;
-      while (left <= right) {
-        final mid = (left + right) >> 1;
-        final midMillis = syncedLyrics[mid].time.inMilliseconds;
-        if (midMillis <= millis) {
-          left = mid + 1;
-        } else {
-          right = mid - 1;
-        }
-      }
-      return right.clamp(0, syncedLyrics.length - 1);
-    }
-
-    if (cachedIndex < 0 || cachedIndex >= syncedLyrics.length) {
-      return binarySearch();
-    }
-
-    var index = cachedIndex;
-    final cachedMillis = syncedLyrics[index].time.inMilliseconds;
-
-    // Large seek jumps are handled better with binary search.
-    if ((millis - cachedMillis).abs() > 10000) {
-      return binarySearch();
-    }
-
-    while (index + 1 < syncedLyrics.length &&
-        millis >= syncedLyrics[index + 1].time.inMilliseconds) {
-      index += 1;
-    }
-    while (index > 0 && millis < syncedLyrics[index].time.inMilliseconds) {
-      index -= 1;
-    }
-
-    return index.clamp(0, syncedLyrics.length - 1);
   }
 
   void _scrollLyricsToIndex(int index) {
@@ -453,9 +93,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _programmaticLyricScrollResetTimer?.cancel();
     _lyricsScrollController
         .animateTo(
-          clamped,
-          duration: const Duration(milliseconds: 260),
-          curve: Curves.easeOutCubic,
+            clamped,
+            duration: const Duration(milliseconds: 260),
+            curve: Curves.easeOutCubic,
         )
         .whenComplete(() {
           _programmaticLyricScrollResetTimer = Timer(
@@ -468,7 +108,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   bool _onLyricsScrollNotification(ScrollNotification notification) {
-    if (_syncedLyrics.isEmpty || _isProgrammaticLyricScroll) {
+    if (_currentSyncedLyrics.isEmpty || _isProgrammaticLyricScroll) {
       return false;
     }
 
@@ -501,32 +141,36 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   bool get _hasOriginalLyrics {
-    final plain = _lyricsPayload?.plainLyrics?.trim() ?? '';
-    return plain.isNotEmpty || _originalSyncedLyrics.isNotEmpty;
+    final manager = context.read<LyricsManager>();
+    final plain = manager.payload?.plainLyrics?.trim() ?? '';
+    return plain.isNotEmpty || manager.originalSyncedLines.isNotEmpty;
   }
 
   bool get _hasTranslationLyrics {
-    final plain = _lyricsPayload?.translationPlainLyrics?.trim() ?? '';
-    return plain.isNotEmpty || _translationSyncedLyrics.isNotEmpty;
+    final manager = context.read<LyricsManager>();
+    final plain = manager.payload?.translationPlainLyrics?.trim() ?? '';
+    return plain.isNotEmpty || manager.translationSyncedLines.isNotEmpty;
   }
 
   String? _plainLyricsForCurrentMode() {
+    final manager = context.read<LyricsManager>();
     if (_lyricsDisplayMode == _LyricsDisplayMode.translation) {
-      final translation = _lyricsPayload?.translationPlainLyrics?.trim();
+      final translation = manager.payload?.translationPlainLyrics?.trim();
       return (translation == null || translation.isEmpty) ? null : translation;
     }
 
-    final original = _lyricsPayload?.plainLyrics?.trim();
+    final original = manager.payload?.plainLyrics?.trim();
     return (original == null || original.isEmpty) ? null : original;
   }
 
   void _setLyricsDisplayMode(_LyricsDisplayMode mode, Duration visualPosition) {
     if (mode == _lyricsDisplayMode) return;
 
+    final manager = context.read<LyricsManager>();
     final nextSyncedLyrics = mode == _LyricsDisplayMode.original
-        ? _originalSyncedLyrics
-        : _translationSyncedLyrics;
-    final nextActiveIndex = _activeIndexForPositionIn(
+        ? manager.originalSyncedLines
+        : manager.translationSyncedLines;
+    final nextActiveIndex = LyricsManager.activeIndexForPosition(
       nextSyncedLyrics,
       visualPosition,
       cachedIndex: -1,
@@ -534,7 +178,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
     setState(() {
       _lyricsDisplayMode = mode;
-      _syncedLyrics = nextSyncedLyrics;
       _activeLyricIndexCache = nextActiveIndex;
       _lastScrolledLyricIndex = nextActiveIndex;
       _lyricsAutoScrollPausedByUser = false;
@@ -805,26 +448,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
         final isLoadingNew = player.isLoadingNewSong;
 
-        if (song.id != _currentSongId) {
-          _currentSongId = song.id;
-          // Clear old lyrics synchronously so they don't display for the previous song
-          _lyricsPayload = null;
-          _syncedLyrics = const <_TimedLyricLine>[];
-          _originalSyncedLyrics = const <_TimedLyricLine>[];
-          _translationSyncedLyrics = const <_TimedLyricLine>[];
-          _lyricsSearchFailed = false;
-          _lyricsPermanentlyUnavailable = false;
-          _initialSearchFailed = false;
-          _isSearchingInBackground = false;
-          _loadingLyrics = true;
-          _currentStatusIndex = 0;
-          _statusTimer?.cancel();
-          _backgroundRetryTimer?.cancel();
-          _hardStopTimer?.cancel();
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (mounted) unawaited(_fetchLyrics(song));
-          });
-        }
+        // Automatically trigger lyrics request for active song if needed
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) {
+            context.read<LyricsManager>().requestLyrics(song);
+          }
+        });
 
         final downloads = context.watch<DownloadProvider>();
         final isDownloaded = downloads.isDownloaded(song.id);
@@ -1262,8 +891,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
 }
 
   Widget _buildLyricsPreviewCard(Song song, Duration visualPosition) {
-    if (_loadingLyrics && !_initialSearchFailed) {
-      final statusText = _loadingStatusSteps[_currentStatusIndex.clamp(0, _loadingStatusSteps.length - 1)];
+    final lyricsManager = context.watch<LyricsManager>();
+
+    if (lyricsManager.state == LyricsLoadState.searching) {
+      final statusText = lyricsManager.statusMessage;
       return Container(
         margin: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
@@ -1302,8 +933,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
       );
     }
 
-    if (_lyricsPayload == null) {
-      if (_lyricsPermanentlyUnavailable) {
+    if (lyricsManager.payload == null) {
+      if (lyricsManager.state == LyricsLoadState.unavailable) {
         return Container(
           margin: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
@@ -1323,7 +954,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
             ],
           ),
         );
-      } else if (_initialSearchFailed) {
+      } else if (lyricsManager.state == LyricsLoadState.retrying) {
         return Container(
           margin: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
@@ -1359,7 +990,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
       }
     }
 
-    if (_lyricsSearchFailed || _syncedLyrics.isEmpty) {
+    final syncedLyrics = _currentSyncedLyrics;
+    if (syncedLyrics.isEmpty) {
       return Container(
         margin: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
@@ -1382,7 +1014,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
 
     final activeIndex = _activeIndexForPosition(visualPosition);
-    final activeText = activeIndex >= 0 ? _syncedLyrics[activeIndex].text : "...";
+    final activeText = activeIndex >= 0 ? syncedLyrics[activeIndex].text : "...";
 
     return GestureDetector(
       onVerticalDragEnd: (details) {
@@ -1537,18 +1169,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
                       if (_hasTranslationLyrics)
                         IconButton(
                           icon: const Icon(Icons.translate_rounded, color: AppTheme.accentPurple),
-                          onPressed: () {
-                            setState(() {
-                              _lyricsDisplayMode = _lyricsDisplayMode == _LyricsDisplayMode.original
-                                  ? _LyricsDisplayMode.translation
-                                  : _LyricsDisplayMode.original;
-                              _syncedLyrics = _lyricsDisplayMode == _LyricsDisplayMode.original
-                                  ? _originalSyncedLyrics
-                                  : _translationSyncedLyrics;
-                              _activeLyricIndexCache = -1;
-                              _lastScrolledLyricIndex = -1;
-                            });
-                          },
+                          onPressed: () => _setLyricsDisplayMode(
+                            _lyricsDisplayMode == _LyricsDisplayMode.original
+                                ? _LyricsDisplayMode.translation
+                                : _LyricsDisplayMode.original,
+                            visualPosition,
+                          ),
                         )
                       else
                         const SizedBox(width: 48),
@@ -1568,9 +1194,20 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   Widget _buildLyricsView(Song song, Duration visualPosition) {
-    if (_loadingLyrics && !_initialSearchFailed) {
-      final statusText = _loadingStatusSteps[_currentStatusIndex.clamp(0, _loadingStatusSteps.length - 1)];
-      final progress = (_currentStatusIndex + 1) / _loadingStatusSteps.length;
+    final lyricsManager = context.watch<LyricsManager>();
+
+    if (lyricsManager.state == LyricsLoadState.searching) {
+      final statusText = lyricsManager.statusMessage;
+      // Derive a smooth progress value based on current search step index
+      const steps = [
+        '🎵 Searching lyrics...',
+        'Trying another source...',
+        'Matching song...',
+        '✓ Almost there...',
+      ];
+      final stepIdx = steps.indexOf(statusText);
+      final progress = stepIdx >= 0 ? (stepIdx + 1) / steps.length : 0.25;
+
       return Center(
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 32),
@@ -1615,8 +1252,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
       );
     }
 
-    if (_lyricsPayload == null) {
-      if (_lyricsPermanentlyUnavailable) {
+    if (lyricsManager.payload == null) {
+      if (lyricsManager.state == LyricsLoadState.unavailable) {
         return Center(
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 32),
@@ -1641,7 +1278,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                 const SizedBox(height: 24),
                 ElevatedButton(
                   onPressed: () {
-                    _fetchLyrics(song, forceRetry: true);
+                    context.read<LyricsManager>().requestLyrics(song, forceRetry: true);
                   },
                   style: ElevatedButton.styleFrom(
                     backgroundColor: AppTheme.accentPurple,
@@ -1657,7 +1294,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
             ),
           ),
         );
-      } else if (_initialSearchFailed) {
+      } else if (lyricsManager.state == LyricsLoadState.retrying) {
         return Center(
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 32),
@@ -1684,9 +1321,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                 ),
                 const SizedBox(height: 12),
                 Text(
-                  _isSearchingInBackground
-                      ? "Lyrics will appear automatically if found. We'll keep searching in the background while your music plays."
-                      : "Lyrics will appear automatically if found. We'll keep searching in the background.",
+                  "Lyrics will appear automatically if found. We'll keep searching in the background while your music plays.",
                   style: const TextStyle(
                     color: AppTheme.textSecondary,
                     fontSize: 13.5,
@@ -1700,82 +1335,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
       }
     }
 
-    if (_lyricsSearchFailed) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 32),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(
-                Icons.lyrics_outlined,
-                size: 48,
-                color: AppTheme.textMuted,
-              ),
-              const SizedBox(height: 16),
-              const Text(
-                "Lyrics aren't available for this song right now.",
-                style: TextStyle(
-                  color: AppTheme.textPrimary,
-                  fontSize: 16,
-                  fontWeight: FontWeight.w600,
-                ),
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 24),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  ElevatedButton(
-                    onPressed: () {
-                      _fetchLyrics(song, forceRetry: true);
-                    },
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: AppTheme.accentPurple,
-                      foregroundColor: Colors.white,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(20),
-                      ),
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 20,
-                        vertical: 12,
-                      ),
-                    ),
-                    child: const Text('Retry Now', style: TextStyle(fontWeight: FontWeight.bold)),
-                  ),
-                  const SizedBox(width: 16),
-                  OutlinedButton(
-                    onPressed: () {
-                      Fluttertoast.showToast(
-                        msg: 'Thank you! Missing lyrics reported.',
-                        gravity: ToastGravity.BOTTOM,
-                      );
-                    },
-                    style: OutlinedButton.styleFrom(
-                      side: BorderSide(color: Colors.white.withValues(alpha: 0.2)),
-                      foregroundColor: AppTheme.textPrimary,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(20),
-                      ),
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 16,
-                        vertical: 12,
-                      ),
-                    ),
-                    child: const Text('Report Missing Lyrics', style: TextStyle(fontWeight: FontWeight.bold)),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-      );
-    }
-
     final plainLyrics = _plainLyricsForCurrentMode();
     late final Widget content;
 
-    if (_syncedLyrics.isNotEmpty) {
+    final syncedLyrics = _currentSyncedLyrics;
+
+    if (syncedLyrics.isNotEmpty) {
       final activeIndex = _activeIndexForPosition(visualPosition);
 
       if (activeIndex != _lastScrolledLyricIndex) {
@@ -1801,10 +1366,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
                 controller: _lyricsScrollController,
                 physics: const BouncingScrollPhysics(),
                 padding: const EdgeInsets.symmetric(vertical: 120),
-                itemCount: _syncedLyrics.length,
+                itemCount: syncedLyrics.length,
                 itemExtent: _lyricLineExtent,
                 itemBuilder: (context, index) {
-                  final line = _syncedLyrics[index];
+                  final line = syncedLyrics[index];
                   final isActive = index == activeIndex;
                   final isPast = index < activeIndex;
                   final distance = (index - activeIndex).abs();
@@ -1978,13 +1543,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
 enum _LyricsDisplayMode { original, translation }
 
-@immutable
-class _TimedLyricLine {
-  final Duration time;
-  final String text;
-
-  const _TimedLyricLine({required this.time, required this.text});
-}
 
 class _ConversationToggleChip extends StatelessWidget {
   final bool active;

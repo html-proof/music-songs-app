@@ -111,7 +111,6 @@ class PlayerService {
   static bool _pausedByNetworkLoss = false;
   static Timer? _bufferingWatchdogTimer;
   static Timer? _loadingWatchdogTimer;
-  static String? _lastLyricsPrefetchedSongId;
   static StreamSubscription<PlayerState>? _playerStateSubscription;
   static bool _isNetworkAvailable = true;
   static bool _wasExternalOutputBeforeInterrupt = false;
@@ -876,19 +875,6 @@ class PlayerService {
     });
 
     _playerStateSubscription ??= _player.playerStateStream.listen((state) {
-      if (state.playing &&
-          (state.processingState == ProcessingState.ready ||
-              state.processingState == ProcessingState.buffering)) {
-        final song = _currentSong;
-        if (song != null && song.id != _lastLyricsPrefetchedSongId) {
-          _lastLyricsPrefetchedSongId = song.id;
-          LyricsService.prefetchLyricsForSong(song);
-          final index = _currentIndex;
-          if (index != -1 && index + 1 < _queue.length) {
-            LyricsService.prefetchLyricsForSong(_queue[index + 1]);
-          }
-        }
-      }
     });
 
     if (_isAndroid) {
@@ -1781,7 +1767,6 @@ class PlayerService {
     _resolvingSong = song;
     _resolvingSongController.add(song);
     _isLoadingNewSong = true;
-    LyricsService.prefetchLyricsForSong(song);
 
     try {
       await _player.stop();
@@ -4031,7 +4016,6 @@ class PlayerService {
 
   static void _resetRuntimePlaybackState() {
     _currentSong = null;
-    _lastLyricsPrefetchedSongId = null;
     _queue.clear();
     _queuePlaybackSourceKeys.clear();
     _currentIndex = -1;
@@ -4997,7 +4981,6 @@ class PlayerService {
     _volumeSubscription = null;
     _indexSubscription = null;
     _playerStateSubscription = null;
-    _lastLyricsPrefetchedSongId = null;
     _interruptionSubscription = null;
     _becomingNoisySubscription = null;
     _errorSubscription = null;

@@ -121,11 +121,8 @@ class SearchProvider extends ChangeNotifier {
   List<Album> _albums = [];
   List<Artist> _artists = [];
   List<UserPlaylist> _playlists = [];
-  List<Song> _downloadedSongs = [];
-  List<dynamic> _offlineResults = [];
   List<String> _recentSearches = [];
   List<String> _searchRecommendations = [];
-  dynamic _topResult;
   bool _loading = false;
   String _query = '';
   int _page = 1;
@@ -149,9 +146,6 @@ class SearchProvider extends ChangeNotifier {
   List<Album> get albums => _albums;
   List<Artist> get artists => _artists;
   List<UserPlaylist> get playlists => _playlists;
-  List<Song> get downloadedSongs => _downloadedSongs;
-  List<dynamic> get offlineResults => _offlineResults;
-  dynamic get topResult => _topResult;
   List<String> get recentSearches => _recentSearches;
   List<String> get searchRecommendations => _searchRecommendations;
   // Backward compatibility getter
@@ -311,17 +305,7 @@ class SearchProvider extends ChangeNotifier {
   }
 
   String _normalize(String s) {
-    var str = s.trim().toLowerCase();
-    
-    // Remove common accents
-    const withAccents = 'ÀÁÂÃÄÅàáâãäåÒÓÔÕÕÖØòóôõöøÈÉÊËèéêëðÇçÌÍÎÏìíîïÙÚÛÜùúûüÑñÝýÿ';
-    const withoutAccents = 'AAAAAAaaaaaaOOOOOOOoooooooEEEEeeeedCcIIIIiiiiUUUUuuuNnYyy';
-    
-    for (int i = 0; i < withAccents.length; i++) {
-      str = str.replaceAll(withAccents[i], withoutAccents[i]);
-    }
-    
-    return str.replaceAll(RegExp(r'\s+'), ' ');
+    return s.trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
   }
 
   String _compact(String value) {
@@ -372,18 +356,12 @@ class SearchProvider extends ChangeNotifier {
     required List<Album> albums,
     required List<Artist> artists,
     required List<UserPlaylist> playlists,
-    required List<Song> downloadedSongs,
-    required List<dynamic> offlineResults,
-    required dynamic topResult,
   }) {
     _queryCache[key] = _CachedSearchSnapshot(
       songs: List<Song>.from(songs),
       albums: List<Album>.from(albums),
       artists: List<Artist>.from(artists),
       playlists: List<UserPlaylist>.from(playlists),
-      downloadedSongs: List<Song>.from(downloadedSongs),
-      offlineResults: List<dynamic>.from(offlineResults),
-      topResult: topResult,
       storedAt: DateTime.now(),
     );
 
@@ -425,50 +403,76 @@ class SearchProvider extends ChangeNotifier {
     final requestId = ++_activeRequestId;
     notifyListeners();
 
-    // Refresh offline index
-    await _refreshOfflineIndexes();
-    if (requestId != _activeRequestId) return;
+    if (_offlineMode) {
+      await _refreshOfflineIndexes();
+      if (requestId != _activeRequestId) return;
 
-    // Prepare sets for fast lookups
-    final downloadedSongsList = await DownloadService.getDownloadedSongs();
-    final downloadedSongIds = downloadedSongsList.map((s) => s.id).toSet();
-    final offlineSongIds = _offlineSongIds;
-    final offlineAlbumIds = _offlineAlbumIds;
+      final offlineSongs = _sanitizeSongs(
+        _localSongIndex
+            .where((song) => _offlineSongIds.contains(song.id))
+            .toList(growable: false),
+      );
+      final offlineAlbums = _sanitizeAlbums(
+        _localAlbumIndex
+            .where((album) => _offlineAlbumIds.contains(album.id))
+            .toList(growable: false),
+      );
+      final offlineArtists = _localArtistIndex;
 
-    // Fetch listening history in parallel
-    List<dynamic> historyData = [];
-    try {
-      historyData = await ApiService.getHistory(type: 'play', limit: 80);
-    } catch (e) {
-      debugPrint('History fetch error: $e');
-    }
-    if (requestId != _activeRequestId) return;
+      final localPlaylists = await PlaylistService.getPlaylists();
+      final matchingLocalPlaylists = localPlaylists.where((p) {
+        final nameMatch = p.name.toLowerCase().contains(normalizedQuery);
+        final descMatch = p.description?.toLowerCase().contains(normalizedQuery) ?? false;
+        return nameMatch || descMatch;
+      }).toList();
 
-    final historySongIds = historyData.map((h) => (h['songId'] ?? h['id'] ?? '').toString()).toSet();
-    final Map<String, int> historyLangs = {};
-    final Map<String, int> historyArtists = {};
-    for (final h in historyData) {
-      final lang = normalizeLanguage(h['language'] ?? '');
-      if (lang.isNotEmpty) historyLangs[lang] = (historyLangs[lang] ?? 0) + 1;
-      
-      final artistName = h['artist']?.toString().toLowerCase().trim();
-      if (artistName != null && artistName.isNotEmpty) {
-        historyArtists[artistName] = (historyArtists[artistName] ?? 0) + 1;
-      }
-    }
-
-    // 1. Instant local search feedback
-    final localSongs = _searchLocalSongs(normalizedQuery, downloadedSongIds, offlineSongIds);
-    final localAlbums = _searchLocalAlbums(normalizedQuery, offlineAlbumIds);
-
-    if (localSongs.isNotEmpty || localAlbums.isNotEmpty) {
-      _songs = localSongs;
-      _albums = localAlbums;
+      _songs = _rankAndMerge<Song>(
+        local: offlineSongs,
+        network: const <Song>[],
+        query: normalizedQuery,
+        getName: (s) => s.name,
+        getArtist: (s) => s.artist ?? '',
+        getLanguage: (s) => s.language ?? '',
+        getQualityScore: (s) => _computeSongQuality(s),
+        getId: (s) => s.id,
+      );
+      _albums = _rankAndMerge<Album>(
+        local: offlineAlbums,
+        network: const <Album>[],
+        query: normalizedQuery,
+        getName: (a) => a.name,
+        getArtist: (a) => a.artist ?? '',
+        getLanguage: (a) => a.language ?? '',
+        getQualityScore: (a) => _computeAlbumQuality(a),
+        getId: (a) => a.id,
+      );
+      _artists = _rankAndMerge<Artist>(
+        local: offlineArtists,
+        network: const <Artist>[],
+        query: normalizedQuery,
+        getName: (art) => art.name,
+        getArtist: (art) => '',
+        getLanguage: (art) => '',
+        getQualityScore: (art) => 1.0,
+        getId: (art) => art.id,
+      );
+      _playlists = _rankAndMerge<UserPlaylist>(
+        local: matchingLocalPlaylists,
+        network: const <UserPlaylist>[],
+        query: normalizedQuery,
+        getName: (p) => p.name,
+        getArtist: (p) => p.description ?? '',
+        getLanguage: (p) => '',
+        getQualityScore: (p) => p.songs.length.toDouble(),
+        getId: (p) => p.id,
+      );
+      _searchRecommendations = _buildRecommendations(normalizedQuery);
+      _hasMore = false;
       _loading = false;
       notifyListeners();
+      return;
     }
 
-    // 2. Cache check
     final cacheKey = _searchCacheKey(normalizedQuery);
     final cached = _readQueryCache(cacheKey);
     if (cached != null) {
@@ -476,16 +480,12 @@ class SearchProvider extends ChangeNotifier {
       _albums = List<Album>.from(cached.albums);
       _artists = List<Artist>.from(cached.artists);
       _playlists = List<UserPlaylist>.from(cached.playlists);
-      _downloadedSongs = List<Song>.from(cached.downloadedSongs);
-      _offlineResults = List<dynamic>.from(cached.offlineResults);
-      _topResult = cached.topResult;
       _searchRecommendations = _buildRecommendations(normalizedQuery);
       _loading = false;
       notifyListeners();
       return;
     }
 
-    // Check if query is URL
     final isUrl =
         RegExp(r'^https?://').hasMatch(normalizedQuery) ||
         normalizedQuery.contains('spotify.com') ||
@@ -507,595 +507,520 @@ class SearchProvider extends ChangeNotifier {
           _songs = result.matched.map((m) => m.song).toList();
           _albums = [];
           _artists = [];
-          _playlists = [];
-          _downloadedSongs = _songs.where((s) => downloadedSongIds.contains(s.id)).toList();
-          _offlineResults = [];
           _searchRecommendations = [];
           _hasMore = false;
 
-          _topResult = _songs.isNotEmpty ? _songs.first : null;
           _writeQueryCache(
             cacheKey,
             songs: _songs,
             albums: _albums,
             artists: _artists,
             playlists: _playlists,
-            downloadedSongs: _downloadedSongs,
-            offlineResults: _offlineResults,
-            topResult: _topResult,
           );
           _saveRecentSearch(query.trim()).catchError((_) {});
 
           _loading = false;
           notifyListeners();
           return;
+        } else if (result.unmatched.isNotEmpty || result.hasError) {
+          // If URL was parsed but no matches found, or server returned error
+          _songs = [];
+          _albums = [];
+          _artists = [];
+          _searchRecommendations = [];
+          _hasMore = false;
+          _loading = false;
+          notifyListeners();
+          return;
         }
       } catch (e) {
         debugPrint('URL import failed in search: $e');
+        // Let it fall through to normal search if URL import crashed
       }
     }
 
-    // 3. Search in parallel
-    Map<String, List<dynamic>> onlineData = {'songs': [], 'albums': [], 'artists': []};
-    List<UserPlaylist> localPlaylists = [];
-    
-    if (!_offlineMode) {
-      try {
-        final results = await Future.wait([
-          ApiService.globalSearch(
-            normalizedQuery,
+    // 1. First, try local search for instant feedback
+    final localSongs = _searchLocalSongs(normalizedQuery);
+    final localAlbums = _searchLocalAlbums(normalizedQuery);
+
+    if (localSongs.isNotEmpty || localAlbums.isNotEmpty) {
+      _songs = localSongs;
+      _albums = localAlbums;
+      _loading = false;
+      notifyListeners();
+      // We still proceed to network search to get fresh/more results
+    }
+
+    try {
+      // 2. Fetch from Network
+      var data = await ApiService.globalSearch(
+        normalizedQuery,
+        preferredLanguages: _preferredLanguages,
+        limit: _maxSearchResults,
+      );
+      if (requestId != _activeRequestId) return;
+
+      var networkSongs = _sanitizeSongs(
+        _parseList<Song>(data['songs'] ?? const [], Song.fromJson),
+      );
+      var networkAlbums = _sanitizeAlbums(
+        _parseList<Album>(data['albums'] ?? const [], Album.fromJson),
+      );
+      var networkArtists = _parseList<Artist>(
+        data['artists'] ?? const [],
+        Artist.fromJson,
+      );
+
+      // Relax query once when nothing is found, so users don't hit "no results" too early.
+      if (networkSongs.isEmpty) {
+        final relaxedQuery = _buildRelaxedQuery(normalizedQuery);
+        if (relaxedQuery.isNotEmpty && relaxedQuery != normalizedQuery) {
+          data = await ApiService.globalSearch(
+            relaxedQuery,
             preferredLanguages: _preferredLanguages,
             limit: _maxSearchResults,
-          ).catchError((e) {
-            debugPrint('API search error: $e');
-            return <String, List<dynamic>>{};
-          }),
-          PlaylistService.getPlaylists().catchError((e) {
-            debugPrint('Playlists search error: $e');
-            return <UserPlaylist>[];
-          }),
-        ]);
-        if (requestId != _activeRequestId) return;
-        onlineData = results[0] as Map<String, List<dynamic>>;
-        localPlaylists = results[1] as List<UserPlaylist>;
-      } catch (e) {
-        debugPrint('Parallel search error: $e');
+          );
+          if (requestId != _activeRequestId) return;
+
+          final relaxedSongs = _sanitizeSongs(
+            _parseList<Song>(data['songs'] ?? const [], Song.fromJson),
+          );
+          if (relaxedSongs.isNotEmpty) {
+            networkSongs = relaxedSongs;
+            networkAlbums = _sanitizeAlbums(
+              _parseList<Album>(data['albums'] ?? const [], Album.fromJson),
+            );
+            networkArtists = _parseList<Artist>(
+              data['artists'] ?? const [],
+              Artist.fromJson,
+            );
+          }
+        }
       }
-    } else {
-      try {
-        localPlaylists = await PlaylistService.getPlaylists();
-      } catch (e) {
-        debugPrint('Offline playlists error: $e');
+
+      if (networkSongs.length < _minSongsPerSearch) {
+        try {
+          final pageTwoSongsRaw = await ApiService.searchSongs(
+            normalizedQuery,
+            page: 2,
+            preferredLanguages: _preferredLanguages,
+            limit: _maxSearchResults,
+          );
+          final pageTwoSongs = _parseList<Song>(pageTwoSongsRaw, Song.fromJson);
+          networkSongs = _sanitizeSongs(
+            _mergeUniqueItems<Song>(
+              existing: networkSongs,
+              incoming: pageTwoSongs,
+              getId: (song) => song.id,
+            ),
+          );
+        } catch (e) {
+          debugPrint('Supplemental song fetch failed: $e');
+        }
       }
-    }
 
-    if (requestId != _activeRequestId) return;
+      if (networkAlbums.length < _minAlbumsPerSearch) {
+        try {
+          final albumPayload = await ApiService.getAlbums(
+            query: normalizedQuery,
+            preferredLanguages: _preferredLanguages,
+          );
+          final albumRaw = _extractAlbumItems(albumPayload);
+          final supplementalAlbums = _parseList<Album>(
+            albumRaw,
+            Album.fromJson,
+          );
+          networkAlbums = _sanitizeAlbums(
+            _mergeUniqueItems<Album>(
+              existing: networkAlbums,
+              incoming: supplementalAlbums,
+              getId: (album) => album.id,
+            ),
+          );
+        } catch (e) {
+          debugPrint('Supplemental album fetch failed: $e');
+        }
+      }
 
-    // Parse all raw objects
-    final parsedOnlineSongs = _parseList<Song>(onlineData['songs'] ?? [], Song.fromJson);
-    final parsedOnlineAlbums = _parseList<Album>(onlineData['albums'] ?? [], Album.fromJson);
-    final parsedOnlineArtists = _parseList<Artist>(onlineData['artists'] ?? [], Artist.fromJson);
+      if (networkAlbums.length < _minAlbumsPerSearch &&
+          networkSongs.isNotEmpty) {
+        final derivedAlbums = _deriveAlbumsFromSongs(networkSongs);
+        networkAlbums = _sanitizeAlbums(
+          _mergeUniqueItems<Album>(
+            existing: networkAlbums,
+            incoming: derivedAlbums,
+            getId: (album) => album.id,
+          ),
+        );
+      }
 
-    // Merge offline & downloaded songs/albums/artists with online results
-    final List<Song> rawSongs = [
-      ...parsedOnlineSongs,
-      ...downloadedSongsList,
-      ..._localSongIndex.where((s) => offlineSongIds.contains(s.id)),
-    ];
-    final List<Album> rawAlbums = [
-      ...parsedOnlineAlbums,
-      ..._localAlbumIndex.where((a) => offlineAlbumIds.contains(a.id)),
-    ];
-    final List<Artist> rawArtists = [
-      ...parsedOnlineArtists,
-      ..._localArtistIndex,
-    ];
-    final List<UserPlaylist> rawPlaylists = localPlaylists.where((p) {
-      final nameMatch = p.name.toLowerCase().contains(normalizedQuery);
-      final descMatch = p.description?.toLowerCase().contains(normalizedQuery) ?? false;
-      return nameMatch || descMatch;
-    }).toList();
-
-    // Deduplicate songs, albums, and artists
-    final dedupedSongs = _mergeAndDeduplicateSongs(rawSongs, downloadedSongIds);
-    final dedupedAlbums = _mergeAndDeduplicateAlbums(rawAlbums);
-    final dedupedArtists = _mergeAndDeduplicateArtists(rawArtists);
-
-    // Filter by preferred language
-    final filteredSongs = dedupedSongs.where((s) => _isValidSongForSearch(s) && _matchesPreferredLanguage(s.language)).toList();
-    final filteredAlbums = dedupedAlbums.where((a) => _isValidAlbumForSearch(a) && _matchesPreferredLanguage(a.language)).toList();
-
-    // 4. Calculate fuzzy scores
-    final songFuzzyScores = _buildFuzzyScores<Song>(
-      list: filteredSongs,
-      query: normalizedQuery,
-      getName: (s) => s.name,
-      getArtist: (s) => s.artist ?? '',
-      getId: (s) => s.id,
-    );
-    final albumFuzzyScores = _buildFuzzyScores<Album>(
-      list: filteredAlbums,
-      query: normalizedQuery,
-      getName: (a) => a.name,
-      getArtist: (a) => a.artist ?? '',
-      getId: (a) => a.id,
-    );
-    final artistFuzzyScores = _buildFuzzyScores<Artist>(
-      list: dedupedArtists,
-      query: normalizedQuery,
-      getName: (art) => art.name,
-      getArtist: (art) => '',
-      getId: (art) => art.id,
-    );
-    final playlistFuzzyScores = _buildFuzzyScores<UserPlaylist>(
-      list: rawPlaylists,
-      query: normalizedQuery,
-      getName: (p) => p.name,
-      getArtist: (p) => p.description ?? '',
-      getId: (p) => p.id,
-    );
-
-    // 5. Score every item
-    final Map<dynamic, double> scores = {};
-
-    for (final song in filteredSongs) {
-      scores[song] = _calculateRelevanceScore(
-        query: normalizedQuery,
-        name: song.name,
-        artist: song.artist,
-        album: song.album,
-        language: song.language,
-        item: song,
-        downloadedSongIds: downloadedSongIds,
-        offlineSongIds: offlineSongIds,
-        offlineAlbumIds: offlineAlbumIds,
-        historySongIds: historySongIds,
-        historyLangs: historyLangs,
-        historyArtists: historyArtists,
-        fuzzySimilarity: songFuzzyScores[song.id] ?? 0.0,
+      _addToLocalIndex(
+        songs: networkSongs,
+        albums: networkAlbums,
+        artists: networkArtists,
       );
-    }
 
-    for (final album in filteredAlbums) {
-      scores[album] = _calculateRelevanceScore(
+      // 3. Smart Ranking & Merging
+      _songs = _rankAndMerge<Song>(
+        local: localSongs,
+        network: _sanitizeSongs(networkSongs),
         query: normalizedQuery,
-        name: album.name,
-        artist: album.artist,
-        language: album.language,
-        item: album,
-        downloadedSongIds: downloadedSongIds,
-        offlineSongIds: offlineSongIds,
-        offlineAlbumIds: offlineAlbumIds,
-        historySongIds: historySongIds,
-        historyLangs: historyLangs,
-        historyArtists: historyArtists,
-        fuzzySimilarity: albumFuzzyScores[album.id] ?? 0.0,
+        getName: (s) => s.name,
+        getArtist: (s) => s.artist ?? '',
+        getLanguage: (s) => s.language ?? '',
+        getQualityScore: (s) => _computeSongQuality(s),
+        getId: (s) => s.id,
+        minCount: _minSongsPerSearch,
       );
-    }
 
-    for (final artist in dedupedArtists) {
-      scores[artist] = _calculateRelevanceScore(
+      _albums = _rankAndMerge<Album>(
+        local: localAlbums,
+        network: _sanitizeAlbums(networkAlbums),
         query: normalizedQuery,
-        name: artist.name,
-        item: artist,
-        downloadedSongIds: downloadedSongIds,
-        offlineSongIds: offlineSongIds,
-        offlineAlbumIds: offlineAlbumIds,
-        historySongIds: historySongIds,
-        historyLangs: historyLangs,
-        historyArtists: historyArtists,
-        fuzzySimilarity: artistFuzzyScores[artist.id] ?? 0.0,
+        getName: (a) => a.name,
+        getArtist: (a) => a.artist ?? '',
+        getLanguage: (a) => a.language ?? '',
+        getQualityScore: (a) => _computeAlbumQuality(a),
+        getId: (a) => a.id,
+        minCount: _minAlbumsPerSearch,
       );
-    }
 
-    for (final playlist in rawPlaylists) {
-      scores[playlist] = _calculateRelevanceScore(
+      _artists = networkArtists.take(_maxSearchResults).toList(growable: false);
+
+      final localPlaylists = await PlaylistService.getPlaylists();
+      final matchingLocalPlaylists = localPlaylists.where((p) {
+        final nameMatch = p.name.toLowerCase().contains(normalizedQuery);
+        final descMatch = p.description?.toLowerCase().contains(normalizedQuery) ?? false;
+        return nameMatch || descMatch;
+      }).toList();
+
+      _playlists = _rankAndMerge<UserPlaylist>(
+        local: matchingLocalPlaylists,
+        network: const <UserPlaylist>[],
         query: normalizedQuery,
-        name: playlist.name,
-        item: playlist,
-        downloadedSongIds: downloadedSongIds,
-        offlineSongIds: offlineSongIds,
-        offlineAlbumIds: offlineAlbumIds,
-        historySongIds: historySongIds,
-        historyLangs: historyLangs,
-        historyArtists: historyArtists,
-        fuzzySimilarity: playlistFuzzyScores[playlist.id] ?? 0.0,
+        getName: (p) => p.name,
+        getArtist: (p) => p.description ?? '',
+        getLanguage: (p) => '',
+        getQualityScore: (p) => p.songs.length.toDouble(),
+        getId: (p) => p.id,
       );
-    }
 
-    // 6. Sort and assign
-    filteredSongs.sort((a, b) => (scores[b] ?? 0.0).compareTo(scores[a] ?? 0.0));
-    filteredAlbums.sort((a, b) => (scores[b] ?? 0.0).compareTo(scores[a] ?? 0.0));
-    dedupedArtists.sort((a, b) => (scores[b] ?? 0.0).compareTo(scores[a] ?? 0.0));
-    rawPlaylists.sort((a, b) => (scores[b] ?? 0.0).compareTo(scores[a] ?? 0.0));
+      _searchRecommendations = _buildRecommendations(normalizedQuery);
 
-    _songs = filteredSongs.take(_maxSearchResults).toList();
-    _albums = filteredAlbums.take(_maxSearchResults).toList();
-    _artists = dedupedArtists.take(_maxSearchResults).toList();
-    _playlists = rawPlaylists.take(_maxSearchResults).toList();
+      if (_songs.length < 10) _hasMore = false;
+      _writeQueryCache(
+        cacheKey,
+        songs: _songs,
+        albums: _albums,
+        artists: _artists,
+        playlists: _playlists,
+      );
+      _saveRecentSearch(query.trim()).catchError((_) {});
 
-    // 7. Populating Downloaded Songs & Offline Results
-    _downloadedSongs = _songs.where((s) => downloadedSongIds.contains(s.id)).toList();
-
-    final List<dynamic> offResults = [];
-    offResults.addAll(_songs.where((s) => offlineSongIds.contains(s.id) && !downloadedSongIds.contains(s.id)));
-    offResults.addAll(_albums.where((a) => offlineAlbumIds.contains(a.id)));
-    offResults.addAll(_artists.where((art) => _localArtistIndex.any((la) => la.name.toLowerCase() == art.name.toLowerCase())));
-    offResults.sort((a, b) => (scores[b] ?? 0.0).compareTo(scores[a] ?? 0.0));
-    _offlineResults = offResults.take(_maxSearchResults).toList();
-
-    // Select dynamic Top Result across Songs, Artists, Albums, and Playlists
-    dynamic bestCandidate;
-    double bestScore = -1.0;
-    
-    if (_songs.isNotEmpty) {
-      final firstSong = _songs.first;
-      final score = scores[firstSong] ?? 0.0;
-      if (score > bestScore) {
-        bestScore = score;
-        bestCandidate = firstSong;
+      ApiService.logActivity('search', {
+        'query': normalizedQuery,
+      }).catchError((_) {});
+    } catch (e) {
+      if (requestId != _activeRequestId) return;
+      debugPrint('Search error: $e');
+      if (_songs.isEmpty) {
+        _songs = [];
+        _albums = [];
+        _artists = [];
+      }
+    } finally {
+      if (requestId == _activeRequestId) {
+        _loading = false;
+        notifyListeners();
       }
     }
-    if (_albums.isNotEmpty) {
-      final firstAlbum = _albums.first;
-      final score = scores[firstAlbum] ?? 0.0;
-      if (score > bestScore) {
-        bestScore = score;
-        bestCandidate = firstAlbum;
-      }
-    }
-    if (_artists.isNotEmpty) {
-      final firstArtist = _artists.first;
-      final score = scores[firstArtist] ?? 0.0;
-      if (score > bestScore) {
-        bestScore = score;
-        bestCandidate = firstArtist;
-      }
-    }
-    if (_playlists.isNotEmpty) {
-      final firstPlaylist = _playlists.first;
-      final score = scores[firstPlaylist] ?? 0.0;
-      if (score > bestScore) {
-        bestScore = score;
-        bestCandidate = firstPlaylist;
-      }
-    }
-    _topResult = bestCandidate;
-
-    // Save recommendations and recent search
-    _searchRecommendations = _buildRecommendations(normalizedQuery);
-    _saveRecentSearch(query.trim()).catchError((_) {});
-
-    _writeQueryCache(
-      cacheKey,
-      songs: _songs,
-      albums: _albums,
-      artists: _artists,
-      playlists: _playlists,
-      downloadedSongs: _downloadedSongs,
-      offlineResults: _offlineResults,
-      topResult: _topResult,
-    );
-
-    if (_songs.length < 10) _hasMore = false;
-    _loading = false;
-    notifyListeners();
   }
 
-  double _calculateRelevanceScore({
+  List<T> _rankAndMerge<T>({
+    required List<T> local,
+    required List<T> network,
     required String query,
-    required String name,
-    String? artist,
-    String? album,
-    String? language,
-    required dynamic item,
-    required Set<String> downloadedSongIds,
-    required Set<String> offlineSongIds,
-    required Set<String> offlineAlbumIds,
-    required Set<String> historySongIds,
-    required Map<String, int> historyLangs,
-    required Map<String, int> historyArtists,
-    required double fuzzySimilarity,
+    required String Function(T) getName,
+    required String Function(T) getArtist,
+    required String Function(T) getLanguage,
+    required double Function(T) getQualityScore,
+    required String Function(T) getId,
+    int minCount = 0,
   }) {
-    double score = 0.0;
-
-    final qNorm = _normalize(query);
-    final nameNorm = _normalize(name);
-    final artistNorm = artist != null ? _normalize(artist) : '';
-    final albumNorm = album != null ? _normalize(album) : '';
-    final langNorm = language != null ? _normalizeLanguage(language) : '';
-
-    if (qNorm.isEmpty) return 0.0;
-
-    // 1. Exact Title Match (100)
-    if (nameNorm == qNorm) {
-      score += 100.0;
-    }
-    // 2. Starts With Query (90)
-    else if (nameNorm.startsWith(qNorm)) {
-      score += 90.0;
+    final networkRankById = <String, int>{};
+    for (var index = 0; index < network.length; index++) {
+      final id = getId(network[index]).trim();
+      if (id.isEmpty || networkRankById.containsKey(id)) continue;
+      networkRankById[id] = index;
     }
 
-    // 3. Artist Match (85)
-    if (item is Artist) {
-      if (nameNorm == qNorm || nameNorm.startsWith(qNorm)) {
-        score += 85.0;
+    final localRankById = <String, int>{};
+    for (var index = 0; index < local.length; index++) {
+      final id = getId(local[index]).trim();
+      if (id.isEmpty || localRankById.containsKey(id)) continue;
+      localRankById[id] = index;
+    }
+
+    final list = <T>[];
+    final seenIds = <String>{};
+    for (final item in network) {
+      final id = getId(item).trim();
+      if (id.isEmpty || !seenIds.add(id)) continue;
+      list.add(item);
+    }
+    for (final item in local) {
+      final id = getId(item).trim();
+      if (id.isEmpty || !seenIds.add(id)) continue;
+      list.add(item);
+    }
+
+    if (list.isEmpty) return <T>[];
+    final fuzzyScores = _buildFuzzyScores<T>(
+      list: list,
+      query: query,
+      getName: getName,
+      getArtist: getArtist,
+      getId: getId,
+    );
+
+    final compactQuery = _compact(query);
+    final rawQueryTokens = _tokenize(query);
+    final queryTokens = rawQueryTokens
+        .where((token) => !_searchNoiseWords.contains(token))
+        .toList(growable: false);
+    final effectiveQueryTokens = queryTokens.isNotEmpty
+        ? queryTokens
+        : rawQueryTokens;
+    final queryWantsDerivative = _containsDerivativeKeyword(query);
+    final ranked = <_RankedCandidate<T>>[];
+    final fallback = <_RankedCandidate<T>>[];
+
+    for (final item in list) {
+      final id = getId(item);
+      final name = _normalize(getName(item));
+      final artist = _normalize(getArtist(item));
+      final language = getLanguage(item);
+      if (!_matchesPreferredLanguage(language)) continue;
+
+      final targetTokens = _tokenize('$name $artist');
+      final fuzzyBoost = (fuzzyScores[id] ?? 0.0).clamp(0.0, 1.0);
+
+      // Support for isOfficial in both Song and Album models.
+      bool isOfficial = true;
+      try {
+        isOfficial = (item as dynamic).isOfficial ?? true;
+      } catch (_) {}
+
+      final match = _scoreMatch(
+        query: query,
+        compactQuery: compactQuery,
+        queryTokens: effectiveQueryTokens,
+        name: name,
+        artist: artist,
+        targetTokens: targetTokens,
+        fuzzyBoost: fuzzyBoost,
+        queryWantsDerivative: queryWantsDerivative,
+      );
+
+      final sourceRank =
+          networkRankById[id] ?? (1000 + (localRankById[id] ?? 0));
+
+      final candidate = _RankedCandidate<T>(
+        item: item,
+        languageBucket: 0,
+        matchTier: match.tier,
+        score:
+            match.score +
+            (isOfficial ? 14.0 : -4.0) +
+            _computeSearchPriorityBoost(item) +
+            _computeSourceOrderBoost(sourceRank),
+        qualityScore: getQualityScore(item),
+        sourceRank: sourceRank,
+        tieBreaker: name,
+        isOfficial: isOfficial,
+      );
+      if (match.tier > 4) {
+        fallback.add(candidate);
+      } else {
+        ranked.add(candidate);
       }
+    }
+
+    ranked.sort((a, b) {
+      final tierCmp = a.matchTier.compareTo(b.matchTier);
+      if (tierCmp != 0) return tierCmp;
+
+      final scoreCmp = b.score.compareTo(a.score);
+      if (scoreCmp != 0) return scoreCmp;
+
+      final sourceCmp = a.sourceRank.compareTo(b.sourceRank);
+      if (sourceCmp != 0) return sourceCmp;
+
+      if (a.isOfficial != b.isOfficial) {
+        return a.isOfficial ? -1 : 1;
+      }
+
+      final qualityCmp = b.qualityScore.compareTo(a.qualityScore);
+      if (qualityCmp != 0) return qualityCmp;
+
+      return a.tieBreaker.compareTo(b.tieBreaker);
+    });
+
+    final desiredCount = minCount.clamp(0, _maxSearchResults);
+    final selected = ranked.take(_maxSearchResults).toList(growable: true);
+
+    if (selected.length < desiredCount && fallback.isNotEmpty) {
+      fallback.sort((a, b) {
+        final sourceCmp = a.sourceRank.compareTo(b.sourceRank);
+        if (sourceCmp != 0) return sourceCmp;
+        return a.tieBreaker.compareTo(b.tieBreaker);
+      });
+      for (final candidate in fallback) {
+        if (selected.length >= desiredCount) break;
+        selected.add(candidate);
+      }
+    }
+
+    return selected
+        .take(_maxSearchResults)
+        .map((candidate) => candidate.item)
+        .toList(growable: false);
+  }
+
+  List<Song> _searchLocalSongs(String query) {
+    final safeLocalSongs = _sanitizeSongs(_localSongIndex);
+    return _rankAndMerge<Song>(
+      local: safeLocalSongs,
+      network: const <Song>[],
+      query: query,
+      getName: (s) => s.name,
+      getArtist: (s) => s.artist ?? '',
+      getLanguage: (s) => s.language ?? '',
+      getQualityScore: (s) => _computeSongQuality(s),
+      getId: (s) => s.id,
+    );
+  }
+
+  double _computeSongQuality(Song s) {
+    double score = 10.0;
+    if ((s.imageUrl ?? '').isNotEmpty) score += 5.0;
+    if (s.duration != null) {
+      if (s.duration! >= _idealSongDurationMinSeconds &&
+          s.duration! <= _idealSongDurationMaxSeconds) {
+        score += 10.0;
+      } else if (s.duration! >= _minSongDurationSeconds &&
+          s.duration! <= _maxSongDurationSeconds) {
+        score += 4.0;
+      } else {
+        score -= 20.0;
+      }
+    }
+    if (s.year != null) score += 2.0;
+    if (_isLikelyMusicType(s.type)) score += 3.0;
+    if (s.isOfficial) score += 8.0;
+    if (_containsBlockedKeyword(
+      '${s.name} ${s.artist ?? ''} ${s.album ?? ''}',
+    )) {
+      score -= 40.0;
+    }
+    // Prioritize original versions over covers/remixes/karaoke etc.
+    if (_isOriginalVersion(s.name)) {
+      score += 15.0;
     } else {
-      if (artistNorm.isNotEmpty && (artistNorm == qNorm || artistNorm.startsWith(qNorm))) {
-        score += 85.0;
-      }
+      score -= 12.0;
     }
-
-    // 4. Album Match (80)
-    if (item is Album) {
-      if (nameNorm == qNorm || nameNorm.startsWith(qNorm)) {
-        score += 80.0;
-      }
-    } else if (item is Song) {
-      if (albumNorm.isNotEmpty && (albumNorm == qNorm || albumNorm.startsWith(qNorm))) {
-        score += 80.0;
-      }
-    }
-
-    // 5. Popularity (70)
-    double popularityFactor = 0.2;
-    if (item is Song) {
-      if (item.playCount != null) {
-        popularityFactor = (item.playCount! / 1000000.0).clamp(0.0, 1.0);
-      } else if (item.recommendationScore != null) {
-        popularityFactor = (item.recommendationScore! / 100.0).clamp(0.0, 1.0);
-      } else {
-        popularityFactor = item.isOfficial ? 0.6 : 0.2;
-      }
-    } else if (item is Album) {
-      if (item.playCount != null) {
-        popularityFactor = (item.playCount! / 500000.0).clamp(0.0, 1.0);
-      } else {
-        popularityFactor = item.isOfficial ? 0.6 : 0.2;
-      }
-    } else if (item is Artist) {
-      if (item.followerCount != null) {
-        popularityFactor = (item.followerCount! / 10000000.0).clamp(0.0, 1.0);
-      } else {
-        popularityFactor = item.isVerified ? 0.7 : 0.3;
-      }
-    } else if (item is UserPlaylist) {
-      popularityFactor = (item.songs.length / 50.0).clamp(0.0, 1.0);
-    }
-    score += 70.0 * popularityFactor;
-
-    // 6. User Listening History (60)
-    bool inHistory = false;
-    if (item is Song) {
-      inHistory = historySongIds.contains(item.id);
-    } else if (item is Artist) {
-      inHistory = historyArtists.containsKey(nameNorm);
-    } else if (item is Album) {
-      inHistory = historySongIds.any((id) => _localSongIndex.any((s) => s.id == id && s.album == item.name));
-    }
-    
-    if (inHistory) {
-      score += 60.0;
-    } else {
-      bool topLangOrArtist = false;
-      if (langNorm.isNotEmpty && historyLangs.containsKey(langNorm) && historyLangs[langNorm]! >= 3) {
-        topLangOrArtist = true;
-      }
-      if (artistNorm.isNotEmpty && historyArtists.containsKey(artistNorm) && historyArtists[artistNorm]! >= 3) {
-        topLangOrArtist = true;
-      }
-      if (topLangOrArtist) {
-        score += 30.0;
-      }
-    }
-
-    // 7. Preferred Language (50)
-    if (langNorm.isNotEmpty && _preferredLanguageSet.contains(langNorm)) {
-      score += 50.0;
-    }
-
-    // 8. Downloaded/Offline (40)
-    bool isOffline = false;
-    if (item is Song) {
-      isOffline = downloadedSongIds.contains(item.id) || offlineSongIds.contains(item.id);
-    } else if (item is Album) {
-      isOffline = offlineAlbumIds.contains(item.id);
-    } else if (item is Artist) {
-      isOffline = _localArtistIndex.any((art) => art.name.toLowerCase() == nameNorm);
-    }
-    if (isOffline) {
-      score += 40.0;
-    }
-
-    // 9. Fuzzy Match (30)
-    final nameContains = nameNorm.contains(qNorm);
-    final artistContains = artistNorm.contains(qNorm);
-    if (!nameContains && !artistContains && fuzzySimilarity >= 0.7) {
-      score += 30.0;
-    }
-
     return score;
   }
 
-  List<Song> _mergeAndDeduplicateSongs(List<Song> allSongs, Set<String> downloadedSongIds) {
-    final Map<String, Song> idMerged = {};
-    for (final song in allSongs) {
-      if (song.id.isEmpty) continue;
-      final existing = idMerged[song.id];
-      if (existing == null) {
-        idMerged[song.id] = song;
-      } else {
-        idMerged[song.id] = _mergeTwoSongs(existing, song, downloadedSongIds);
-      }
-    }
-
-    final Map<String, Song> sigMerged = {};
-    for (final song in idMerged.values) {
-      final sig = _songCoreSignature(song);
-      final existing = sigMerged[sig];
-      if (existing == null) {
-        sigMerged[sig] = song;
-      } else {
-        sigMerged[sig] = _mergeTwoSongs(existing, song, downloadedSongIds);
-      }
-    }
-
-    return sigMerged.values.toList();
-  }
-
-  Song _mergeTwoSongs(Song a, Song b, Set<String> downloadedSongIds) {
-    final isADownloaded = downloadedSongIds.contains(a.id);
-    final isBDownloaded = downloadedSongIds.contains(b.id);
-    
-    final primary = (isADownloaded || (!isBDownloaded && a.streamUrl != null && a.streamUrl!.isNotEmpty)) ? a : b;
-    final secondary = primary == a ? b : a;
-
-    return Song(
-      id: primary.id,
-      name: primary.name,
-      album: (primary.album ?? '').isNotEmpty ? primary.album : secondary.album,
-      albumId: (primary.albumId ?? '').isNotEmpty ? primary.albumId : secondary.albumId,
-      artist: (primary.artist ?? '').isNotEmpty ? primary.artist : secondary.artist,
-      imageUrl: (primary.imageUrl ?? '').isNotEmpty ? primary.imageUrl : secondary.imageUrl,
-      streamUrl: (primary.streamUrl ?? '').isNotEmpty ? primary.streamUrl : secondary.streamUrl,
-      language: (primary.language ?? '').isNotEmpty ? primary.language : secondary.language,
-      duration: primary.duration ?? secondary.duration,
-      year: (primary.year ?? '').isNotEmpty ? primary.year : secondary.year,
-      type: (primary.type ?? '').isNotEmpty ? primary.type : secondary.type,
-      isExplicit: primary.isExplicit || secondary.isExplicit,
-      isOfficial: primary.isOfficial || secondary.isOfficial,
-      recommendationScore: primary.recommendationScore ?? secondary.recommendationScore,
-      playCount: primary.playCount ?? secondary.playCount,
-      popularity: primary.popularity ?? secondary.popularity,
-    );
-  }
-
-  List<Album> _mergeAndDeduplicateAlbums(List<Album> albums) {
-    final Map<String, Album> idMerged = {};
-    for (final a in albums) {
-      if (a.id.isEmpty) continue;
-      final existing = idMerged[a.id];
-      if (existing == null) {
-        idMerged[a.id] = a;
-      } else {
-        idMerged[a.id] = _preferAlbum(existing, a);
-      }
-    }
-
-    final Map<String, Album> nameMerged = {};
-    for (final a in idMerged.values) {
-      final sig = '${a.name.toLowerCase().trim()}|${(a.artist ?? '').toLowerCase().trim()}';
-      final existing = nameMerged[sig];
-      if (existing == null) {
-        nameMerged[sig] = a;
-      } else {
-        nameMerged[sig] = _preferAlbum(existing, a);
-      }
-    }
-    return nameMerged.values.toList();
-  }
-
-  List<Artist> _mergeAndDeduplicateArtists(List<Artist> artists) {
-    final Map<String, Artist> idMerged = {};
-    for (final a in artists) {
-      if (a.id.isEmpty) continue;
-      final existing = idMerged[a.id];
-      if (existing == null) {
-        idMerged[a.id] = a;
-      } else {
-        final hasImage = (a.imageUrl ?? '').isNotEmpty;
-        final existingHasImage = (existing.imageUrl ?? '').isNotEmpty;
-        if (!existingHasImage && hasImage) {
-          idMerged[a.id] = a;
-        }
-      }
-    }
-
-    final Map<String, Artist> nameMerged = {};
-    for (final a in idMerged.values) {
-      final nameKey = a.name.toLowerCase().trim();
-      final existing = nameMerged[nameKey];
-      if (existing == null) {
-        nameMerged[nameKey] = a;
-      } else {
-        final hasImage = (a.imageUrl ?? '').isNotEmpty;
-        final existingHasImage = (existing.imageUrl ?? '').isNotEmpty;
-        if (!existingHasImage && hasImage) {
-          nameMerged[nameKey] = a;
-        }
-      }
-    }
-    return nameMerged.values.toList();
-  }
-
-  List<Song> _searchLocalSongs(String query, Set<String> downloadedSongIds, Set<String> offlineSongIds) {
-    final normalizedQuery = _normalize(query);
-    final songs = _localSongIndex.where((s) => _isValidSongForSearch(s) && _matchesPreferredLanguage(s.language)).toList();
-    
-    final fuzzyScores = _buildFuzzyScores<Song>(
-      list: songs,
-      query: normalizedQuery,
-      getName: (s) => s.name,
-      getArtist: (s) => s.artist ?? '',
-      getId: (s) => s.id,
-    );
-
-    final Map<Song, double> scores = {};
-    for (final song in songs) {
-      scores[song] = _calculateRelevanceScore(
-        query: normalizedQuery,
-        name: song.name,
-        artist: song.artist,
-        album: song.album,
-        language: song.language,
-        item: song,
-        downloadedSongIds: downloadedSongIds,
-        offlineSongIds: offlineSongIds,
-        offlineAlbumIds: const {},
-        historySongIds: const {},
-        historyLangs: const {},
-        historyArtists: const {},
-        fuzzySimilarity: fuzzyScores[song.id] ?? 0.0,
-      );
-    }
-
-    songs.sort((a, b) => (scores[b] ?? 0.0).compareTo(scores[a] ?? 0.0));
-    return songs.take(_maxSearchResults).toList();
-  }
-
-  List<Album> _searchLocalAlbums(String query, Set<String> offlineAlbumIds) {
-    final normalizedQuery = _normalize(query);
-    final albums = _localAlbumIndex.where((a) => _isValidAlbumForSearch(a) && _matchesPreferredLanguage(a.language)).toList();
-
-    final fuzzyScores = _buildFuzzyScores<Album>(
-      list: albums,
-      query: normalizedQuery,
+  List<Album> _searchLocalAlbums(String query) {
+    final safeLocalAlbums = _sanitizeAlbums(_localAlbumIndex);
+    return _rankAndMerge<Album>(
+      local: safeLocalAlbums,
+      network: const <Album>[],
+      query: query,
       getName: (a) => a.name,
       getArtist: (a) => a.artist ?? '',
+      getLanguage: (a) => a.language ?? '',
+      getQualityScore: (a) => _computeAlbumQuality(a),
       getId: (a) => a.id,
     );
+  }
 
-    final Map<Album, double> scores = {};
-    for (final album in albums) {
-      scores[album] = _calculateRelevanceScore(
-        query: normalizedQuery,
-        name: album.name,
-        artist: album.artist,
-        language: album.language,
-        item: album,
-        downloadedSongIds: const {},
-        offlineSongIds: const {},
-        offlineAlbumIds: offlineAlbumIds,
-        historySongIds: const {},
-        historyLangs: const {},
-        historyArtists: const {},
-        fuzzySimilarity: fuzzyScores[album.id] ?? 0.0,
-      );
+  double _computeAlbumQuality(Album a) {
+    double score = 10.0;
+    if ((a.imageUrl ?? '').isNotEmpty) score += 5.0;
+    final songs = a.songCount ?? 0;
+    if (songs > 0) score += 3.0;
+    if (songs > 1) score += 4.0;
+    // Strongly prefer complete collections (more songs = higher quality)
+    if (songs >= 5) score += 10.0;
+    if (songs >= 10) score += 6.0;
+    // Penalize single-song albums — they are usually not full collections
+    if (songs <= 1) score -= 5.0;
+    if (a.year != null) score += 2.0;
+    if (a.type == 'ALBUM') score += 2.0;
+    if (a.isOfficial) score += 6.0;
+    if (_containsBlockedKeyword('${a.name} ${a.artist ?? ''}')) {
+      score -= 40.0;
+    }
+    // Prioritize original albums over derivative compilations
+    if (_isOriginalVersion(a.name)) {
+      score += 10.0;
+    } else {
+      score -= 8.0;
+    }
+    return score;
+  }
+
+  double _computeSearchPriorityBoost<T>(T item) {
+    if (item is Song) {
+      var score = 0.0;
+      if (item.duration != null &&
+          item.duration! >= _idealSongDurationMinSeconds &&
+          item.duration! <= _idealSongDurationMaxSeconds) {
+        score += 10.0;
+      }
+      if (_isLikelyMusicType(item.type)) {
+        score += 8.0;
+      }
+      if (item.isOfficial) {
+        score += 12.0;
+      }
+      // Boost original songs, penalize derivatives
+      if (_isOriginalVersion(item.name)) {
+        score += 15.0;
+      } else {
+        score -= 10.0;
+      }
+      return score;
     }
 
-    albums.sort((a, b) => (scores[b] ?? 0.0).compareTo(scores[a] ?? 0.0));
-    return albums.take(_maxSearchResults).toList();
+    if (item is Album) {
+      var score = 0.0;
+      if (item.isOfficial) {
+        score += 8.0;
+      }
+      final songs = item.songCount ?? 0;
+      if (songs > 1) score += 4.0;
+      // Strongly boost complete collections in search results
+      if (songs >= 5) score += 8.0;
+      if (songs >= 10) score += 12.0;
+      // Boost original albums
+      if (_isOriginalVersion(item.name)) {
+        score += 10.0;
+      } else {
+        score -= 6.0;
+      }
+      return score;
+    }
+
+    return 0.0;
+  }
+
+  double _computeSourceOrderBoost(int sourceRank) {
+    if (sourceRank >= 1000) return 0.0;
+    final boost = 28.0 - sourceRank * 1.6;
+    return boost < 0 ? 0.0 : boost;
   }
 
   Map<String, double> _buildFuzzyScores<T>({
@@ -1136,6 +1061,155 @@ class SearchProvider extends ChangeNotifier {
     }
     return scores;
   }
+
+  _MatchScore _scoreMatch({
+    required String query,
+    required String compactQuery,
+    required List<String> queryTokens,
+    required String name,
+    required String artist,
+    required List<String> targetTokens,
+    required double fuzzyBoost,
+    required bool queryWantsDerivative,
+  }) {
+    final compactName = _compact(name);
+    final compactArtist = _compact(artist);
+    final nameTokens = _tokenize(name);
+    final artistTokens = _tokenize(artist);
+    final hasExactMatch =
+        name == query ||
+        (compactQuery.isNotEmpty && compactName == compactQuery);
+    final hasStartsWithMatch =
+        name.startsWith(query) || compactName.startsWith(compactQuery);
+    // Name-level containment is stronger than artist-level
+    final hasNameContains =
+        name.contains(query) ||
+        (compactQuery.isNotEmpty && compactName.contains(compactQuery));
+    final hasArtistContains =
+        artist.contains(query) ||
+        (compactQuery.isNotEmpty && compactArtist.contains(compactQuery));
+
+    final coverage = _getTokenCoverage(queryTokens, targetTokens);
+    final nameCoverage = _getTokenCoverage(queryTokens, nameTokens);
+    final artistCoverage = _getTokenCoverage(queryTokens, artistTokens);
+    final titlePhraseInQuery =
+        compactQuery.isNotEmpty &&
+        compactName.isNotEmpty &&
+        compactQuery.contains(compactName);
+    final artistPhraseInQuery =
+        compactQuery.isNotEmpty &&
+        compactArtist.isNotEmpty &&
+        compactQuery.contains(compactArtist);
+    // For 1-2 token queries, require ALL tokens; for 3+, allow 1 miss.
+    final requiredTokenMatches = queryTokens.isEmpty
+        ? 0
+        : (queryTokens.length <= 2
+              ? queryTokens.length
+              : queryTokens.length - 1);
+    final hasWordByWordMatch =
+        coverage.matchedCount >= requiredTokenMatches &&
+        coverage.matchedCount > 0;
+    final hasBalancedTitleArtistCoverage =
+        nameCoverage.matchedCount > 0 &&
+        artistCoverage.matchedCount > 0 &&
+        coverage.matchedCount >= requiredTokenMatches;
+    final hasStrongTitleArtistIntent =
+        titlePhraseInQuery &&
+        (artistPhraseInQuery || artistCoverage.matchedCount > 0) &&
+        coverage.matchedCount >= requiredTokenMatches;
+
+    var tier = 5;
+    var score = 0.0;
+
+    if (hasExactMatch) {
+      tier = 0;
+      score = 260;
+    } else if (hasStrongTitleArtistIntent) {
+      tier = 0;
+      score = 245;
+    } else if (hasBalancedTitleArtistCoverage) {
+      tier = 1;
+      score = 210;
+    } else if (hasStartsWithMatch) {
+      tier = 1;
+      score = 190;
+    } else if (hasNameContains) {
+      tier = 2;
+      score = 150;
+    } else if (hasArtistContains && nameCoverage.matchedCount > 0) {
+      tier = 2;
+      score = 132;
+    } else if (hasArtistContains) {
+      tier = 3;
+      score = 100;
+    } else if (hasWordByWordMatch && coverage.fuzzyCount == 0) {
+      // All matched tokens are exact word matches (no fuzzy)
+      tier = 3;
+      score = 114;
+    } else if (hasWordByWordMatch) {
+      // Some fuzzy token matches
+      tier = 3;
+      score = 85;
+    } else if (fuzzyBoost >= 0.15 || coverage.fuzzyCount > 0) {
+      tier = 4;
+      score = 60;
+    }
+
+    if (tier > 4) {
+      // Before giving up, try bigram overlap on compact strings
+      if (compactQuery.length >= 4 && compactName.length >= 4) {
+        final bigramScore = _bigramOverlap(compactQuery, compactName);
+        if (bigramScore >= 0.45) {
+          tier = 4;
+          score = 40 + bigramScore * 30;
+        }
+      }
+      if (tier > 4) {
+        return const _MatchScore(tier: 5, score: 0.0);
+      }
+    }
+
+    if (titlePhraseInQuery) {
+      score += 18;
+    }
+    if (artistPhraseInQuery) {
+      score += 18;
+    } else if (artistCoverage.matchedCount > 0) {
+      score += (artistCoverage.matchedCount * 6.0).clamp(0.0, 14.0).toDouble();
+    }
+    if (artist.contains(query)) {
+      score += 8;
+    }
+    if (queryTokens.isNotEmpty) {
+      score += coverage.coverage * 22;
+      // Bonus: all tokens matched directly in name
+      if (coverage.matchedCount == queryTokens.length &&
+          coverage.fuzzyCount == 0) {
+        score += 18;
+      }
+    }
+    score += fuzzyBoost * 10;
+
+    final isDerivative = _containsDerivativeKeyword(name);
+    if (isDerivative) {
+      if (!queryWantsDerivative) {
+        score -= tier <= 2 ? 32.0 : 46.0;
+        if (titlePhraseInQuery) score -= 16.0;
+      } else {
+        score += 14.0;
+      }
+    } else if (queryWantsDerivative) {
+      score -= 18.0;
+    }
+
+    if (!queryWantsDerivative && titlePhraseInQuery) {
+      final extraNameTerms = nameTokens.length - queryTokens.length;
+      if (extraNameTerms >= 3) {
+        score -= (extraNameTerms * 4.0).clamp(0.0, 18.0).toDouble();
+      }
+    }
+
+    return _MatchScore(tier: tier, score: score);
   }
 
   _TokenCoverage _getTokenCoverage(
@@ -1303,66 +1377,24 @@ class SearchProvider extends ChangeNotifier {
     _albums = [];
     _artists = [];
     _playlists = [];
-    _downloadedSongs = [];
-    _offlineResults = [];
-    _topResult = null;
     _query = '';
     _searchRecommendations = _recentSearches.take(8).toList(growable: false);
     notifyListeners();
   }
 
   void showRecommendationsForInput(String query) {
-    final normalized = _normalize(query);
+    final normalized = query.trim().toLowerCase();
     if (normalized.isEmpty) {
       _searchRecommendations = _recentSearches.take(8).toList(growable: false);
       notifyListeners();
       return;
     }
 
-    final suggestions = <String>[];
-    
-    // 1. Add matching recent searches
-    for (final recent in _recentSearches) {
-      if (recent.toLowerCase().contains(normalized)) {
-        suggestions.add(recent);
-      }
-    }
-
-    // 2. Add matching songs from local cache index
-    for (final song in _localSongIndex) {
-      if (song.name.toLowerCase().contains(normalized)) {
-        suggestions.add(song.name);
-      }
-      if (song.artist != null && song.artist!.toLowerCase().contains(normalized)) {
-        suggestions.add(song.artist!);
-      }
-    }
-
-    // 3. Add matching artists
-    for (final artist in _localArtistIndex) {
-      if (artist.name.toLowerCase().contains(normalized)) {
-        suggestions.add(artist.name);
-      }
-    }
-
-    // 4. Add matching albums
-    for (final album in _localAlbumIndex) {
-      if (album.name.toLowerCase().contains(normalized)) {
-        suggestions.add(album.name);
-      }
-    }
-
-    // Deduplicate and limit to 8
-    final uniqueSuggestions = <String>[];
-    final seen = <String>{};
-    for (final s in suggestions) {
-      final key = s.trim().toLowerCase();
-      if (key.isNotEmpty && seen.add(key)) {
-        uniqueSuggestions.add(s);
-      }
-    }
-
-    _searchRecommendations = uniqueSuggestions.take(8).toList(growable: false);
+    final recents = _recentSearches
+        .where((item) => item.toLowerCase().contains(normalized))
+        .take(8)
+        .toList(growable: false);
+    _searchRecommendations = recents;
     notifyListeners();
   }
 
@@ -1796,9 +1828,6 @@ class _CachedSearchSnapshot {
   final List<Album> albums;
   final List<Artist> artists;
   final List<UserPlaylist> playlists;
-  final List<Song> downloadedSongs;
-  final List<dynamic> offlineResults;
-  final dynamic topResult;
   final DateTime storedAt;
 
   const _CachedSearchSnapshot({
@@ -1806,9 +1835,6 @@ class _CachedSearchSnapshot {
     required this.albums,
     required this.artists,
     required this.playlists,
-    required this.downloadedSongs,
-    required this.offlineResults,
-    required this.topResult,
     required this.storedAt,
   });
 }

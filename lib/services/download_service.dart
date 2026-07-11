@@ -17,6 +17,7 @@ import 'session_state_service.dart';
 import 'offline_service.dart';
 import 'player_service.dart';
 import 'lyrics_service.dart';
+import 'lyrics_cache.dart';
 import 'artwork_service.dart';
 import 'playlist_service.dart';
 
@@ -844,36 +845,53 @@ class DownloadService {
 
       await _saveMetadata(song, uid: uid, filePath: finalPath);
 
-      // Fetch and save artwork locally
-      try {
-        final artworkUrl = ArtworkService.resolveArtworkUrl(song);
-        if (artworkUrl.isNotEmpty) {
-          final artworkDir = Directory('${dir.path}/songs/$songId');
-          if (!await artworkDir.exists()) {
-            await artworkDir.create(recursive: true);
+      // Fetch artwork and lyrics concurrently for offline usage
+      await Future.wait([
+        // Artwork
+        Future(() async {
+          try {
+            final artworkUrl = ArtworkService.resolveArtworkUrl(song);
+            if (artworkUrl.isNotEmpty) {
+              final artworkDir = Directory('${dir.path}/songs/$songId');
+              if (!await artworkDir.exists()) {
+                await artworkDir.create(recursive: true);
+              }
+              final artworkPath = '${artworkDir.path}/artwork.jpg';
+              await _dio.download(
+                artworkUrl,
+                artworkPath,
+                cancelToken: cancelToken,
+              );
+              debugPrint('[DownloadService] Successfully saved local artwork for song $songId');
+            }
+          } catch (e) {
+            debugPrint('[DownloadService] Failed to save local artwork for song $songId: $e');
           }
-          final artworkPath = '${artworkDir.path}/artwork.jpg';
-          await _dio.download(
-            artworkUrl,
-            artworkPath,
-            cancelToken: cancelToken,
-          );
-          debugPrint('[DownloadService] Successfully saved local artwork for song $songId');
-        }
-      } catch (e) {
-        debugPrint('[DownloadService] Failed to save local artwork for song $songId: $e');
-      }
-
-      // Fetch and cache lyrics for offline usage, and save .lrc locally
-      try {
-        final payload = await LyricsService.getLyricsPayloadForSong(song);
-        if (payload != null) {
-          await LyricsService.saveLocalLrc(song.id, payload);
-          debugPrint('[DownloadService] Successfully saved local lyrics for song $songId');
-        }
-      } catch (e) {
-        debugPrint('Error caching lyrics for downloaded song: $e');
-      }
+        }),
+        // Lyrics
+        Future(() async {
+          try {
+            final payload = await LyricsService.getLyricsPayloadForSong(song);
+            if (payload != null) {
+              await LyricsService.saveLocalLrc(song.id, payload);
+              // Also persist to Hive cache
+              final album = (song.sourceAlbumName ?? song.album ?? '').trim();
+              await LyricsCache.put(
+                songId: song.id,
+                title: song.name,
+                artist: song.artist ?? '',
+                album: album,
+                duration: song.duration ?? 0,
+                payload: payload,
+                providerSource: 'local',
+              );
+              debugPrint('[DownloadService] Successfully saved local lyrics for song $songId');
+            }
+          } catch (e) {
+            debugPrint('[DownloadService] Error caching lyrics for downloaded song: $e');
+          }
+        }),
+      ]);
 
       await SessionStateService.clearDownloadState(uid: uid, songId: songId);
       

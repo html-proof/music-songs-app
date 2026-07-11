@@ -5,10 +5,10 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/song.dart';
 import 'api_service.dart';
+import 'lyrics_cache.dart';
 
 @immutable
 class LyricsPayload {
@@ -141,31 +141,10 @@ class _LrcLine {
 class LyricsService {
   static const String _lrclibBaseUrl = 'https://lrclib.net/api';
   static const Duration _requestTimeout = Duration(seconds: 6);
-  static const String _prefsPrefix = 'lyrics_cache_v4::';
-  static const String _cacheMissValue = '__MISS__';
   static final RegExp _lrcTagRegex = RegExp(
     r'\[(\d{1,2}):(\d{2})(?:[.:](\d{1,3}))?\]',
     multiLine: true,
   );
-
-  static final Map<String, LyricsPayload?> _cache = <String, LyricsPayload?>{};
-  static final Map<String, Future<LyricsPayload?>> _activeRequests = {};
-  static SharedPreferences? _prefs;
-
-  static String _normalizedKey(String title, String artist, String album, int duration) {
-    final t = title.toLowerCase().replaceAll(RegExp(r'\s+'), ' ').trim();
-    final a = artist.toLowerCase().replaceAll(RegExp(r'\s+'), ' ').trim();
-    final al = album.toLowerCase().replaceAll(RegExp(r'\s+'), ' ').trim();
-    return 'norm::$t::$a::$al::$duration';
-  }
-
-  static String _songNormalizedKey(Song song) {
-    final sourceAlbum = (song.sourceAlbumName ?? '').trim();
-    final album = sourceAlbum.isNotEmpty
-        ? sourceAlbum
-        : (song.album ?? '').trim();
-    return _normalizedKey(song.name, song.artist ?? '', album, song.duration ?? 0);
-  }
 
   static Future<File?> _localLrcFile(String songId) async {
     try {
@@ -228,10 +207,8 @@ class LyricsService {
       language: null,
       durationSeconds: null,
     );
-    return _getLyricsPayloadWithLookup(
-      lookup,
-      cacheKey: _legacyCacheKey(lookup.artist, lookup.title),
-    );
+    final candidates = await _fetchCandidates(lookup);
+    return _selectBestPayload(lookup, candidates);
   }
 
   /// Song-aware API with strict metadata validation for language/version/timing.
@@ -239,14 +216,11 @@ class LyricsService {
     final lookup = _LyricsLookup.fromSong(song);
     if (lookup.title.isEmpty) return null;
 
-    return _getLyricsPayloadWithLookup(
-      lookup,
-      cacheKey: _songCacheKey(song, lookup),
-    );
+    final candidates = await _fetchCandidates(lookup);
+    return _selectBestPayload(lookup, candidates);
   }
 
-  /// Search for lyrics by a raw query string (e.g. for background retry search queries),
-  /// select the best candidate according to matching rules, cache it under normalized keys, and return it.
+  /// Search for lyrics by a raw query string.
   static Future<LyricsPayload?> getLyricsByQuery(String query, Song song) async {
     final trimmed = query.trim();
     if (trimmed.isEmpty) return null;
@@ -261,219 +235,47 @@ class LyricsService {
           .toList();
 
       final lookup = _LyricsLookup.fromSong(song);
-      final payload = _selectBestPayload(lookup, candidates);
-
-      if (payload != null && payload.hasAny) {
-        final cacheKey = _songCacheKey(song, lookup);
-        _cache[cacheKey] = payload;
-        await _persistCacheEntry(cacheKey, payload, lookup: lookup);
-        return payload;
-      }
+      return _selectBestPayload(lookup, candidates);
     } catch (e) {
       debugPrint('[LyricsService] Failed search by query "$query": $e');
     }
     return null;
   }
 
-  static LyricsPayload? getCachedLyricsForSong(Song song) {
-    final lookup = _LyricsLookup.fromSong(song);
-    if (lookup.title.isEmpty) return null;
-    
-    // 1. Check standard memory cache
-    final cacheKey = _songCacheKey(song, lookup);
-    if (_cache.containsKey(cacheKey)) {
-      final payload = _cache[cacheKey];
-      if (payload != null) return payload;
-    }
-    
-    // 2. Check normalized memory cache
-    final normKey = _songNormalizedKey(song);
-    if (_cache.containsKey(normKey)) {
-      final payload = _cache[normKey];
-      if (payload != null) return payload;
-    }
-
-    final prefs = _prefs;
-    if (prefs != null) {
-      // 3. Check standard persistent cache
-      final raw = prefs.getString('$_prefsPrefix$cacheKey');
-      if (raw != null && raw != _cacheMissValue) {
-        try {
-          final decoded = jsonDecode(raw);
-          if (decoded is Map) {
-            final payload = LyricsPayload.fromJson(
-              Map<String, dynamic>.from(decoded),
-            );
-            if (payload.hasAny) {
-              _cache[cacheKey] = payload;
-              return payload;
-            }
-          }
-        } catch (_) {}
-      }
-
-      // 4. Check normalized persistent cache
-      final rawNorm = prefs.getString('$_prefsPrefix$normKey');
-      if (rawNorm != null && rawNorm != _cacheMissValue) {
-        try {
-          final decoded = jsonDecode(rawNorm);
-          if (decoded is Map) {
-            final payload = LyricsPayload.fromJson(
-              Map<String, dynamic>.from(decoded),
-            );
-            if (payload.hasAny) {
-              _cache[normKey] = payload;
-              return payload;
-            }
-          }
-        } catch (_) {}
-      }
-    }
-    return null;
-  }
-
-  static void clearCache() {
-    _cache.clear();
-    _activeRequests.clear();
-  }
-
   static void prefetchLyricsForSong(Song song) {
-    final lookup = _LyricsLookup.fromSong(song);
-    if (lookup.title.isEmpty) return;
-    final cacheKey = _songCacheKey(song, lookup);
-    if (_cache.containsKey(cacheKey) || _activeRequests.containsKey(cacheKey)) return;
+    final title = song.name.trim();
+    if (title.isEmpty) return;
+    final artist = (song.artist ?? '').trim();
+    final album = (song.sourceAlbumName ?? song.album ?? '').trim();
+    final duration = song.duration ?? 0;
 
-    // Fire and forget, storing the promise in _activeRequests
-    _getLyricsPayloadWithLookup(lookup, cacheKey: cacheKey);
-  }
+    Future(() async {
+      try {
+        final cached = await LyricsCache.get(
+          songId: song.id,
+          title: title,
+          artist: artist,
+          album: album,
+          duration: duration,
+        );
+        if (cached != null) return;
 
-  static Future<LyricsPayload?> _getLyricsPayloadWithLookup(
-    _LyricsLookup lookup, {
-    required String cacheKey,
-  }) async {
-    if (_cache.containsKey(cacheKey)) {
-      final cached = _cache[cacheKey];
-      if (cached != null) {
-        return cached;
-      }
-    }
-
-    if (_activeRequests.containsKey(cacheKey)) {
-      return await _activeRequests[cacheKey];
-    }
-
-    final completer = _fetchAndCache(lookup, cacheKey);
-    _activeRequests[cacheKey] = completer;
-
-    try {
-      return await completer;
-    } finally {
-      _activeRequests.remove(cacheKey);
-    }
-  }
-
-  static Future<LyricsPayload?> _fetchAndCache(_LyricsLookup lookup, String cacheKey) async {
-    final persisted = await _loadFromPersistentCache(cacheKey, lookup);
-    if (persisted.found) {
-      _cache[cacheKey] = persisted.payload;
-      return persisted.payload;
-    }
-
-    final candidates = await _fetchCandidates(lookup);
-    final payload = _selectBestPayload(lookup, candidates);
-
-    _cache[cacheKey] = payload;
-    await _persistCacheEntry(cacheKey, payload, lookup: lookup);
-    return payload;
-  }
-
-  static String _legacyCacheKey(String artist, String title) {
-    final normalizedArtist = artist.toLowerCase().trim();
-    final normalizedTitle = title.toLowerCase().trim();
-    return 'legacy::$normalizedArtist::$normalizedTitle';
-  }
-
-  static String _songCacheKey(Song song, _LyricsLookup lookup) {
-    final trackId = lookup.trackId.toLowerCase();
-    if (trackId.isNotEmpty) {
-      return 'song::$trackId';
-    }
-    return _legacyCacheKey(lookup.artist, lookup.title);
-  }
-
-  static Future<SharedPreferences> _prefsInstance() async {
-    return _prefs ??= await SharedPreferences.getInstance();
-  }
-
-  static Future<({bool found, LyricsPayload? payload})>
-  _loadFromPersistentCache(String cacheKey, _LyricsLookup lookup) async {
-    try {
-      // 1. Try local file system LRC if song id is available
-      if (lookup.trackId.isNotEmpty) {
-        final localLrc = await loadLocalLrc(lookup.trackId);
-        if (localLrc != null && localLrc.hasAny) {
-          return (found: true, payload: localLrc);
-        }
-      }
-
-      final prefs = await _prefsInstance();
-
-      // 2. Check standard persistent cache
-      final raw = prefs.getString('$_prefsPrefix$cacheKey');
-      if (raw != null && raw != _cacheMissValue) {
-        final decoded = jsonDecode(raw);
-        if (decoded is Map) {
-          final payload = LyricsPayload.fromJson(
-            Map<String, dynamic>.from(decoded),
+        final payload = await getLyricsPayloadForSong(song);
+        if (payload != null && payload.hasAny) {
+          await LyricsCache.put(
+            songId: song.id,
+            title: title,
+            artist: artist,
+            album: album,
+            duration: duration,
+            payload: payload,
+            providerSource: 'lrclib',
           );
-          if (payload.hasAny) {
-            return (found: true, payload: payload);
-          }
         }
+      } catch (e) {
+        debugPrint('[LyricsService] Failed prefetching lyrics: $e');
       }
-
-      // 3. Check normalized persistent cache
-      final normKey = _normalizedKey(lookup.title, lookup.artist, lookup.album, lookup.durationSeconds ?? 0);
-      final rawNorm = prefs.getString('$_prefsPrefix$normKey');
-      if (rawNorm != null && rawNorm != _cacheMissValue) {
-        final decoded = jsonDecode(rawNorm);
-        if (decoded is Map) {
-          final payload = LyricsPayload.fromJson(
-            Map<String, dynamic>.from(decoded),
-          );
-          if (payload.hasAny) {
-            return (found: true, payload: payload);
-          }
-        }
-      }
-    } catch (_) {}
-    return (found: false, payload: null);
-  }
-
-  static Future<void> _persistCacheEntry(
-    String cacheKey,
-    LyricsPayload? payload, {
-    _LyricsLookup? lookup,
-  }) async {
-    try {
-      final prefs = await _prefsInstance();
-      if (payload == null) {
-        await prefs.remove('$_prefsPrefix$cacheKey');
-        if (lookup != null) {
-          final normKey = _normalizedKey(lookup.title, lookup.artist, lookup.album, lookup.durationSeconds ?? 0);
-          await prefs.remove('$_prefsPrefix$normKey');
-        }
-        return;
-      }
-      final jsonStr = jsonEncode(payload.toJson());
-      await prefs.setString('$_prefsPrefix$cacheKey', jsonStr);
-      if (lookup != null) {
-        final normKey = _normalizedKey(lookup.title, lookup.artist, lookup.album, lookup.durationSeconds ?? 0);
-        await prefs.setString('$_prefsPrefix$normKey', jsonStr);
-      }
-    } catch (_) {
-      // Ignore cache persistence failures.
-    }
+    });
   }
 
   static Future<List<_LyricsCandidate>> _fetchCandidates(
@@ -1394,23 +1196,61 @@ class LyricsService {
   }
 
   static String _cleanArtist(String artist) {
-    return artist
+    var cleaned = artist
         .split(',')
         .first
         .split('&')
         .first
+        .split('feat.')
+        .first
+        .split('ft.')
+        .first;
+
+    cleaned = cleaned
         .replaceAll(RegExp(r'\(.*?\)'), '')
         .replaceAll(RegExp(r'\[.*?\]'), '')
+        .replaceAll(RegExp(r'[™®℗♪♫]'), '')
         .trim();
+
+    try {
+      cleaned = cleaned.replaceAll(
+        RegExp(r'[\u{1F600}-\u{1F64F}|\u{1F300}-\u{1F5FF}|\u{1F680}-\u{1F6FF}|\u{2600}-\u{26FF}|\u{2700}-\u{27BF}]', unicode: true),
+        '',
+      );
+    } catch (_) {}
+
+    return cleaned.replaceAll(RegExp(r'\s+'), ' ').trim();
   }
 
   static String _cleanTitle(String title) {
-    return title
-        .replaceAll(RegExp(r'\(.*?\)'), '')
-        .replaceAll(RegExp(r'\[.*?\]'), '')
-        .replaceAll(RegExp(r'feat\..*', caseSensitive: false), '')
-        .replaceAll(RegExp(r'ft\..*', caseSensitive: false), '')
-        .replaceAll(RegExp(r'-\s*$'), '')
-        .trim();
+    var cleaned = title;
+
+    final patterns = [
+      RegExp(r'\(?\b(remastered|remaster|live|concert|official video|official audio|official music video|official|video|audio|lyric video|lyrics video|unplugged)\b.*?\)?', caseSensitive: false),
+      RegExp(r'\[?\b(remastered|remaster|live|concert|official video|official audio|official music video|official|video|audio|lyric video|lyrics video|unplugged)\b.*?\]?', caseSensitive: false),
+      RegExp(r'\b(feat\.|ft\.).*', caseSensitive: false),
+      RegExp(r'-\s*$'),
+    ];
+
+    for (final pattern in patterns) {
+      cleaned = cleaned.replaceAll(pattern, '');
+    }
+
+    cleaned = cleaned.replaceAll(RegExp(r'\(\d{4}\)'), '');
+    cleaned = cleaned.replaceAll(RegExp(r'\[\d{4}\]'), '');
+    cleaned = cleaned.replaceAll(RegExp(r'\(\s*\)'), '');
+    cleaned = cleaned.replaceAll(RegExp(r'\[\s*\]'), '');
+    cleaned = cleaned.replaceAll(RegExp(r'\(.*?\)'), '');
+    cleaned = cleaned.replaceAll(RegExp(r'\[.*?\]'), '');
+    cleaned = cleaned.replaceAll(RegExp(r'[™®℗♪♫]'), '');
+
+    try {
+      cleaned = cleaned.replaceAll(
+        RegExp(r'[\u{1F600}-\u{1F64F}|\u{1F300}-\u{1F5FF}|\u{1F680}-\u{1F6FF}|\u{2600}-\u{26FF}|\u{2700}-\u{27BF}]', unicode: true),
+        '',
+      );
+    } catch (_) {}
+
+    return cleaned.replaceAll(RegExp(r'\s+'), ' ').trim();
   }
 }

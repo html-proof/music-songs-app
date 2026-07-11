@@ -100,7 +100,7 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
     int lastNotifiedMs = -1;
     PlayerService.positionStream.listen((pos) {
       if (_ignorePositionUntilZero) {
-        if (pos == Duration.zero || pos.inMilliseconds < 100) {
+        if (pos == Duration.zero || pos.inMilliseconds < 800) {
           _ignorePositionUntilZero = false;
         } else {
           return;
@@ -274,6 +274,7 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> seek(Duration position, {bool immediate = false}) async {
+    _ignorePositionUntilZero = false;
     _position = position;
     notifyListeners();
     await PlayerService.seek(position, immediate: immediate);

@@ -196,6 +196,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
 
     while (isCurrentSong()) {
+      if (attempt > 5) {
+        break;
+      }
       setState(() {
         if (attempt <= 3) {
           _loadingLyrics = true;
@@ -205,7 +208,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
           _loadingLyrics = false;
           _isSearchingInBackground = true;
           _initialSearchFailed = true;
-          if (attempt >= 9) {
+          if (attempt >= 5) {
             _lyricsPermanentlyUnavailable = true;
           }
         }

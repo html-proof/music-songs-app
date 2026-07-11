@@ -37,6 +37,8 @@ class Song {
   final bool isExplicit;
   final bool isOfficial;
   final double? recommendationScore;
+  final int? playCount;
+  final int? popularity;
 
   Song({
     required this.id,
@@ -57,6 +59,8 @@ class Song {
     this.isExplicit = false,
     this.isOfficial = true,
     this.recommendationScore,
+    this.playCount,
+    this.popularity,
   });
 
   factory Song.fromJson(Map<String, dynamic> json) {
@@ -87,6 +91,15 @@ class Song {
     final duration = _extractDurationSeconds(json['duration']);
     final imageUrl = _extractImageUrl(json);
     final streamUrl = _extractStreamUrl(json, durationSeconds: duration);
+
+    final playCount = int.tryParse(
+      (json['playCount'] ?? json['play_count'] ?? json['playcount'] ?? '')
+          .toString(),
+    );
+    final popularity = int.tryParse(
+      (json['popularity'] ?? json['playCount'] ?? json['play_count'] ?? '')
+          .toString(),
+    );
 
     return Song(
       id: json['id']?.toString() ?? '',
@@ -125,6 +138,8 @@ class Song {
           json['explicitContent'] == true || json['explicit_content'] == true,
       isOfficial: json['is_official'] != false && json['isOfficial'] != false,
       recommendationScore: json['_recommendationScore']?.toDouble(),
+      playCount: playCount,
+      popularity: popularity,
     );
   }
 
@@ -146,6 +161,8 @@ class Song {
     Object? type = _unset,
     bool? isExplicit,
     Object? recommendationScore = _unset,
+    Object? playCount = _unset,
+    Object? popularity = _unset,
   }) {
     return Song(
       id: id ?? this.id,
@@ -175,6 +192,8 @@ class Song {
       recommendationScore: recommendationScore == _unset
           ? this.recommendationScore
           : recommendationScore as double?,
+      playCount: playCount == _unset ? this.playCount : playCount as int?,
+      popularity: popularity == _unset ? this.popularity : popularity as int?,
     );
   }
 

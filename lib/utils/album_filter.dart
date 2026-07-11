@@ -64,6 +64,15 @@ class AlbumFilter {
     return true;
   }
 
+  /// Filters a list of albums, removing any that fail [isValidAlbum].
+  ///
+  /// Unlike [filterAndDeduplicate], this does NOT merge duplicates.
+  /// Use this when deduplication is already handled upstream (e.g., by
+  /// excluding album IDs in recommendation pipelines).
+  static List<Album> filterValid(List<Album> albums) {
+    return albums.where((album) => isValidAlbum(album)).toList(growable: false);
+  }
+
   /// Filters and deduplicates a list of albums.
   ///
   /// Discards invalid albums and merges entries sharing the same Title & Artist.

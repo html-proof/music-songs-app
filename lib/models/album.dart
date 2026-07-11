@@ -10,6 +10,8 @@ class Album {
   final String? year;
   final String? type;
   final bool isOfficial;
+  final int? playCount;
+  final int? popularity;
 
   Album({
     required this.id,
@@ -21,12 +23,23 @@ class Album {
     this.year,
     this.type,
     this.isOfficial = true,
+    this.playCount,
+    this.popularity,
   });
 
   factory Album.fromJson(Map<String, dynamic> json) {
     final imageUrl = _extractImageUrl(json);
     final artist = TextCleaner.decodeHtmlEntities(_extractArtistName(json));
     final normalizedArtist = artist.trim();
+
+    final playCount = int.tryParse(
+      (json['playCount'] ?? json['play_count'] ?? json['playcount'] ?? '')
+          .toString(),
+    );
+    final popularity = int.tryParse(
+      (json['popularity'] ?? json['playCount'] ?? json['play_count'] ?? '')
+          .toString(),
+    );
 
     return Album(
       id: json['id']?.toString() ?? '',
@@ -44,6 +57,8 @@ class Album {
           json['releaseDate']?.toString().split('-').first,
       type: json['type']?.toString().toUpperCase() ?? 'ALBUM',
       isOfficial: json['is_official'] != false && json['isOfficial'] != false,
+      playCount: playCount,
+      popularity: popularity,
     );
   }
 

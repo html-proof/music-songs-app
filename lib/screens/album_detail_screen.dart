@@ -36,6 +36,7 @@ class _AlbumDetailScreenState extends State<AlbumDetailScreen> {
 
   List<Song> _songs = [];
   bool _isLoading = true;
+  bool _isUnavailable = false;
   String? _error;
 
   List<Album> _moreAlbums = [];
@@ -123,11 +124,11 @@ class _AlbumDetailScreenState extends State<AlbumDetailScreen> {
 
       if (!AlbumFilter.isValidAlbum(widget.album, tracks: songs)) {
         if (!mounted) return;
-        // Album has no valid/playable songs after filtering — hide it completely.
-        final popped = await Navigator.of(context).maybePop();
-        if (!popped && mounted) {
-          Navigator.of(context).pop();
-        }
+        // Album has no valid/playable songs — show unavailable state.
+        setState(() {
+          _isUnavailable = true;
+          _isLoading = false;
+        });
         return;
       }
 
@@ -202,6 +203,7 @@ class _AlbumDetailScreenState extends State<AlbumDetailScreen> {
               .map((map) => Album.fromJson(map))
               .where((album) => album.id != widget.album.id)
               .where((album) => !topUpExcludeIds.contains(album.id))
+              .where((album) => AlbumFilter.isValidAlbum(album))
               .take(remaining);
           topUp.addAll(fallbackAlbums);
         }
@@ -217,6 +219,7 @@ class _AlbumDetailScreenState extends State<AlbumDetailScreen> {
         initialBatch = trendingFallback
             .map((map) => Album.fromJson(map))
             .where((album) => album.id != widget.album.id)
+            .where((album) => AlbumFilter.isValidAlbum(album))
             .take(_artistAlbumPageSize)
             .toList(growable: false);
       }
@@ -273,6 +276,7 @@ class _AlbumDetailScreenState extends State<AlbumDetailScreen> {
         nextBatch = trendingMaps
             .map((map) => Album.fromJson(map))
             .where((album) => album.id != widget.album.id)
+            .where((album) => AlbumFilter.isValidAlbum(album))
             .take(batchSize)
             .toList(growable: false);
       } else {
@@ -350,6 +354,7 @@ class _AlbumDetailScreenState extends State<AlbumDetailScreen> {
     return output
         .map((map) => Album.fromJson(map))
         .where((album) => album.id != widget.album.id)
+        .where((album) => AlbumFilter.isValidAlbum(album))
         .take(desiredCount)
         .toList(growable: false);
   }
@@ -760,36 +765,76 @@ class _AlbumDetailScreenState extends State<AlbumDetailScreen> {
     final preferredLanguages = _preferredLanguages();
     final visibleCount = _visibleMoreAlbumsCount.clamp(0, _moreAlbums.length);
 
-    if (_error != null) {
+    if (_error != null || _isUnavailable) {
       return Scaffold(
         body: Container(
           decoration: const BoxDecoration(
             gradient: AppTheme.backgroundGradient,
           ),
-          child: Center(
-            child: Padding(
-              padding: const EdgeInsets.all(24.0),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    _error!,
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(
+          child: SafeArea(
+            child: Column(
+              children: [
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: IconButton(
+                    icon: const Icon(
+                      Icons.arrow_back_ios_new_rounded,
                       color: AppTheme.textSecondary,
-                      fontSize: 16,
                     ),
-                  ),
-                  const SizedBox(height: 24),
-                  TextButton(
                     onPressed: () => Navigator.pop(context),
-                    child: const Text(
-                      'Go Back',
-                      style: TextStyle(color: AppTheme.accentPurple),
+                  ),
+                ),
+                Expanded(
+                  child: Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(24.0),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            _isUnavailable
+                                ? Icons.album_outlined
+                                : Icons.error_outline_rounded,
+                            color: AppTheme.textMuted,
+                            size: 64,
+                          ),
+                          const SizedBox(height: 16),
+                          Text(
+                            _isUnavailable
+                                ? "This album isn't available."
+                                : _error!,
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(
+                              color: AppTheme.textPrimary,
+                              fontSize: 18,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          if (_isUnavailable) ...[
+                            const SizedBox(height: 8),
+                            const Text(
+                              'No playable songs were found in this album.',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                color: AppTheme.textSecondary,
+                                fontSize: 14,
+                              ),
+                            ),
+                          ],
+                          const SizedBox(height: 24),
+                          TextButton(
+                            onPressed: () => Navigator.pop(context),
+                            child: const Text(
+                              'Go Back',
+                              style: TextStyle(color: AppTheme.accentPurple),
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
           ),
         ),

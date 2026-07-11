@@ -12,7 +12,6 @@ import '../screens/album_detail_screen.dart';
 import '../services/api_service.dart';
 import '../services/listening_safety_service.dart';
 import '../services/lyrics_manager.dart';
-import 'package:fluttertoast/fluttertoast.dart';
 import '../theme/app_theme.dart';
 import '../widgets/offline_artwork.dart';
 
@@ -51,18 +50,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     super.dispose();
   }
 
-  String? _lyricsLookupKeyForSong(Song song) {
-    final artist = (song.artist ?? '').trim();
-    final title = song.name.trim();
-    final songId = song.id.trim().toLowerCase();
-    final lookupKey = songId.isNotEmpty
-        ? songId
-        : '${artist.toLowerCase()}::${title.toLowerCase()}';
-    if (title.isEmpty || lookupKey.isEmpty) {
-      return null;
-    }
-    return lookupKey;
-  }
+
 
   List<TimedLyricLine> get _currentSyncedLyrics {
     final manager = context.read<LyricsManager>();

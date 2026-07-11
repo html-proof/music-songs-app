@@ -21,7 +21,6 @@ import 'api_service.dart';
 import 'audio_effects_service.dart';
 import 'download_service.dart';
 import 'listening_safety_service.dart';
-import 'lyrics_service.dart';
 import 'offline_service.dart';
 import 'preferences_service.dart';
 import 'session_state_service.dart';

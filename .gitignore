@@ -43,6 +43,13 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
-*.txt
-google-services (1).json
 
+# Credentials & Keys
+google-services*.json
+lib/firebase_options.dart
+android/app/google-services.json
+**/ios/Runner/GoogleService-Info.plist
+
+# Temp, log, and analysis files
+*.txt
+*.log

@@ -140,7 +140,7 @@ class _LrcLine {
 
 class LyricsService {
   static const String _lrclibBaseUrl = 'https://lrclib.net/api';
-  static const Duration _requestTimeout = Duration(seconds: 3);
+  static const Duration _requestTimeout = Duration(seconds: 6);
   static const String _prefsPrefix = 'lyrics_cache_v4::';
   static const String _cacheMissValue = '__MISS__';
   static final RegExp _lrcTagRegex = RegExp(

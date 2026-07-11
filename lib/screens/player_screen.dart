@@ -36,6 +36,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
   bool _lyricsPermanentlyUnavailable = false;
   int _currentStatusIndex = 0;
   Timer? _statusTimer;
+  Timer? _backgroundRetryTimer;
+  Timer? _hardStopTimer;
   bool _showLyrics = false;
   String? _lastLyricsRequestKey;
   DateTime? _lastLyricsFetchAt;
@@ -51,12 +53,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
   static const double _lyricLineExtent = 46.0;
 
   static const List<String> _loadingStatusSteps = [
-    '🎵 Finding Lyrics...',
-    'Searching title...',
-    'Matching artist...',
-    'Checking album...',
-    'Synchronizing lyrics...',
-    '✓ Lyrics Ready',
+    '🎵 Searching lyrics...',
+    'Trying another source...',
+    'Matching song...',
+    '✓ Almost there...',
   ];
 
   String _formatDuration(Duration d) {
@@ -69,6 +69,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
   void dispose() {
     _programmaticLyricScrollResetTimer?.cancel();
     _statusTimer?.cancel();
+    _backgroundRetryTimer?.cancel();
+    _hardStopTimer?.cancel();
     _lyricsScrollController.dispose();
     _scrubNotifier.dispose();
     super.dispose();
@@ -89,17 +91,32 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   void _startStatusAnimation() {
     _statusTimer?.cancel();
+    _hardStopTimer?.cancel();
     _currentStatusIndex = 0;
-    _statusTimer = Timer.periodic(const Duration(milliseconds: 700), (timer) {
-      if (mounted && _loadingLyrics) {
-        setState(() {
-          if (_currentStatusIndex < _loadingStatusSteps.length - 2) {
-            _currentStatusIndex++;
-          }
-        });
-      } else {
+
+    // Advance status label every 2 seconds through the 4 steps
+    _statusTimer = Timer.periodic(const Duration(milliseconds: 2000), (timer) {
+      if (!mounted || !_loadingLyrics) {
         timer.cancel();
+        return;
       }
+      setState(() {
+        if (_currentStatusIndex < _loadingStatusSteps.length - 1) {
+          _currentStatusIndex++;
+        }
+      });
+    });
+
+    // Hard deadline: if still in foreground-loading after 10s, transition to
+    // background-searching state so the UI never stays stuck on a spinner.
+    _hardStopTimer = Timer(const Duration(seconds: 10), () {
+      if (!mounted || !_loadingLyrics) return;
+      _statusTimer?.cancel();
+      setState(() {
+        _loadingLyrics = false;
+        _isSearchingInBackground = true;
+        _initialSearchFailed = true;
+      });
     });
   }
 
@@ -133,18 +150,17 @@ class _PlayerScreenState extends State<PlayerScreen> {
     final artist = (song.artist ?? '').trim();
     final title = song.name.trim();
     final lookupKey = _lyricsLookupKeyForSong(song);
-    if (lookupKey == null) {
-      return;
-    }
+    if (lookupKey == null) return;
 
     final isSameLookup = _lastLyricsRequestKey == lookupKey;
     final now = DateTime.now();
-    if (_loadingLyrics && isSameLookup && !forceRetry) {
-      return;
-    }
-    if (isSameLookup && _lyricsPayload != null && !forceRetry) {
-      return;
-    }
+
+    // Guard: don't restart if already loading this exact song
+    if (_loadingLyrics && isSameLookup && !forceRetry) return;
+    // Guard: already have lyrics for this song
+    if (isSameLookup && _lyricsPayload != null && !forceRetry) return;
+    // Guard: searched recently and found nothing — wait at least 15s before
+    // allowing a non-forced retry so we don't hammer the API
     if (!forceRetry &&
         isSameLookup &&
         _lyricsPayload == null &&
@@ -153,6 +169,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       return;
     }
 
+    // --- Fast path: serve from cache immediately ---
     if (!forceRetry) {
       final cachedPayload = LyricsService.getCachedLyricsForSong(song);
       if (cachedPayload != null) {
@@ -161,9 +178,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
       }
     }
 
+    // Cancel any pending background-retry timer from a previous search
+    _backgroundRetryTimer?.cancel();
+    _backgroundRetryTimer = null;
+
     _lastLyricsRequestKey = lookupKey;
     _lastLyricsFetchAt = now;
 
+    // Start the UI status animation with a built-in 10s hard stop
     _startStatusAnimation();
 
     setState(() {
@@ -183,123 +205,127 @@ class _PlayerScreenState extends State<PlayerScreen> {
       _isProgrammaticLyricScroll = false;
     });
 
-    LyricsPayload? payload;
-    bool found = false;
-    int attempt = 1;
-
     bool isCurrentSong() {
       if (!mounted) return false;
       final currentActive = context.read<PlayerProvider>().activeSong;
       if (currentActive == null) return false;
-      final currentLookupKey = _lyricsLookupKeyForSong(currentActive);
-      return currentLookupKey == lookupKey;
+      return _lyricsLookupKeyForSong(currentActive) == lookupKey;
     }
 
-    while (isCurrentSong()) {
-      if (attempt > 5) {
-        break;
-      }
-      setState(() {
-        if (attempt <= 3) {
-          _loadingLyrics = true;
-          _isSearchingInBackground = false;
-          _initialSearchFailed = false;
-        } else {
-          _loadingLyrics = false;
-          _isSearchingInBackground = true;
-          _initialSearchFailed = true;
-          if (attempt >= 5) {
-            _lyricsPermanentlyUnavailable = true;
-          }
-        }
-      });
+    // ─────────────────────────────────────────────────────────────
+    // PHASE 1 — Foreground search (≤ 8 seconds total)
+    // Three quick attempts run concurrently to maximise hit rate.
+    // If any one resolves with lyrics we are done immediately.
+    // ─────────────────────────────────────────────────────────────
+    LyricsPayload? found;
 
-      try {
-        if (attempt == 1) {
-          payload = await LyricsService.getLyricsPayloadForSong(song);
-        } else if (attempt == 2) {
-          payload = await LyricsService.getLyricsByQuery(title, song);
-        } else if (attempt == 3) {
-          final query = "$title $artist".trim();
-          payload = await LyricsService.getLyricsByQuery(query, song);
-        } else if (attempt == 4) {
-          final albumName = song.album ?? song.sourceAlbumName ?? '';
-          final query = "$title $artist $albumName".trim();
-          payload = await LyricsService.getLyricsByQuery(query, song);
-        } else if (attempt == 5) {
-          final sourceName = song.sourceAlbumName ?? '';
-          final query = sourceName.isNotEmpty ? "$title $sourceName".trim() : "$title Lyrics";
-          payload = await LyricsService.getLyricsByQuery(query, song);
-        } else {
-          payload = await LyricsService.getLyricsByQuery("$title Lyrics", song);
-        }
-      } catch (e) {
-        debugPrint('[Lyrics] Search attempt $attempt failed: $e');
-      }
+    try {
+      final phase1 = Future.any(<Future<LyricsPayload?>>[
+        // Attempt 1: full song-aware lookup (Saavn + LRC exact + search)
+        LyricsService.getLyricsPayloadForSong(song),
+        // Attempt 2: plain title search
+        LyricsService.getLyricsByQuery(title, song),
+        // Attempt 3: title + artist
+        LyricsService.getLyricsByQuery('$title $artist'.trim(), song),
+      ]);
 
-      if (!isCurrentSong()) return;
-
-      if (payload != null && payload.hasAny) {
-        found = true;
-        break;
-      }
-
-      late final Duration retryDelay;
-      if (attempt == 1) {
-        retryDelay = const Duration(seconds: 2);
-      } else if (attempt == 2) {
-        retryDelay = const Duration(seconds: 4);
-      } else if (attempt == 3) {
-        retryDelay = const Duration(seconds: 8);
-      } else {
-        retryDelay = const Duration(seconds: 25);
-      }
-
-      await Future.delayed(retryDelay);
-      attempt++;
+      // Hard cap: give Phase 1 at most 8 seconds
+      found = await phase1.timeout(
+        const Duration(seconds: 8),
+        onTimeout: () => null,
+      );
+    } catch (e) {
+      debugPrint('[Lyrics] Phase 1 search error: $e');
     }
 
     if (!isCurrentSong()) return;
 
-    if (found && payload != null) {
-      final originalSyncedLines = payload.syncedLyrics != null
-          ? _parseSyncedLyrics(payload.syncedLyrics!)
-          : const <_TimedLyricLine>[];
-      final translationSyncedLines = payload.translationSyncedLyrics != null
-          ? _parseSyncedLyrics(payload.translationSyncedLyrics!)
-          : const <_TimedLyricLine>[];
-
+    // Phase 1 succeeded — show lyrics right away
+    if (found != null && found.hasAny) {
       _statusTimer?.cancel();
-      setState(() {
-        _currentStatusIndex = _loadingStatusSteps.length - 1;
-      });
-      await Future.delayed(const Duration(milliseconds: 350));
+      _hardStopTimer?.cancel();
+      _applyLyrics(found, lookupKey, now);
+      return;
+    }
 
-      if (isCurrentSong()) {
-        setState(() {
-          _lyricsPayload = payload;
-          _originalSyncedLyrics = originalSyncedLines;
-          _translationSyncedLyrics = translationSyncedLines;
-          _syncedLyrics = originalSyncedLines;
-          _lyricsDisplayMode = _LyricsDisplayMode.original;
-          _activeLyricIndexCache = -1;
-          _lastScrolledLyricIndex = -1;
-          _loadingLyrics = false;
-          _isSearchingInBackground = false;
-          _initialSearchFailed = false;
-          _lyricsPermanentlyUnavailable = false;
-          _lyricsSearchFailed = false;
-        });
+    // ─────────────────────────────────────────────────────────────
+    // PHASE 1 FAILED — Transition to background-searching state.
+    // The UI immediately shows "We're still looking..." instead of
+    // a stuck spinner. Phase 2 retries fire asynchronously via
+    // Timer so they never block the UI or playback.
+    // ─────────────────────────────────────────────────────────────
+    _statusTimer?.cancel();
+    _hardStopTimer?.cancel();
+
+    if (!isCurrentSong()) return;
+
+    setState(() {
+      _loadingLyrics = false;
+      _isSearchingInBackground = true;
+      _initialSearchFailed = true;
+      _lyricsPermanentlyUnavailable = false;
+    });
+
+    // ─────────────────────────────────────────────────────────────
+    // PHASE 2 — Background retries: 20 s / 40 s / 60 s
+    // Each retry fires independently via a chained Timer so there
+    // is no blocking await in the UI. If the user changes songs,
+    // _backgroundRetryTimer is cancelled immediately.
+    // ─────────────────────────────────────────────────────────────
+    var bgAttempt = 1;
+    const bgDelays = [20, 40, 60]; // seconds between each retry
+    const bgMaxAttempts = 3;
+
+    void scheduleNextBgRetry() {
+      if (bgAttempt > bgMaxAttempts) {
+        // All background attempts exhausted — mark permanently unavailable
+        if (mounted && isCurrentSong()) {
+          setState(() {
+            _isSearchingInBackground = false;
+            _lyricsPermanentlyUnavailable = true;
+            _lyricsSearchFailed = true;
+          });
+        }
+        return;
       }
-    } else {
-      _statusTimer?.cancel();
-      setState(() {
-        _loadingLyrics = false;
-        _isSearchingInBackground = false;
-        _lyricsSearchFailed = true;
-        _lyricsPermanentlyUnavailable = true;
+
+      final delaySeconds = bgAttempt <= bgDelays.length
+          ? bgDelays[bgAttempt - 1]
+          : bgDelays.last;
+
+      _backgroundRetryTimer?.cancel();
+      _backgroundRetryTimer = Timer(Duration(seconds: delaySeconds), () async {
+        if (!isCurrentSong()) return;
+
+        LyricsPayload? bgResult;
+        try {
+          final albumName = song.album ?? song.sourceAlbumName ?? '';
+          final queries = <String>[
+            '$title $artist'.trim(),
+            if (albumName.isNotEmpty) '$title $artist $albumName'.trim(),
+            title,
+          ];
+          final queryToUse = queries[((bgAttempt - 1) % queries.length).clamp(0, queries.length - 1)];
+          bgResult = await LyricsService.getLyricsByQuery(queryToUse, song)
+              .timeout(const Duration(seconds: 8), onTimeout: () => null);
+        } catch (e) {
+          debugPrint('[Lyrics] Background retry $bgAttempt failed: $e');
+        }
+
+        if (!isCurrentSong()) return;
+
+        if (bgResult != null && bgResult.hasAny) {
+          // Found it in the background — update the screen automatically
+          _applyLyrics(bgResult, lookupKey, DateTime.now());
+          return;
+        }
+
+        bgAttempt++;
+        scheduleNextBgRetry();
       });
     }
+
+    scheduleNextBgRetry();
   }
 
   List<_TimedLyricLine> _parseSyncedLyrics(String rawSyncedLyrics) {
@@ -777,6 +803,20 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
         if (song.id != _currentSongId) {
           _currentSongId = song.id;
+          // Clear old lyrics synchronously so they don't display for the previous song
+          _lyricsPayload = null;
+          _syncedLyrics = const <_TimedLyricLine>[];
+          _originalSyncedLyrics = const <_TimedLyricLine>[];
+          _translationSyncedLyrics = const <_TimedLyricLine>[];
+          _lyricsSearchFailed = false;
+          _lyricsPermanentlyUnavailable = false;
+          _initialSearchFailed = false;
+          _isSearchingInBackground = false;
+          _loadingLyrics = true;
+          _currentStatusIndex = 0;
+          _statusTimer?.cancel();
+          _backgroundRetryTimer?.cancel();
+          _hardStopTimer?.cancel();
           WidgetsBinding.instance.addPostFrameCallback((_) {
             if (mounted) unawaited(_fetchLyrics(song));
           });

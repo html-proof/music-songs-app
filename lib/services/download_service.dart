@@ -76,6 +76,7 @@ class PlaylistDownloadSession {
 class DownloadService {
   static PlaylistDownloadSession? _activePlaylistSession;
   static PlaylistDownloadSession? get activePlaylistSession => _activePlaylistSession;
+  static DateTime? _lastDownloadFailureToastTime;
 
   static final StreamController<PlaylistDownloadProgress> _playlistProgressController =
       StreamController<PlaylistDownloadProgress>.broadcast();
@@ -385,6 +386,12 @@ class DownloadService {
   static void showDownloadFailureToast([
     String msg = "Failed to save. Please reconnect the internet.",
   ]) {
+    final now = DateTime.now();
+    if (_lastDownloadFailureToastTime != null &&
+        now.difference(_lastDownloadFailureToastTime!) < const Duration(seconds: 5)) {
+      return; // Throttle download failure toast to once per 5 seconds
+    }
+    _lastDownloadFailureToastTime = now;
     _showToast(msg);
   }
 

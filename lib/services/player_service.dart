@@ -215,6 +215,12 @@ class PlayerService {
   static bool _externalSeeking = false;
   static bool _isSkipping = false;       // Re-entrancy guard for skip operations
   static bool _isLoadingNewSong = false; // True during URL resolution in play()
+  static String? _lastCompletedSongId;
+  static DateTime? _lastCompletedTime;
+  static String? _lastErrorSongId;
+  static DateTime? _lastErrorTime;
+  static DateTime? _lastErrorToastTime;
+  static String? _lastErrorToastMsg;
   static final List<String> _recentAutoplayAlbumKeys = <String>[];
   static final List<_QueueSessionSnapshot> _queueHistoryStack =
       <_QueueSessionSnapshot>[];
@@ -1786,8 +1792,8 @@ class PlayerService {
       if (sessionId == _activePlaybackSessionId) {
         _activeLogger?.logStep('Playback started', false, detail: 'Resolution failed');
         _activeLogger?.printReport('FAILED: Toast displayed, queue unchanged');
-        Fluttertoast.showToast(
-          msg: "Sorry, this song couldn't be found or played. Please try another version or search for the song manually.",
+        _showThrottledToast(
+          "Sorry, this song couldn't be found or played. Please try another version or search for the song manually.",
           toastLength: Toast.LENGTH_LONG,
         );
       }
@@ -1909,6 +1915,19 @@ class PlayerService {
     if (activeSong == null) return;
     if (message.contains('loading interrupted')) return;
 
+    // 1. De-duplicate error events
+    final songId = activeSong.id;
+    final errorKey = '${songId}_${error.message}';
+    final now = DateTime.now();
+    if (_lastErrorSongId == errorKey &&
+        _lastErrorTime != null &&
+        now.difference(_lastErrorTime!) < const Duration(seconds: 2)) {
+      debugPrint('Duplicate error event ignored: $errorKey');
+      return;
+    }
+    _lastErrorSongId = errorKey;
+    _lastErrorTime = now;
+
     _activeLogger?.logStep('Playback error triggered', false, detail: error.message);
 
     if (message.contains('429')) {
@@ -1918,8 +1937,8 @@ class PlayerService {
         debugPrint('Rate limit exceeded retry limit. Enforcing playback failure.');
         _activeLogger?.logStep('Rate limit retry count exceeded', false);
         _activeLogger?.printReport('FAILED: Toast displayed, queue unchanged');
-        Fluttertoast.showToast(
-          msg: "Sorry, this song couldn't be found or played. Please try another version or search for the song manually.",
+        _showThrottledToast(
+          "Sorry, this song couldn't be found or played. Please try another version or search for the song manually.",
           toastLength: Toast.LENGTH_LONG,
         );
         return;
@@ -1936,7 +1955,7 @@ class PlayerService {
       );
 
       try {
-        await _player.stop();
+        await _player.pause(); // Spotify-like: pause, do not stop
         await Future.delayed(Duration(seconds: delaySeconds));
 
         _fallbackSongResolved = false;
@@ -1944,8 +1963,8 @@ class PlayerService {
         if (refreshedSong == null) {
           _activeLogger?.logStep('Recovery search', false, detail: 'Resolution failed');
           _activeLogger?.printReport('FAILED: Toast displayed, queue unchanged');
-          Fluttertoast.showToast(
-            msg: "Sorry, this song couldn't be found or played. Please try another version or search for the song manually.",
+          _showThrottledToast(
+            "Sorry, this song couldn't be found or played. Please try another version or search for the song manually.",
             toastLength: Toast.LENGTH_LONG,
           );
           return;
@@ -1958,20 +1977,12 @@ class PlayerService {
           _rateLimitRetryCount,
         );
 
-        final retryInitialPos = null; // Always start retry songs at 0:00
-        if (_queue.length > 1) {
-          final queueWithRetrySong = _queue
-              .map((song) => song.id == retrySong.id ? retrySong : song)
-              .toList(growable: false);
-          await _setQueueSource(
-            retrySong,
-            playlist: queueWithRetrySong,
-            index: _currentIndex,
-            initialPosition: retryInitialPos,
-          );
-        } else {
-          await _setSingleSource(retrySong, initialPosition: retryInitialPos);
-        }
+        final retryInitialPos = Duration.zero; // Always start retry songs at 0:00
+        await _replaceCurrentAudioSource(
+          updatedSong: retrySong,
+          index: _currentIndex,
+          position: retryInitialPos,
+        );
 
         if (shouldAutoPlayAfterRetry) {
           final resumed = await _playEnsuringAudioFocus();
@@ -1985,8 +1996,8 @@ class PlayerService {
         debugPrint('429 retry failed: $e');
         _activeLogger?.logStep('Recovery search', false, detail: 'Error: $e');
         _activeLogger?.printReport('FAILED: Toast displayed, queue unchanged');
-        Fluttertoast.showToast(
-          msg: "Sorry, this song couldn't be found or played. Please try another version or search for the song manually.",
+        _showThrottledToast(
+          "Sorry, this song couldn't be found or played. Please try another version or search for the song manually.",
           toastLength: Toast.LENGTH_LONG,
         );
       } finally {
@@ -2009,8 +2020,8 @@ class PlayerService {
         debugPrint('Already attempted recovery for ${activeSong.id}. Stopping all further recovery attempts.');
         _activeLogger?.logStep('Recovery attempt count exceeded', false);
         _activeLogger?.printReport('FAILED: Toast displayed, queue unchanged');
-        Fluttertoast.showToast(
-          msg: "Sorry, this song couldn't be found or played. Please try another version or search for the song manually.",
+        _showThrottledToast(
+          "Sorry, this song couldn't be found or played. Please try another version or search for the song manually.",
           toastLength: Toast.LENGTH_LONG,
         );
         return;
@@ -2026,7 +2037,7 @@ class PlayerService {
       try {
         final lastPosition = _player.position;
         final shouldAutoPlayAfterRetry = true;
-        await _player.stop();
+        await _player.pause(); // Spotify-like: pause, do not stop
 
         _fallbackSongResolved = false;
         Song? refreshedSong;
@@ -2042,8 +2053,8 @@ class PlayerService {
           debugPrint('Recovery search returned no valid songs.');
           _activeLogger?.logStep('Recovery search', false, detail: 'Resolution failed');
           _activeLogger?.printReport('FAILED: Toast displayed, queue unchanged');
-          Fluttertoast.showToast(
-            msg: "Sorry, this song couldn't be found or played. Please try another version or search for the song manually.",
+          _showThrottledToast(
+            "Sorry, this song couldn't be found or played. Please try another version or search for the song manually.",
             toastLength: Toast.LENGTH_LONG,
           );
           return;
@@ -2057,19 +2068,11 @@ class PlayerService {
         );
 
         final retryInitialPos = lastPosition; // Preserve user's position on error recovery
-        if (_queue.length > 1) {
-          final queueWithRetrySong = _queue
-              .map((song) => song.id == retrySong.id ? retrySong : song)
-              .toList(growable: false);
-          await _setQueueSource(
-            retrySong,
-            playlist: queueWithRetrySong,
-            index: _currentIndex,
-            initialPosition: retryInitialPos,
-          );
-        } else {
-          await _setSingleSource(retrySong, initialPosition: retryInitialPos);
-        }
+        await _replaceCurrentAudioSource(
+          updatedSong: retrySong,
+          index: _currentIndex,
+          position: retryInitialPos,
+        );
 
         if (shouldAutoPlayAfterRetry) {
           final resumed = await _playEnsuringAudioFocus();
@@ -2083,8 +2086,8 @@ class PlayerService {
         debugPrint('URL refresh failed: $e');
         _activeLogger?.logStep('Recovery search', false, detail: 'Error: $e');
         _activeLogger?.printReport('FAILED: Toast displayed, queue unchanged');
-        Fluttertoast.showToast(
-          msg: "Sorry, this song couldn't be found or played. Please try another version or search for the song manually.",
+        _showThrottledToast(
+          "Sorry, this song couldn't be found or played. Please try another version or search for the song manually.",
           toastLength: Toast.LENGTH_LONG,
         );
       } finally {
@@ -3045,8 +3048,8 @@ class PlayerService {
         _qualityAdjustmentMsgController.add(
           'Connect to the internet to play this song.',
         );
-        Fluttertoast.showToast(
-          msg: 'Connect to the internet to play this song.',
+        _showThrottledToast(
+          'Connect to the internet to play this song.',
         );
         return;
       }
@@ -3209,72 +3212,132 @@ class PlayerService {
         }
       } catch (_) {}
       _pausedByNetworkLoss = false;
-      final wasPlaying =
-          _player.playing ||
-          (!_userPausedOrStoppedPlayback &&
-              !_pausedByAudioInterruption &&
-              !_pausedByOutputDisconnect &&
-              !_pausedByVideoPlayback &&
-              _currentSong != null);
-      if (_player.hasNext) {
-        // If offline, pre-resolve the next song's source so seeking to it
-        // doesn't attempt a dead stream URL.
-        if (!_isNetworkAvailable) {
-          final nextReady = await _prepareOfflineSourceForQueueIndex(
-            _currentIndex + 1,
-          );
-          if (!nextReady) {
-            _qualityAdjustmentMsgController.add('Next track is not downloaded.');
-            await _handleNetworkDropDuringPlayback();
-            _savePlaybackState();
-            return;
+      await _advanceQueue(isUserTriggered: true);
+    } finally {
+      _isSkipping = false;
+    }
+  }
+
+  static Future<void> _advanceQueue({required bool isUserTriggered}) async {
+    final wasPlaying = _player.playing ||
+        (!_userPausedOrStoppedPlayback &&
+            !_pausedByAudioInterruption &&
+            !_pausedByOutputDisconnect &&
+            !_pausedByVideoPlayback &&
+            _currentSong != null);
+
+    // If there is next item in sequence/queue
+    if (_currentIndex < _queue.length - 1) {
+      if (!_isNetworkAvailable) {
+        // Offline: prepare next downloaded track in queue
+        int? nextDownloadedIndex;
+        for (int i = _currentIndex + 1; i < _queue.length; i++) {
+          final resolved = await _resolveLocalSongCopy(_queue[i]);
+          if (_isSongUsingLocalSource(resolved)) {
+            nextDownloadedIndex = i;
+            break;
           }
         }
-        await _player.superSeekToNext();
-        try {
-          await _player.seek(Duration.zero);
-        } catch (_) {}
-      } else if (await _restoreForwardQueueFromHistory(
-        resumePlayback: wasPlaying,
-      )) {
-        // Restored the next queue session from forward history.
+        
+        if (nextDownloadedIndex != null) {
+          _currentIndex = nextDownloadedIndex;
+          _currentSong = _queue[_currentIndex];
+          final localSong = await _resolveLocalSongCopy(_currentSong!);
+          await _setSingleSource(localSong);
+          if (wasPlaying) {
+            await _playEnsuringAudioFocus();
+          }
+          _savePlaybackState();
+        } else {
+          _qualityAdjustmentMsgController.add('No more downloaded tracks.');
+          await _handleNetworkDropDuringPlayback();
+          _savePlaybackState();
+        }
       } else {
-        // Try fetching autoplay recommendations before stopping at queue end.
-        if (await _isAutoplayEnabled()) {
-          await _fetchAndAppendAutoplaySongs(
-            minCount: _autoplayBatchMin,
-            forceOfflineOnly: !_isNetworkAvailable,
-          );
-        }
+        // Online: advance natively using superSeekToNext
         if (_player.hasNext) {
-          if (!_isNetworkAvailable) {
-            final nextReady = await _prepareOfflineSourceForQueueIndex(
-              _currentIndex + 1,
-            );
-            if (!nextReady) {
-              _qualityAdjustmentMsgController.add(
-                'No downloaded tracks available next.',
-              );
-              await _handleNetworkDropDuringPlayback();
-              _savePlaybackState();
-              return;
-            }
-          }
           await _player.superSeekToNext();
           try {
             await _player.seek(Duration.zero);
           } catch (_) {}
         } else {
-          await _stopAtQueueEndAfterSkipNext();
+          // Fallback if sequence is out of sync
+          _currentIndex += 1;
+          _currentSong = _queue[_currentIndex];
+          final resolved = await _resolveSongForPlayback(_currentSong!);
+          if (resolved != null) {
+            await _setSingleSource(resolved);
+            if (wasPlaying) {
+              await _playEnsuringAudioFocus();
+            }
+          }
         }
+        _savePlaybackState();
       }
-      if (wasPlaying && !_player.playing && !_userPausedOrStoppedPlayback) {
-        await _playEnsuringAudioFocus();
-      }
-      _savePlaybackState();
-    } finally {
-      _isSkipping = false;
+      return;
     }
+
+    // End of queue: try forward history restoration first (user-triggered Next only)
+    if (isUserTriggered && await _restoreForwardQueueFromHistory(resumePlayback: wasPlaying)) {
+      return;
+    }
+
+    // End of queue: Autoplay Radio (append similar songs)
+    final autoplayEnabled = await _isAutoplayEnabled();
+    if (autoplayEnabled) {
+      await _fetchAndAppendAutoplaySongs(
+        minCount: _autoplayBatchMin,
+        forceOfflineOnly: !_isNetworkAvailable,
+      );
+      
+      // If new songs were successfully appended, advance to the first appended song
+      if (_currentIndex < _queue.length - 1) {
+        if (!_isNetworkAvailable) {
+          int? nextDownloadedIndex;
+          for (int i = _currentIndex + 1; i < _queue.length; i++) {
+            final resolved = await _resolveLocalSongCopy(_queue[i]);
+            if (_isSongUsingLocalSource(resolved)) {
+              nextDownloadedIndex = i;
+              break;
+            }
+          }
+          if (nextDownloadedIndex != null) {
+            _currentIndex = nextDownloadedIndex;
+            _currentSong = _queue[_currentIndex];
+            final localSong = await _resolveLocalSongCopy(_currentSong!);
+            await _setSingleSource(localSong);
+            if (wasPlaying) {
+              await _playEnsuringAudioFocus();
+            }
+            _savePlaybackState();
+          } else {
+            await _stopAtQueueEndAfterSkipNext();
+          }
+        } else {
+          if (_player.hasNext) {
+            await _player.superSeekToNext();
+            try {
+              await _player.seek(Duration.zero);
+            } catch (_) {}
+          } else {
+            _currentIndex += 1;
+            _currentSong = _queue[_currentIndex];
+            final resolved = await _resolveSongForPlayback(_currentSong!);
+            if (resolved != null) {
+              await _setSingleSource(resolved);
+              if (wasPlaying) {
+                await _playEnsuringAudioFocus();
+              }
+            }
+          }
+          _savePlaybackState();
+        }
+        return;
+      }
+    }
+
+    // No progression possible: stop at end of queue
+    await _stopAtQueueEndAfterSkipNext();
   }
 
   static Future<void> skipPrevious() async {
@@ -3615,6 +3678,18 @@ class PlayerService {
       _setSourceSwitching(false);
       _qualityApplyInProgress = false;
     }
+  }
+
+  static void _showThrottledToast(String msg, {Toast toastLength = Toast.LENGTH_LONG}) {
+    final now = DateTime.now();
+    if (_lastErrorToastMsg == msg &&
+        _lastErrorToastTime != null &&
+        now.difference(_lastErrorToastTime!) < const Duration(seconds: 5)) {
+      return;
+    }
+    _lastErrorToastMsg = msg;
+    _lastErrorToastTime = now;
+    Fluttertoast.showToast(msg: msg, toastLength: toastLength);
   }
 
   static Song? _activeQueueSong() {
@@ -4257,61 +4332,42 @@ class PlayerService {
   }
 
   static Future<void> _onPlaybackCompleted() async {
+    // 1. Natural Completion Check
+    final duration = _player.duration ?? Duration(seconds: _currentSong?.duration ?? 0);
+    final position = _player.position;
+    final finishedNaturally = duration != Duration.zero &&
+        position.inSeconds >= duration.inSeconds - 2;
+
+    if (!finishedNaturally) {
+      debugPrint('Playback completed event fired, but track did not finish naturally. Position: $position, Duration: $duration. Ignoring automatic skip.');
+      return;
+    }
+
     if (_currentSong != null) {
       unawaited(
         OfflineService.recordPlaybackProgress(
           _currentSong!,
-          _player.duration ?? _player.position,
-          duration: _player.duration,
+          duration,
+          duration: duration,
         ),
       );
     }
 
-    if (!await _isAutoplayEnabled()) return;
-    if (_queue.isEmpty) return;
-
-    // Normal online flow: advance to next song in queue
-    if (_isNetworkAvailable && _currentIndex < _queue.length - 1) {
-      _currentIndex += 1;
-      _currentSong = _queue[_currentIndex];
-      await _player.seekToNext();
-      if (!_player.playing) {
-        await _playEnsuringAudioFocus();
-      }
-      _savePlaybackState();
+    // 2. De-duplicate completion events
+    final songId = _currentSong?.id;
+    if (songId == null) return;
+    final now = DateTime.now();
+    if (_lastCompletedSongId == songId &&
+        _lastCompletedTime != null &&
+        now.difference(_lastCompletedTime!) < const Duration(seconds: 2)) {
+      debugPrint('Duplicate song completed event ignored for $songId');
       return;
     }
+    _lastCompletedSongId = songId;
+    _lastCompletedTime = now;
 
-    // Normal online flow: fetch more autoplay songs
-    if (_isNetworkAvailable) {
-      await _fetchAndAppendAutoplaySongs(minCount: _autoplayBatchMin);
-      if (_player.hasNext) {
-        await _player.seekToNext();
-        if (!_player.playing) {
-          await _playEnsuringAudioFocus();
-        }
-        _savePlaybackState();
-        return;
-      }
-    }
-
-    // Offline fallback: find next available offline song in current queue
-    if (!_isNetworkAvailable) {
-      for (int i = _currentIndex + 1; i < _queue.length; i++) {
-        final candidate = _queue[i];
-        final resolved = await _resolveLocalSongCopy(candidate);
-        if (_isSongUsingLocalSource(resolved)) {
-          _currentIndex = i;
-          _currentSong = resolved;
-          // We must update the audio source to point to the local file
-          await _setSingleSource(resolved);
-          await _playEnsuringAudioFocus();
-          return;
-        }
-      }
-    }
-
-    debugPrint('Autoplay: No compatible songs available to continue.');
+    // 3. Centralized Queue progression
+    await _advanceQueue(isUserTriggered: false);
   }
 
   static Future<bool> _isLikelyConnectivityIssue(String message) async {

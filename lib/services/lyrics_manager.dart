@@ -94,7 +94,12 @@ class LyricsManager extends ChangeNotifier {
     // When the queue index changes (skip next/prev, queue navigation)
     _currentIndexSub = PlayerService.player.currentIndexStream.listen((_) {
       final song = PlayerService.currentSong;
-      if (song != null && song.id != _currentSong?.id) {
+      if (song != null) {
+        if (_currentSong?.id == song.id &&
+            _state != LyricsLoadState.searching &&
+            _state != LyricsLoadState.idle) {
+          return;
+        }
         _onSongChanging(song);
         _scheduleFetch(song);
       }

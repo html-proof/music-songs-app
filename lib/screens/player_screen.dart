@@ -33,6 +33,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   bool _lyricsAutoScrollPausedByUser = false;
   bool _isProgrammaticLyricScroll = false;
   Timer? _programmaticLyricScrollResetTimer;
+  String? _lastRequestedLyricsSongId;
 
   static const double _lyricLineExtent = 46.0;
 
@@ -437,11 +438,15 @@ class _PlayerScreenState extends State<PlayerScreen> {
         final isLoadingNew = player.isLoadingNewSong;
 
         // Automatically trigger lyrics request for active song if needed
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted) {
-            context.read<LyricsManager>().requestLyrics(song);
-          }
-        });
+        // Only fire once per song to avoid rebuild loops
+        if (_lastRequestedLyricsSongId != song.id) {
+          _lastRequestedLyricsSongId = song.id;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) {
+              context.read<LyricsManager>().requestLyrics(song);
+            }
+          });
+        }
 
         final downloads = context.watch<DownloadProvider>();
         final isDownloaded = downloads.isDownloaded(song.id);

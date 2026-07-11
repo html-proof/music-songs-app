@@ -132,10 +132,11 @@ class LyricsManager extends ChangeNotifier {
     final isSameSong = _currentSong?.id == song.id;
 
     if (isSameSong && !forceRetry) {
-      // Already loading or ready for this song
+      // Already loading, ready, or exhausted for this song — no-op
       if (_state == LyricsLoadState.ready ||
           _state == LyricsLoadState.searching ||
-          _state == LyricsLoadState.retrying) {
+          _state == LyricsLoadState.retrying ||
+          _state == LyricsLoadState.unavailable) {
         return;
       }
     }
@@ -371,6 +372,9 @@ class LyricsManager extends ChangeNotifier {
   }
 
   void _applyUnavailable() {
+    // Guard: don't re-notify if already in unavailable state (prevents rebuild loops)
+    if (_state == LyricsLoadState.unavailable) return;
+
     _state = LyricsLoadState.unavailable;
     _payload = null;
     _originalSyncedLines = const [];

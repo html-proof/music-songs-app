@@ -220,20 +220,24 @@ class _PlayerScreenState extends State<PlayerScreen> {
     LyricsPayload? found;
 
     try {
-      final phase1 = Future.any(<Future<LyricsPayload?>>[
+      final results = await Future.wait(<Future<LyricsPayload?>>[
         // Attempt 1: full song-aware lookup (Saavn + LRC exact + search)
         LyricsService.getLyricsPayloadForSong(song),
         // Attempt 2: plain title search
         LyricsService.getLyricsByQuery(title, song),
         // Attempt 3: title + artist
         LyricsService.getLyricsByQuery('$title $artist'.trim(), song),
-      ]);
-
-      // Hard cap: give Phase 1 at most 8 seconds
-      found = await phase1.timeout(
+      ]).timeout(
         const Duration(seconds: 8),
-        onTimeout: () => null,
+        onTimeout: () => const <LyricsPayload?>[null, null, null],
       );
+
+      for (final res in results) {
+        if (res != null && res.hasAny) {
+          found = res;
+          break;
+        }
+      }
     } catch (e) {
       debugPrint('[Lyrics] Phase 1 search error: $e');
     }

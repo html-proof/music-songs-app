@@ -104,7 +104,15 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
         // the start of the new track. 300ms is tight enough to distinguish a
         // true fresh start from a stale audio-buffer position carried over from
         // the previous song (which typically shows up as 5–15 seconds).
-        if (pos == Duration.zero || pos.inMilliseconds < 300) {
+        //
+        // Fallback: If the player is already in ready state or actively playing,
+        // it means the transition has finished and we must not ignore the position.
+        final state = PlayerService.player.processingState;
+        final playing = PlayerService.player.playing;
+        if (pos == Duration.zero ||
+            pos.inMilliseconds < 300 ||
+            state == ProcessingState.ready ||
+            playing) {
           _ignorePositionUntilZero = false;
         } else {
           return;
@@ -143,6 +151,9 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
       _isBuffering =
           state.processingState == ProcessingState.buffering ||
           state.processingState == ProcessingState.loading;
+      if (state.processingState == ProcessingState.ready) {
+        _ignorePositionUntilZero = false;
+      }
       notifyListeners();
       if (state.processingState != ProcessingState.idle) {
         unawaited(_hydrateSongStateIfMissing());

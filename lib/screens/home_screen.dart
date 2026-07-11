@@ -30,6 +30,7 @@ import 'login_screen.dart';
 import 'preferences_screen.dart';
 import 'search_screen.dart';
 import 'offline_library_screen.dart';
+import 'playlist_import_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   final bool showReconnectMessageOnStart;
@@ -1392,6 +1393,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                             onPressed: () => _showProfileActions(auth),
                           ),
                           IconButton(
+                            icon: const Icon(Icons.playlist_add_rounded, color: AppTheme.textPrimary, size: 26),
+                            tooltip: 'Import Playlist',
+                            onPressed: () => Navigator.push(
+                              context,
+                              MaterialPageRoute(builder: (_) => const PlaylistImportScreen()),
+                            ),
+                          ),
+                          IconButton(
                             icon: const Icon(Icons.search_rounded, color: AppTheme.textPrimary, size: 24),
                             onPressed: () => Navigator.push(
                               context,
@@ -1723,6 +1732,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           children: [
             const SizedBox(height: 8),
             ListTile(
+              leading: const Icon(Icons.playlist_add_rounded, color: AppTheme.accentPurple),
+              title: const Text('Import Playlist'),
+              onTap: () => Navigator.pop(sheetContext, 'import_playlist'),
+            ),
+            ListTile(
               leading: const Icon(Icons.tune_rounded),
               title: const Text('Preferences'),
               onTap: () => Navigator.pop(sheetContext, 'preferences'),
@@ -1739,6 +1753,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     );
 
     if (!mounted || action == null) return;
+    if (action == 'import_playlist') {
+      await Navigator.push(
+        context,
+        MaterialPageRoute(builder: (_) => const PlaylistImportScreen()),
+      );
+      return;
+    }
     if (action == 'preferences') {
       await Navigator.push(
         context,

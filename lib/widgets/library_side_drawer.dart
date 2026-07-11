@@ -440,7 +440,9 @@ class _LibrarySideDrawerState extends State<LibrarySideDrawer> {
 
   @override
   Widget build(BuildContext context) {
-    final player = context.watch<PlayerProvider>();
+    final player = context.read<PlayerProvider>();
+    final isOffline = context.select<PlayerProvider, bool>((p) => p.isOffline);
+    final currentSongId = context.select<PlayerProvider, String?>((p) => p.currentSong?.id);
     final playlistProvider = context.watch<PlaylistProvider>();
     final sortedSongs = _sortedSongs();
     final sortedAlbums = _sortedAlbums();
@@ -483,7 +485,7 @@ class _LibrarySideDrawerState extends State<LibrarySideDrawer> {
                   ],
                 ),
               ),
-              if (player.isOffline)
+              if (isOffline)
                 Container(
                   width: double.infinity,
                   margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
@@ -586,8 +588,7 @@ class _LibrarySideDrawerState extends State<LibrarySideDrawer> {
                               ...List.generate(sortedSongs.length, (index) {
                                 final entry = sortedSongs[index];
                                 final song = entry.song;
-                                final isPlaying =
-                                    player.currentSong?.id == song.id;
+                                final isPlaying = currentSongId == song.id;
                                 return ListTile(
                                   dense: true,
                                   shape: RoundedRectangleBorder(
@@ -784,7 +785,7 @@ class _LibrarySideDrawerState extends State<LibrarySideDrawer> {
                               ...userPlaylists.map((playlist) {
                                 final offlineCount = playlistProvider
                                     .offlinePlayableCount(playlist);
-                                final subtitle = player.isOffline
+                                final subtitle = isOffline
                                     ? '$offlineCount/${playlist.songs.length} available offline'
                                     : '${playlist.songs.length} songs';
 

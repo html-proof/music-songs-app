@@ -759,7 +759,8 @@ class _AlbumDetailScreenState extends State<AlbumDetailScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final player = context.watch<PlayerProvider>();
+    final player = context.read<PlayerProvider>();
+    final currentSongId = context.select<PlayerProvider, String?>((p) => p.currentSong?.id);
     final downloadProvider = context.watch<DownloadProvider>();
     final hasMoreSection = _moreAlbums.isNotEmpty || _isLoadingMore;
     final preferredLanguages = _preferredLanguages();
@@ -1033,7 +1034,7 @@ class _AlbumDetailScreenState extends State<AlbumDetailScreen> {
                           final song = _songs[index];
                           return SongTile(
                             song: song,
-                            isPlaying: player.currentSong?.id == song.id,
+                            isPlaying: currentSongId == song.id,
                             onTap: () => player.play(
                               song,
                               playlist: _songs,

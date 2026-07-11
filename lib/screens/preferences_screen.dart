@@ -240,8 +240,7 @@ class _PlaybackSettingsCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isQualityChanging = context
-        .watch<PlayerProvider>()
-        .isQualitySwitching;
+        .select<PlayerProvider, bool>((p) => p.isQualitySwitching);
 
     return Container(
       decoration: BoxDecoration(

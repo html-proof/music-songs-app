@@ -533,93 +533,97 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   Widget _buildContinueListening(PlayerProvider player) {
-    final song = player.currentSong;
-    if (song == null) return const SizedBox.shrink();
+    return Consumer<PlayerProvider>(
+      builder: (context, activePlayer, _) {
+        final song = activePlayer.currentSong;
+        if (song == null) return const SizedBox.shrink();
 
-    final posMs = player.position.inMilliseconds;
-    final durMs = player.duration.inMilliseconds;
-    final percent = (durMs > 0) ? (posMs / durMs).clamp(0.0, 1.0) : 0.0;
+        final posMs = activePlayer.position.inMilliseconds;
+        final durMs = activePlayer.duration.inMilliseconds;
+        final percent = (durMs > 0) ? (posMs / durMs).clamp(0.0, 1.0) : 0.0;
 
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: AppTheme.cardDark.withValues(alpha: 0.4),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.05)),
-      ),
-      child: Row(
-        children: [
-          ClipRRect(
-            borderRadius: BorderRadius.circular(8),
-            child: OfflineArtwork(
-              songId: song.id,
-              imageUrl: song.imageUrl,
-              width: 48,
-              height: 48,
-              fit: BoxFit.cover,
-              errorWidget: const Icon(Icons.music_note),
-            ),
+        return Container(
+          margin: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: AppTheme.cardDark.withValues(alpha: 0.4),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.05)),
           ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'CONTINUE LISTENING',
-                  style: TextStyle(
-                    fontSize: 9,
-                    fontWeight: FontWeight.bold,
-                    color: AppTheme.accentPurple,
-                    letterSpacing: 1.1,
-                  ),
+          child: Row(
+            children: [
+              ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: OfflineArtwork(
+                  songId: song.id,
+                  imageUrl: song.imageUrl,
+                  width: 48,
+                  height: 48,
+                  fit: BoxFit.cover,
+                  errorWidget: const Icon(Icons.music_note),
                 ),
-                const SizedBox(height: 2),
-                Text(
-                  song.name,
-                  style: const TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.white,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'CONTINUE LISTENING',
+                      style: TextStyle(
+                        fontSize: 9,
+                        fontWeight: FontWeight.bold,
+                        color: AppTheme.accentPurple,
+                        letterSpacing: 1.1,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      song.name,
+                      style: const TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      song.artist ?? 'Unknown Artist',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: AppTheme.textSecondary,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 6),
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(2),
+                      child: LinearProgressIndicator(
+                        value: percent,
+                        minHeight: 3,
+                        backgroundColor: Colors.white.withValues(alpha: 0.1),
+                        valueColor: const AlwaysStoppedAnimation(AppTheme.accentPurple),
+                      ),
+                    ),
+                  ],
                 ),
-                const SizedBox(height: 2),
-                Text(
-                  song.artist ?? 'Unknown Artist',
-                  style: const TextStyle(
-                    fontSize: 12,
-                    color: AppTheme.textSecondary,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
+              ),
+              const SizedBox(width: 12),
+              IconButton(
+                icon: Icon(
+                  activePlayer.isPlaying ? Icons.pause_circle_filled : Icons.play_circle_filled,
+                  size: 38,
+                  color: Colors.white,
                 ),
-                const SizedBox(height: 6),
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(2),
-                  child: LinearProgressIndicator(
-                    value: percent,
-                    minHeight: 3,
-                    backgroundColor: Colors.white.withValues(alpha: 0.1),
-                    valueColor: const AlwaysStoppedAnimation(AppTheme.accentPurple),
-                  ),
-                ),
-              ],
-            ),
+                onPressed: () => activePlayer.togglePlayPause(),
+              ),
+            ],
           ),
-          const SizedBox(width: 12),
-          IconButton(
-            icon: Icon(
-              player.isPlaying ? Icons.pause_circle_filled : Icons.play_circle_filled,
-              size: 38,
-              color: Colors.white,
-            ),
-            onPressed: () => player.togglePlayPause(),
-          ),
-        ],
-      ),
+        );
+      },
     );
   }
 
@@ -1297,24 +1301,27 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     final auth = context.watch<AuthProvider>();
-    final player = context.watch<PlayerProvider>();
+    final player = context.read<PlayerProvider>();
+    final isOffline = context.select<PlayerProvider, bool>((p) => p.isOffline);
+    final currentSong = context.select<PlayerProvider, Song?>((p) => p.currentSong);
+    final currentSongId = context.select<PlayerProvider, String?>((p) => p.currentSong?.id);
     _maybeHandlePlaybackResume(auth);
 
-    if (_lastOfflineState != player.isOffline) {
-      final wasOffline = _lastOfflineState ?? player.isOffline;
-      _lastOfflineState = player.isOffline;
+    if (_lastOfflineState != isOffline) {
+      final wasOffline = _lastOfflineState ?? isOffline;
+      _lastOfflineState = isOffline;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
         _onOfflineStateChanged(
           wasOffline: wasOffline,
-          isOffline: player.isOffline,
+          isOffline: isOffline,
         );
       });
     }
 
     if (widget.showReconnectMessageOnStart &&
         !_handledReconnectMessageOnStart &&
-        !player.isOffline) {
+        !isOffline) {
       _handledReconnectMessageOnStart = true;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
@@ -1322,7 +1329,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       });
     }
 
-    final featuredSong = player.currentSong ?? (_recommendations.isNotEmpty ? _recommendations.first : null);
+    final featuredSong = currentSong ?? (_recommendations.isNotEmpty ? _recommendations.first : null);
     final gradientColors = _getGradientColors(featuredSong);
 
     return PopScope(
@@ -1417,7 +1424,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   ),
                 ),
 
-                if (player.isOffline)
+                if (isOffline)
                   Container(
                     margin: const EdgeInsets.symmetric(
                       horizontal: 20,
@@ -1513,7 +1520,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                 ..._trendingSongs.take(5).map(
                                   (song) => SongTile(
                                     song: song,
-                                    isPlaying: player.currentSong?.id == song.id,
+                                    isPlaying: currentSongId == song.id,
                                     onTap: () => player.play(song, playlist: _trendingSongs, index: _trendingSongs.indexOf(song)),
                                   ),
                                 ),
@@ -1523,7 +1530,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                 ..._recommendations.take(5).map(
                                   (song) => SongTile(
                                     song: song,
-                                    isPlaying: player.currentSong?.id == song.id,
+                                    isPlaying: currentSongId == song.id,
                                     onTap: () => player.play(song, playlist: _recommendations, index: _recommendations.indexOf(song)),
                                   ),
                                 ),

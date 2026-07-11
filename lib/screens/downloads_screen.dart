@@ -123,7 +123,7 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
   @override
   Widget build(BuildContext context) {
     final downloads = context.watch<DownloadProvider>();
-    final player = context.watch<PlayerProvider>();
+    final player = context.read<PlayerProvider>();
 
     final allSongs = downloads.downloadedSongs;
     final filteredSongs = allSongs.where((song) {

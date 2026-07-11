@@ -79,7 +79,8 @@ class _ArtistDetailScreenState extends State<ArtistDetailScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final player = context.watch<PlayerProvider>();
+    final player = context.read<PlayerProvider>();
+    final currentSongId = context.select<PlayerProvider, String?>((p) => p.currentSong?.id);
     final artist = _detailedArtist ?? widget.artist;
 
     return Scaffold(
@@ -180,7 +181,7 @@ class _ArtistDetailScreenState extends State<ArtistDetailScreen> {
                               final song = _topTracks[index];
                               return SongTile(
                                 song: song,
-                                isPlaying: player.currentSong?.id == song.id,
+                                isPlaying: currentSongId == song.id,
                                 onTap: () => player.play(song, playlist: _topTracks),
                               );
                             },

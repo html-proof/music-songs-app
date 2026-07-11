@@ -266,7 +266,8 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
   @override
   Widget build(BuildContext context) {
     final auth = context.watch<AuthProvider>();
-    final player = context.watch<PlayerProvider>();
+    final player = context.read<PlayerProvider>();
+    final isOffline = context.select<PlayerProvider, bool>((p) => p.isOffline);
     final playlistsProvider = context.watch<PlaylistProvider>();
     final downloadProvider = context.watch<DownloadProvider>();
     
@@ -274,10 +275,10 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
     final visiblePlaylist = _playlistFor(visibleSongs);
     _maybeHandlePlaybackResume(auth);
 
-    if (_lastOfflineState != player.isOffline) {
-      final wasOffline = _lastOfflineState ?? player.isOffline;
-      _lastOfflineState = player.isOffline;
-      if (wasOffline && !player.isOffline && !_onlineRedirectScheduled) {
+    if (_lastOfflineState != isOffline) {
+      final wasOffline = _lastOfflineState ?? isOffline;
+      _lastOfflineState = isOffline;
+      if (wasOffline && !isOffline && !_onlineRedirectScheduled) {
         _onlineRedirectScheduled = true;
         WidgetsBinding.instance.addPostFrameCallback((_) async {
           if (!mounted) return;
@@ -343,7 +344,7 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
           child: SafeArea(
             child: Column(
               children: [
-                if (player.isOffline)
+                if (isOffline)
                   Container(
                     width: double.infinity,
                     padding: const EdgeInsets.symmetric(vertical: 8),
@@ -687,8 +688,8 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
     required List<Song> playlist,
   }) {
     final song = record.song;
-    final isCurrentSong = player.currentSong?.id == song.id;
-    final isPlaying = isCurrentSong && player.isPlaying;
+    final isCurrentSong = context.select<PlayerProvider, bool>((p) => p.currentSong?.id == song.id);
+    final isPlaying = isCurrentSong && context.select<PlayerProvider, bool>((p) => p.isPlaying);
     final subtitleParts = <String>[];
     final artist = (song.artist ?? '').trim();
     final album = (song.album ?? '').trim();
@@ -934,7 +935,9 @@ class OfflineDrillDownScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final player = context.watch<PlayerProvider>();
+    final player = context.read<PlayerProvider>();
+    final currentSongId = context.select<PlayerProvider, String?>((p) => p.currentSong?.id);
+    final isPlaying = context.select<PlayerProvider, bool>((p) => p.isPlaying);
     final playlist = songs.map((record) => record.song).toList();
 
     return Scaffold(
@@ -955,8 +958,8 @@ class OfflineDrillDownScreen extends StatelessWidget {
                   itemBuilder: (context, index) {
                     final record = songs[index];
                     final song = record.song;
-                    final isCurrentSong = player.currentSong?.id == song.id;
-                    final isPlaying = isCurrentSong && player.isPlaying;
+                    final isCurrentSong = currentSongId == song.id;
+                    final isPlayingSong = isCurrentSong && isPlaying;
 
                     return Container(
                       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
@@ -1000,7 +1003,7 @@ class OfflineDrillDownScreen extends StatelessWidget {
                         },
                         trailing: Icon(
                           isCurrentSong
-                              ? (isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded)
+                              ? (isPlayingSong ? Icons.pause_rounded : Icons.play_arrow_rounded)
                               : Icons.play_arrow_rounded,
                           color: isCurrentSong ? AppTheme.accentPurple : AppTheme.textMuted,
                         ),

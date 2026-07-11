@@ -112,7 +112,9 @@ class _SearchScreenState extends State<SearchScreen> {
   @override
   Widget build(BuildContext context) {
     final search = context.watch<SearchProvider>();
-    final player = context.watch<PlayerProvider>();
+    final player = context.read<PlayerProvider>();
+    final isOffline = context.select<PlayerProvider, bool>((p) => p.isOffline);
+    final currentSongId = context.select<PlayerProvider, String?>((p) => p.currentSong?.id);
     final topResultSong = search.songs.isEmpty
         ? null
         : _selectTopResultSong(search.songs);
@@ -132,11 +134,11 @@ class _SearchScreenState extends State<SearchScreen> {
         search.albums.isEmpty &&
         search.artists.isEmpty;
 
-    if (_lastOfflineMode != player.isOffline) {
-      _lastOfflineMode = player.isOffline;
+    if (_lastOfflineMode != isOffline) {
+      _lastOfflineMode = isOffline;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
-        context.read<SearchProvider>().setOfflineMode(player.isOffline);
+        context.read<SearchProvider>().setOfflineMode(isOffline);
       });
     }
 
@@ -164,7 +166,7 @@ class _SearchScreenState extends State<SearchScreen> {
                         focusNode: _focusNode,
                         style: const TextStyle(color: AppTheme.textPrimary),
                         decoration: InputDecoration(
-                          hintText: player.isOffline
+                          hintText: isOffline
                               ? 'Offline search in cached songs...'
                               : 'Search songs, artists, albums...',
                           suffixIcon: Row(
@@ -229,7 +231,7 @@ class _SearchScreenState extends State<SearchScreen> {
                 ),
               ),
 
-              if (player.isOffline)
+              if (isOffline)
                 Container(
                   width: double.infinity,
                   margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
@@ -487,7 +489,7 @@ class _SearchScreenState extends State<SearchScreen> {
                                             final originalIndex = search.songs.indexOf(song);
                                             return SongTile(
                                               song: song,
-                                              isPlaying: player.currentSong?.id == song.id,
+                                              isPlaying: currentSongId == song.id,
                                               onTap: () => player.play(
                                                 song,
                                                 playlist: search.songs,

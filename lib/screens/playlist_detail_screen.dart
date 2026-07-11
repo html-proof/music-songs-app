@@ -29,7 +29,10 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
   Widget build(BuildContext context) {
     final playlistId = widget.playlistId;
     final playlists = context.watch<PlaylistProvider>();
-    final player = context.watch<PlayerProvider>();
+    final player = context.read<PlayerProvider>();
+    final isOffline = context.select<PlayerProvider, bool>((p) => p.isOffline);
+    final currentSongId = context.select<PlayerProvider, String?>((p) => p.currentSong?.id);
+    final shuffleModeEnabled = context.select<PlayerProvider, bool>((p) => p.shuffleModeEnabled);
     final downloadProvider = context.watch<DownloadProvider>();
     final playlist = playlists.getById(playlistId);
 
@@ -61,7 +64,7 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
 
     final playableSongs = playlists.buildPlayableSongs(
       playlist,
-      offlineOnly: player.isOffline,
+      offlineOnly: isOffline,
     );
     final offlineAvailable = playlists.offlinePlayableCount(playlist);
     final cover = _playlistCover(playlist);
@@ -224,7 +227,7 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
                           Row(
                             children: [
                               Text(
-                                player.isOffline
+                                isOffline
                                     ? '$offlineAvailable available offline'
                                     : '$offlineAvailable cached for offline',
                                 style: const TextStyle(
@@ -287,7 +290,7 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
                                     startSong: playableSongs.first,
                                   ),
                             icon: const Icon(Icons.play_arrow_rounded, color: Colors.white),
-                            label: Text(player.isOffline ? 'Play Offline' : 'Play', style: const TextStyle(fontWeight: FontWeight.bold)),
+                            label: Text(isOffline ? 'Play Offline' : 'Play', style: const TextStyle(fontWeight: FontWeight.bold)),
                             style: ElevatedButton.styleFrom(
                               backgroundColor: AppTheme.accentPurple,
                               foregroundColor: Colors.white,
@@ -302,7 +305,7 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
                             onPressed: playableSongs.isEmpty
                                 ? null
                                 : () async {
-                                    if (!player.shuffleModeEnabled) {
+                                    if (!shuffleModeEnabled) {
                                       await player.toggleShuffleMode();
                                     }
                                     final randomIndex = Random().nextInt(playableSongs.length);
@@ -361,12 +364,12 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
                         },
                         itemBuilder: (_, index) {
                           final song = playlist.songs[index];
-                          final isPlaying = player.currentSong?.id == song.id;
-                          final isPlayableNow = playlists
-                              .buildPlayableSongs(
-                                playlist.copyWith(songs: [song]),
-                                offlineOnly: player.isOffline,
-                              )
+                           final isPlaying = currentSongId == song.id;
+                           final isPlayableNow = playlists
+                               .buildPlayableSongs(
+                                 playlist.copyWith(songs: [song]),
+                                 offlineOnly: isOffline,
+                               )
                               .isNotEmpty;
 
                           return Container(
@@ -439,7 +442,7 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
                                       _subtitle(
                                         song: song,
                                         isPlayableNow: isPlayableNow,
-                                        offlineMode: player.isOffline,
+                                        offlineMode: isOffline,
                                       ),
                                       maxLines: 1,
                                       overflow: TextOverflow.ellipsis,
@@ -480,15 +483,15 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
                                 ],
                               ),
                               onTap: () {
-                                final queue = playlists.buildPlayableSongs(
-                                  playlist,
-                                  offlineOnly: player.isOffline,
-                                );
+                                 final queue = playlists.buildPlayableSongs(
+                                   playlist,
+                                   offlineOnly: isOffline,
+                                 );
                                 if (queue.isEmpty) {
                                   ScaffoldMessenger.of(context).showSnackBar(
                                     SnackBar(
                                       content: Text(
-                                        player.isOffline
+                                        isOffline
                                             ? 'No offline songs available in this playlist.'
                                             : 'No playable songs available in this playlist.',
                                       ),

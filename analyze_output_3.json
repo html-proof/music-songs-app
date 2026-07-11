@@ -1,0 +1,4 @@
+[error] The method 'removeAt' isn't defined for the type 'AudioPlayer' (D:\jio\music_hub\lib\services\player_service.dart:2867:23)
+[error] The method 'insert' isn't defined for the type 'AudioPlayer' (D:\jio\music_hub\lib\services\player_service.dart:2868:23)
+[error] The method 'addAll' isn't defined for the type 'AudioPlayer' (D:\jio\music_hub\lib\services\player_service.dart:3398:21)
+[warning] The value of the local variable 'currentPosition' isn't used (D:\jio\music_hub\lib\services\player_service.dart:3395:11)

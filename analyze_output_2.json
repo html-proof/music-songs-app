@@ -1,0 +1,5 @@
+[info] 'ConcatenatingAudioSource' is deprecated and shouldn't be used. Use AudioPlayer.setAudioSources instead (D:\jio\music_hub\lib\services\player_service.dart:1901:28)
+[info] 'ConcatenatingAudioSource' is deprecated and shouldn't be used. Use AudioPlayer.setAudioSources instead (D:\jio\music_hub\lib\services\player_service.dart:2868:46)
+[info] 'ConcatenatingAudioSource' is deprecated and shouldn't be used. Use AudioPlayer.setAudioSources instead (D:\jio\music_hub\lib\services\player_service.dart:2890:28)
+[info] 'ConcatenatingAudioSource' is deprecated and shouldn't be used. Use AudioPlayer.setAudioSources instead (D:\jio\music_hub\lib\services\player_service.dart:3409:24)
+[info] 'ConcatenatingAudioSource' is deprecated and shouldn't be used. Use AudioPlayer.setAudioSources instead (D:\jio\music_hub\lib\services\player_service.dart:3416:26)

@@ -167,8 +167,8 @@ class PlayerService {
   static bool _isSwitchingSource = false;
   static final StreamController<bool> _sourceSwitchingController =
       StreamController<bool>.broadcast();
-  static AudioQuality _selectedAudioQuality = AudioQuality.high;
-  static bool _mobileDataSaverEnabled = false;
+  static AudioQuality _selectedAudioQuality = AudioQuality.auto;
+  static bool _dataSaverEnabled = false;
   static bool _dolbyEffectEnabled = false;
   static int? _temporaryAutoKbps;
   static const int _adaptiveLowKbps = 96;
@@ -1026,8 +1026,8 @@ class PlayerService {
   static Future<void> _syncQualityPreferenceFromStorage() async {
     final uid = _currentUserUidSafely();
     if (uid == null) {
-      _selectedAudioQuality = AudioQuality.high;
-      _mobileDataSaverEnabled = false;
+      _selectedAudioQuality = AudioQuality.auto;
+      _dataSaverEnabled = false;
       _dolbyEffectEnabled = false;
       _conversationAssistMode = SmartConversationAssistMode.off;
       _conversationAssistReductionLevel = 0.30;
@@ -1047,8 +1047,8 @@ class PlayerService {
     }
 
     final prefs = await PreferencesService.getPreferences(uid);
-    _selectedAudioQuality = prefs?.audioQuality ?? AudioQuality.high;
-    _mobileDataSaverEnabled = prefs?.mobileDataSaverEnabled ?? false;
+    _selectedAudioQuality = prefs?.audioQuality ?? AudioQuality.auto;
+    _dataSaverEnabled = prefs?.dataSaverEnabled ?? false;
     _dolbyEffectEnabled = prefs?.dolbyEffectEnabled ?? false;
     _conversationAssistMode =
         prefs?.smartConversationAssistMode ?? SmartConversationAssistMode.off;
@@ -1086,12 +1086,12 @@ class PlayerService {
     await _refreshResolvedPreferredQuality(applyNow: applyNow, force: true);
   }
 
-  static Future<void> setMobileDataSaverEnabled(
+  static Future<void> setDataSaverEnabled(
     bool enabled, {
     bool applyNow = true,
   }) async {
     await init();
-    _mobileDataSaverEnabled = enabled;
+    _dataSaverEnabled = enabled;
 
     // Clear temporary adaptive downgrade so Auto mode can recalculate using
     // the latest Data Saver + network rules immediately.
@@ -1551,10 +1551,10 @@ class PlayerService {
 
   /// Human-readable label for a resolved kbps value.
   static String _labelForKbps(int kbps) {
-    if (kbps >= AudioQuality.ultra.kbps) return '480 kbps';
-    if (kbps >= AudioQuality.lossless.kbps) return '320 kbps';
+    if (kbps >= AudioQuality.veryHigh.kbps) return '320 kbps';
     if (kbps >= AudioQuality.high.kbps) return '160 kbps';
-    if (kbps >= _adaptiveLowKbps) return '96 kbps';
+    if (kbps >= AudioQuality.normal.kbps) return '96 kbps';
+    if (kbps >= AudioQuality.low.kbps) return '64 kbps';
     return '$kbps kbps';
   }
 
@@ -1565,11 +1565,11 @@ class PlayerService {
       return _selectedAudioQuality.maxMb;
     }
     // Auto mode: pick the cap matching the resolved bitrate tier.
-    if (kbps >= AudioQuality.ultra.kbps) return AudioQuality.ultra.maxMb;
-    if (kbps >= AudioQuality.lossless.kbps) return AudioQuality.lossless.maxMb;
+    if (kbps >= AudioQuality.veryHigh.kbps) return AudioQuality.veryHigh.maxMb;
     if (kbps >= AudioQuality.high.kbps) return AudioQuality.high.maxMb;
-    if (kbps >= AudioQuality.medium.kbps) return AudioQuality.medium.maxMb;
-    return AudioQuality.lower.maxMb;
+    if (kbps >= AudioQuality.normal.kbps) return AudioQuality.normal.maxMb;
+    if (kbps >= AudioQuality.low.kbps) return AudioQuality.low.maxMb;
+    return AudioQuality.dataSaver.maxMb;
   }
 
   static Future<int> _resolvePreferredStreamingKbps() async {
@@ -1598,7 +1598,7 @@ class PlayerService {
       probeUrl: probeUrl,
     );
     var resolvedKbps = _adaptiveBitrateFromSpeed(speedMbps);
-    if (_mobileDataSaverEnabled &&
+    if (_dataSaverEnabled &&
         connectivity.contains(ConnectivityResult.mobile)) {
       resolvedKbps = _adaptiveLowKbps;
     }
@@ -1616,7 +1616,7 @@ class PlayerService {
     if (results.contains(ConnectivityResult.ethernet)) return 12.0;
     if (results.contains(ConnectivityResult.wifi)) return 4.0;
     if (results.contains(ConnectivityResult.mobile)) {
-      return _mobileDataSaverEnabled ? 0.9 : 1.6;
+      return _dataSaverEnabled ? 0.9 : 1.6;
     }
     return 0.8;
   }

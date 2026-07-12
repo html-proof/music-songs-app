@@ -129,8 +129,7 @@ class PreferencesScreen extends StatelessWidget {
                     _PlaybackSettingsCard(
                       autoplayEnabled: preferences.autoplayEnabled,
                       audioQuality: preferences.audioQuality,
-                      mobileDataSaverEnabled:
-                          preferences.mobileDataSaverEnabled,
+                      downloadQuality: preferences.downloadQuality,
                       dolbyEffectEnabled: preferences.dolbyEffectEnabled,
                       smartConversationAssistMode:
                           preferences.smartConversationAssistMode,
@@ -146,8 +145,8 @@ class PreferencesScreen extends StatelessWidget {
                       onAudioQualityChanged: (quality) async {
                         await preferences.setAudioQuality(quality);
                       },
-                      onMobileDataSaverChanged: (enabled) async {
-                        await preferences.setMobileDataSaverEnabled(enabled);
+                      onDownloadQualityChanged: (quality) async {
+                        await preferences.setDownloadQuality(quality);
                       },
                       onDolbyEffectChanged: (enabled) async {
                         await preferences.setDolbyEffectEnabled(enabled);
@@ -185,15 +184,28 @@ class PreferencesScreen extends StatelessWidget {
   }
 }
 
+// ─── Playback Settings ─────────────────────────────────────────────────────
+
 class _PlaybackSettingsCard extends StatelessWidget {
-  static const List<AudioQuality> _qualityOptions = [
-    AudioQuality.lower,
-    AudioQuality.medium,
-    AudioQuality.high,
-    AudioQuality.lossless,
-    AudioQuality.ultra,
+  /// Streaming quality options (includes Auto).
+  static const List<AudioQuality> _streamingQualityOptions = [
     AudioQuality.auto,
+    AudioQuality.dataSaver,
+    AudioQuality.low,
+    AudioQuality.normal,
+    AudioQuality.high,
+    AudioQuality.veryHigh,
   ];
+
+  /// Download quality options (no Auto — user picks a fixed tier).
+  static const List<AudioQuality> _downloadQualityOptions = [
+    AudioQuality.dataSaver,
+    AudioQuality.low,
+    AudioQuality.normal,
+    AudioQuality.high,
+    AudioQuality.veryHigh,
+  ];
+
   static const List<SmartConversationAssistMode> _conversationModes = [
     SmartConversationAssistMode.off,
     SmartConversationAssistMode.manualOnly,
@@ -202,7 +214,7 @@ class _PlaybackSettingsCard extends StatelessWidget {
 
   final bool autoplayEnabled;
   final AudioQuality audioQuality;
-  final bool mobileDataSaverEnabled;
+  final AudioQuality downloadQuality;
   final bool dolbyEffectEnabled;
   final SmartConversationAssistMode smartConversationAssistMode;
   final int conversationAssistReductionPercent;
@@ -210,7 +222,7 @@ class _PlaybackSettingsCard extends StatelessWidget {
   final bool conversationAssistIgnoreSingleEarbud;
   final ValueChanged<bool> onAutoplayChanged;
   final ValueChanged<AudioQuality> onAudioQualityChanged;
-  final ValueChanged<bool> onMobileDataSaverChanged;
+  final ValueChanged<AudioQuality> onDownloadQualityChanged;
   final ValueChanged<bool> onDolbyEffectChanged;
   final ValueChanged<SmartConversationAssistMode>
   onSmartConversationAssistModeChanged;
@@ -221,7 +233,7 @@ class _PlaybackSettingsCard extends StatelessWidget {
   const _PlaybackSettingsCard({
     required this.autoplayEnabled,
     required this.audioQuality,
-    required this.mobileDataSaverEnabled,
+    required this.downloadQuality,
     required this.dolbyEffectEnabled,
     required this.smartConversationAssistMode,
     required this.conversationAssistReductionPercent,
@@ -229,7 +241,7 @@ class _PlaybackSettingsCard extends StatelessWidget {
     required this.conversationAssistIgnoreSingleEarbud,
     required this.onAutoplayChanged,
     required this.onAudioQualityChanged,
-    required this.onMobileDataSaverChanged,
+    required this.onDownloadQualityChanged,
     required this.onDolbyEffectChanged,
     required this.onSmartConversationAssistModeChanged,
     required this.onConversationAssistReductionChanged,
@@ -276,16 +288,18 @@ class _PlaybackSettingsCard extends StatelessWidget {
             onChanged: onAutoplayChanged,
           ),
           const Divider(height: 1, color: AppTheme.cardDark),
+
+          // ── Streaming Quality ─────────────────────────────────────
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
             child: DropdownButtonFormField<AudioQuality>(
               initialValue: audioQuality,
               dropdownColor: AppTheme.cardDark,
               decoration: const InputDecoration(
-                labelText: 'Audio quality',
+                labelText: 'Streaming Quality',
                 labelStyle: TextStyle(color: AppTheme.textMuted),
                 helperText:
-                    'Auto adapts by network speed: <1 Mbps = 96 kbps, 1-3 Mbps = 160 kbps, >3 Mbps = 320 kbps. Ultra 480 kbps is manual and only works when the source provides it.',
+                    'Auto: Wi-Fi → 320 kbps, Mobile → 96 kbps, Weak → 64 kbps',
                 helperStyle: TextStyle(
                   color: AppTheme.textSecondary,
                   fontSize: 12,
@@ -293,11 +307,11 @@ class _PlaybackSettingsCard extends StatelessWidget {
                 border: OutlineInputBorder(),
               ),
               style: const TextStyle(color: AppTheme.textPrimary),
-              items: _qualityOptions
+              items: _streamingQualityOptions
                   .map(
                     (quality) => DropdownMenuItem<AudioQuality>(
                       value: quality,
-                      child: Text(_qualityLabel(quality)),
+                      child: Text(quality.label),
                     ),
                   )
                   .toList(),
@@ -310,22 +324,42 @@ class _PlaybackSettingsCard extends StatelessWidget {
                     },
             ),
           ),
-          const Divider(height: 1, color: AppTheme.cardDark),
-          SwitchListTile.adaptive(
-            contentPadding: const EdgeInsets.symmetric(horizontal: 16),
-            value: mobileDataSaverEnabled,
-            activeThumbColor: AppTheme.accentPurple,
-            title: const Text(
-              'Data Saver on mobile data',
-              style: TextStyle(color: AppTheme.textPrimary, fontSize: 14),
+
+          // ── Download Quality ──────────────────────────────────────
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+            child: DropdownButtonFormField<AudioQuality>(
+              initialValue: downloadQuality,
+              dropdownColor: AppTheme.cardDark,
+              decoration: const InputDecoration(
+                labelText: 'Download Quality',
+                labelStyle: TextStyle(color: AppTheme.textMuted),
+                helperText:
+                    'Quality used when saving songs for offline playback.',
+                helperStyle: TextStyle(
+                  color: AppTheme.textSecondary,
+                  fontSize: 12,
+                ),
+                border: OutlineInputBorder(),
+              ),
+              style: const TextStyle(color: AppTheme.textPrimary),
+              items: _downloadQualityOptions
+                  .map(
+                    (quality) => DropdownMenuItem<AudioQuality>(
+                      value: quality,
+                      child: Text(quality.label),
+                    ),
+                  )
+                  .toList(),
+              onChanged: (selected) {
+                if (selected != null) {
+                  onDownloadQualityChanged(selected);
+                }
+              },
             ),
-            subtitle: const Text(
-              'When Audio Quality is Auto, mobile data is capped to 96 kbps when Data Saver is enabled.',
-              style: TextStyle(color: AppTheme.textSecondary, fontSize: 12),
-            ),
-            onChanged: onMobileDataSaverChanged,
           ),
           const Divider(height: 1, color: AppTheme.cardDark),
+
           SwitchListTile.adaptive(
             contentPadding: const EdgeInsets.symmetric(horizontal: 16),
             value: dolbyEffectEnabled,
@@ -445,19 +479,6 @@ class _PlaybackSettingsCard extends StatelessWidget {
     );
   }
 
-  String _qualityLabel(AudioQuality quality) {
-    switch (quality) {
-      case AudioQuality.auto:
-        return quality.label;
-      case AudioQuality.ultra:
-        return '${quality.label} (${quality.kbps} kbps, if available)';
-      case AudioQuality.lossless:
-        return '${quality.label} (${quality.kbps} kbps)';
-      default:
-        return '${quality.label} (${quality.kbps} kbps)';
-    }
-  }
-
   String _conversationModeLabel(SmartConversationAssistMode mode) {
     switch (mode) {
       case SmartConversationAssistMode.off:
@@ -469,6 +490,8 @@ class _PlaybackSettingsCard extends StatelessWidget {
     }
   }
 }
+
+// ─── Listening Safety ──────────────────────────────────────────────────────
 
 class _ListeningSafetyCard extends StatelessWidget {
   final bool breakReminderEnabled;
@@ -559,6 +582,8 @@ class _ListeningSafetyCard extends StatelessWidget {
   }
 }
 
+// ─── Reusable Preference Card ──────────────────────────────────────────────
+
 class _PreferenceCard extends StatelessWidget {
   final String title;
   final String subtitle;
@@ -637,6 +662,8 @@ class _PreferenceCard extends StatelessWidget {
   }
 }
 
+// ─── Data & Downloads Card ─────────────────────────────────────────────────
+
 class _OfflineStorageCard extends StatefulWidget {
   const _OfflineStorageCard();
 
@@ -693,13 +720,6 @@ class _OfflineStorageCardState extends State<_OfflineStorageCard>
     await OfflineService.setWifiUpgradeEnabled(enabled);
   }
 
-  String _qualityLabel(AudioQuality quality) {
-    if (quality == AudioQuality.ultra) {
-      return '${quality.label} (${quality.kbps} kbps, if available)';
-    }
-    return '${quality.label} (${quality.kbps} kbps)';
-  }
-
   String _formatBytes(int bytes) {
     if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
     if (bytes < 1024 * 1024 * 1024) {
@@ -718,7 +738,7 @@ class _OfflineStorageCardState extends State<_OfflineStorageCard>
   void didChangeDependencies() {
     super.didChangeDependencies();
     final prefs = context.read<PreferencesProvider>();
-    if (prefs.autoDownloadEnabled) {
+    if (prefs.smartDownloadEnabled) {
       _expandController.forward();
     } else {
       _expandController.reverse();
@@ -729,31 +749,26 @@ class _OfflineStorageCardState extends State<_OfflineStorageCard>
   Widget build(BuildContext context) {
     final preferences = context.watch<PreferencesProvider>();
     final downloadQuality = preferences.downloadQuality;
-    final autoOn = preferences.autoDownloadEnabled;
+    final smartOn = preferences.smartDownloadEnabled;
+    final dataSaverOn = preferences.dataSaverEnabled;
 
-    // Drive expand animation whenever autoOn changes
-    if (autoOn) {
+    // Drive expand animation whenever smartOn changes
+    if (smartOn) {
       _expandController.forward();
     } else {
       _expandController.reverse();
     }
-
-    const List<AudioQuality> qualityOptions = [
-      AudioQuality.lower,
-      AudioQuality.medium,
-      AudioQuality.high,
-      AudioQuality.lossless,
-      AudioQuality.ultra,
-    ];
 
     return Container(
       decoration: BoxDecoration(
         color: AppTheme.surfaceDark,
         borderRadius: BorderRadius.circular(20),
         border: Border.all(
-          color: autoOn
-              ? AppTheme.accentPurple.withValues(alpha: 0.35)
-              : AppTheme.divider,
+          color: dataSaverOn
+              ? Colors.orangeAccent.withValues(alpha: 0.4)
+              : smartOn
+                  ? AppTheme.accentPurple.withValues(alpha: 0.35)
+                  : AppTheme.divider,
           width: 1.5,
         ),
       ),
@@ -769,19 +784,29 @@ class _OfflineStorageCardState extends State<_OfflineStorageCard>
                   width: 40,
                   height: 40,
                   decoration: BoxDecoration(
-                    gradient: autoOn
+                    gradient: dataSaverOn
                         ? const LinearGradient(
-                            colors: [Color(0xFF1ED760), Color(0xFF17A349)],
+                            colors: [Color(0xFFFF9800), Color(0xFFF57C00)],
                             begin: Alignment.topLeft,
                             end: Alignment.bottomRight,
                           )
-                        : null,
-                    color: autoOn ? null : AppTheme.cardDark,
+                        : smartOn
+                            ? const LinearGradient(
+                                colors: [Color(0xFF1ED760), Color(0xFF17A349)],
+                                begin: Alignment.topLeft,
+                                end: Alignment.bottomRight,
+                              )
+                            : null,
+                    color: (dataSaverOn || smartOn) ? null : AppTheme.cardDark,
                     borderRadius: BorderRadius.circular(12),
                   ),
                   child: Icon(
-                    Icons.download_for_offline_rounded,
-                    color: autoOn ? Colors.black : AppTheme.textMuted,
+                    dataSaverOn
+                        ? Icons.data_saver_on_rounded
+                        : Icons.download_for_offline_rounded,
+                    color: (dataSaverOn || smartOn)
+                        ? Colors.black
+                        : AppTheme.textMuted,
                     size: 22,
                   ),
                 ),
@@ -791,7 +816,7 @@ class _OfflineStorageCardState extends State<_OfflineStorageCard>
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       const Text(
-                        'Downloads & Offline',
+                        'Data & Downloads',
                         style: TextStyle(
                           color: AppTheme.textPrimary,
                           fontSize: 17,
@@ -799,13 +824,17 @@ class _OfflineStorageCardState extends State<_OfflineStorageCard>
                         ),
                       ),
                       Text(
-                        autoOn
-                            ? 'Auto downloading is active'
-                            : 'Manual downloads only',
+                        dataSaverOn
+                            ? 'Data Saver is active'
+                            : smartOn
+                                ? 'Smart downloading is active'
+                                : 'Manual downloads only',
                         style: TextStyle(
-                          color: autoOn
-                              ? AppTheme.accentPurple
-                              : AppTheme.textMuted,
+                          color: dataSaverOn
+                              ? Colors.orangeAccent
+                              : smartOn
+                                  ? AppTheme.accentPurple
+                                  : AppTheme.textMuted,
                           fontSize: 12,
                           fontWeight: FontWeight.w500,
                         ),
@@ -813,36 +842,11 @@ class _OfflineStorageCardState extends State<_OfflineStorageCard>
                     ],
                   ),
                 ),
-                // Status badge
-                AnimatedContainer(
-                  duration: const Duration(milliseconds: 280),
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: autoOn
-                        ? AppTheme.accentPurple.withValues(alpha: 0.15)
-                        : AppTheme.cardDark,
-                    borderRadius: BorderRadius.circular(20),
-                    border: Border.all(
-                      color: autoOn
-                          ? AppTheme.accentPurple.withValues(alpha: 0.5)
-                          : AppTheme.divider,
-                    ),
-                  ),
-                  child: Text(
-                    autoOn ? 'ON' : 'OFF',
-                    style: TextStyle(
-                      color: autoOn ? AppTheme.accentPurple : AppTheme.textMuted,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w800,
-                      letterSpacing: 1.2,
-                    ),
-                  ),
-                ),
               ],
             ),
           ),
 
-          // ── Storage bar (shown when storage limit is set) ─────────
+          // ── Storage bar ─────────────────────────────────────────
           if (!_loadingOfflineSettings && _storageLimit > 0)
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 14, 16, 0),
@@ -890,51 +894,125 @@ class _OfflineStorageCardState extends State<_OfflineStorageCard>
 
           const SizedBox(height: 4),
 
-          // ── Auto Download master toggle ───────────────────────────
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 4),
-            child: SwitchListTile.adaptive(
-              contentPadding: const EdgeInsets.symmetric(horizontal: 12),
-              value: preferences.autoDownloadEnabled,
-              activeThumbColor: AppTheme.accentPurple,
-              title: const Text(
-                'Auto Download',
-                style: TextStyle(
-                  color: AppTheme.textPrimary,
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
+          // ── Data Saver ──────────────────────────────────────────
+          _buildSubSection(
+            icon: Icons.data_saver_on_rounded,
+            iconColor: Colors.orangeAccent,
+            title: 'Data Saver',
+            children: [
+              SwitchListTile.adaptive(
+                contentPadding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
+                value: dataSaverOn,
+                activeThumbColor: Colors.orangeAccent,
+                title: const Text(
+                  'Data Saver',
+                  style: TextStyle(
+                    color: AppTheme.textPrimary,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
+                subtitle: const Text(
+                  'Disables background downloads, prefetch, playlist sync, and caps streaming to 96 kbps.',
+                  style:
+                      TextStyle(color: AppTheme.textSecondary, fontSize: 11),
+                ),
+                onChanged: (enabled) async {
+                  await preferences.setDataSaverEnabled(enabled);
+                },
               ),
-              subtitle: const Text(
-                'Automatically download liked songs and playlists for offline listening.',
-                style: TextStyle(color: AppTheme.textSecondary, fontSize: 12),
-              ),
-              onChanged: (enabled) async {
-                await preferences.setAutoDownloadEnabled(enabled);
-              },
-            ),
+            ],
           ),
 
-          // ── Expandable sub-settings (visible when Auto Download = ON) ─
+          // ── Background Downloads ────────────────────────────────
+          _buildSubSection(
+            icon: Icons.wifi_rounded,
+            iconColor: const Color(0xFF4A90E2),
+            title: 'Background Downloads',
+            children: [
+              Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                child: DropdownButtonFormField<BackgroundDownloadMode>(
+                  initialValue: preferences.backgroundDownloadMode,
+                  dropdownColor: AppTheme.cardDark,
+                  decoration: InputDecoration(
+                    labelText: 'Background Downloads',
+                    labelStyle: const TextStyle(color: AppTheme.textMuted),
+                    helperText: dataSaverOn
+                        ? 'Disabled by Data Saver'
+                        : preferences.backgroundDownloadMode.description,
+                    helperStyle: TextStyle(
+                      color: dataSaverOn
+                          ? Colors.orangeAccent
+                          : AppTheme.textSecondary,
+                      fontSize: 12,
+                    ),
+                    border: const OutlineInputBorder(),
+                  ),
+                  style: const TextStyle(color: AppTheme.textPrimary),
+                  items: BackgroundDownloadMode.values
+                      .map(
+                        (mode) =>
+                            DropdownMenuItem<BackgroundDownloadMode>(
+                              value: mode,
+                              child: Text(mode.label),
+                            ),
+                      )
+                      .toList(),
+                  onChanged: dataSaverOn
+                      ? null
+                      : (selected) async {
+                          if (selected != null) {
+                            await preferences
+                                .setBackgroundDownloadMode(selected);
+                          }
+                        },
+                ),
+              ),
+            ],
+          ),
+
+          // ── Smart Download (master toggle + sub-settings) ───────
+          _buildSubSection(
+            icon: Icons.auto_awesome_rounded,
+            iconColor: const Color(0xFF9B59B6),
+            title: 'Smart Download',
+            children: [
+              SwitchListTile.adaptive(
+                contentPadding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
+                value: smartOn,
+                activeThumbColor: AppTheme.accentPurple,
+                title: const Text(
+                  'Smart Download',
+                  style: TextStyle(
+                    color: AppTheme.textPrimary,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                subtitle: const Text(
+                  'Automatically download playlists, liked songs, and update offline content.',
+                  style:
+                      TextStyle(color: AppTheme.textSecondary, fontSize: 11),
+                ),
+                onChanged: dataSaverOn
+                    ? null
+                    : (enabled) async {
+                        await preferences.setSmartDownloadEnabled(enabled);
+                      },
+              ),
+            ],
+          ),
+
+          // ── Smart Download sub-settings (expanded when Smart Download ON) ─
           SizeTransition(
             sizeFactor: _expandAnimation,
             axisAlignment: -1,
             child: Column(
               children: [
-                _buildSubSection(
-                  icon: Icons.wifi_rounded,
-                  iconColor: const Color(0xFF4A90E2),
-                  title: 'Connection',
-                  children: [
-                    _buildToggleRow(
-                      value: preferences.downloadWifiOnly,
-                      title: 'Wi-Fi Only',
-                      subtitle: 'Download only when connected to Wi-Fi.',
-                      onChanged: (v) async =>
-                          preferences.setDownloadWifiOnly(v),
-                    ),
-                  ],
-                ),
                 _buildSubSection(
                   icon: Icons.playlist_add_check_rounded,
                   iconColor: const Color(0xFF9B59B6),
@@ -985,9 +1063,28 @@ class _OfflineStorageCardState extends State<_OfflineStorageCard>
             ),
           ),
 
-          // ── Smart Features ───────────────────────────────────────
+          // ── Playback Optimization ──────────────────────────────
           _buildSubSection(
-            icon: Icons.auto_awesome_rounded,
+            icon: Icons.speed_rounded,
+            iconColor: const Color(0xFF00BCD4),
+            title: 'Playback Optimization',
+            children: [
+              _buildToggleRow(
+                value: preferences.prefetchNextSongEnabled,
+                title: 'Prefetch Next Song',
+                subtitle:
+                    'Pre-buffer the next track for gapless playback.',
+                onChanged: dataSaverOn
+                    ? null
+                    : (v) async =>
+                        preferences.setPrefetchNextSongEnabled(v),
+              ),
+            ],
+          ),
+
+          // ── Smart Features ──────────────────────────────────────
+          _buildSubSection(
+            icon: Icons.auto_fix_high_rounded,
             iconColor: const Color(0xFFF39C12),
             title: 'Smart Features',
             children: [
@@ -1032,7 +1129,7 @@ class _OfflineStorageCardState extends State<_OfflineStorageCard>
             ],
           ),
 
-          // ── Limits & Quality ─────────────────────────────────────
+          // ── Limits & Quality ────────────────────────────────────
           _buildSubSection(
             icon: Icons.tune_rounded,
             iconColor: const Color(0xFFE74C3C),
@@ -1065,45 +1162,13 @@ class _OfflineStorageCardState extends State<_OfflineStorageCard>
                   },
                 ),
               ),
-              const SizedBox(height: 12),
-              DropdownButtonFormField<AudioQuality>(
-                initialValue: downloadQuality,
-                dropdownColor: AppTheme.cardDark,
-                decoration: const InputDecoration(
-                  labelText: 'Download Quality',
-                  labelStyle: TextStyle(color: AppTheme.textMuted),
-                  helperText:
-                      'Direct downloads use this quality. Smart offline cache may start lower and upgrade later.',
-                  helperStyle: TextStyle(
-                    color: AppTheme.textSecondary,
-                    fontSize: 12,
-                  ),
-                  border: OutlineInputBorder(),
-                ),
-                style: const TextStyle(color: AppTheme.textPrimary),
-                items: qualityOptions
-                    .map(
-                      (quality) => DropdownMenuItem<AudioQuality>(
-                        value: quality,
-                        child: Text(_qualityLabel(quality)),
-                      ),
-                    )
-                    .toList(),
-                onChanged: (selected) async {
-                  if (selected != null) {
-                    await context
-                        .read<PreferencesProvider>()
-                        .setDownloadQuality(selected);
-                  }
-                },
-              ),
               const SizedBox(height: 8),
               _buildToggleRow(
                 value: _wifiUpgradeEnabled,
                 title: 'Upgrade cached songs on Wi-Fi only',
                 subtitle: _loadingOfflineSettings
                     ? 'Loading offline storage settings...'
-                    : 'Keep low-quality copy on mobile data and upgrade to ${_qualityLabel(downloadQuality)} on Wi-Fi.',
+                    : 'Keep low-quality copy on mobile data and upgrade to ${downloadQuality.label} on Wi-Fi.',
                 onChanged: _loadingOfflineSettings
                     ? null
                     : (v) => _setWifiUpgradeEnabled(v),
@@ -1111,7 +1176,7 @@ class _OfflineStorageCardState extends State<_OfflineStorageCard>
             ],
           ),
 
-          // ── Danger zone ──────────────────────────────────────────
+          // ── Danger zone ─────────────────────────────────────────
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
             child: SizedBox(

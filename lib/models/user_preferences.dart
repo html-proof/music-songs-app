@@ -1,11 +1,11 @@
 import '../utils/language_utils.dart';
 
 enum AudioQuality {
-  lower('lower', 48, 'Low (Data Saver)', 2.0),
-  medium('medium', 96, 'Medium', 4.0),
-  high('high', 160, 'High', 7.0),
-  lossless('lossless', 320, 'Very High', 12.0),
-  ultra('ultra', 480, 'Ultra', 18.0),
+  dataSaver('data_saver', 32, 'Data Saver (32 kbps)', 1.0),
+  low('low', 64, 'Low (64 kbps)', 2.0),
+  normal('normal', 96, 'Normal (96 kbps)', 3.0),
+  high('high', 160, 'High (160 kbps)', 5.0),
+  veryHigh('very_high', 320, 'Very High (320 kbps)', 10.0),
   auto('auto', 0, 'Auto (Smart Adaptive)', 0.0);
 
   const AudioQuality(this.storageKey, this.kbps, this.label, this.maxMb);
@@ -20,44 +20,104 @@ enum AudioQuality {
   /// Short description of when each quality level is used.
   String get description {
     switch (this) {
-      case AudioQuality.lower:
-        return 'Lowest storage use, about 1-2 MB per song';
-      case AudioQuality.medium:
-        return 'Balanced quality, about 2-4 MB per song';
+      case AudioQuality.dataSaver:
+        return 'Minimal data, about 1 MB per song';
+      case AudioQuality.low:
+        return 'Low quality, about 2 MB per song';
+      case AudioQuality.normal:
+        return 'Balanced quality, about 3 MB per song';
       case AudioQuality.high:
-        return 'Clearer audio, about 4-7 MB per song';
-      case AudioQuality.lossless:
-        return 'Highest standard AAC quality, about 8-12 MB per song';
-      case AudioQuality.ultra:
-        return 'Requests 480 kbps when available, about 12-18 MB per song';
+        return 'Clearer audio, about 5 MB per song';
+      case AudioQuality.veryHigh:
+        return 'Highest quality, about 9-10 MB per song';
       case AudioQuality.auto:
         return 'Adapts automatically based on your network';
     }
   }
 
+  /// Migrate from legacy storage keys to new enum values.
   static AudioQuality fromStorageKey(String? value) {
     final key = (value ?? '').trim().toLowerCase();
     switch (key) {
+      // New keys
+      case 'data_saver':
+      case 'datasaver':
+        return AudioQuality.dataSaver;
       case 'low':
-      case 'lower':
-        return AudioQuality.lower;
-      case 'medium':
-        return AudioQuality.medium;
-      case 'good':
+        return AudioQuality.low;
+      case 'normal':
+        return AudioQuality.normal;
       case 'high':
         return AudioQuality.high;
+      case 'very_high':
+      case 'veryhigh':
+        return AudioQuality.veryHigh;
+      case 'auto':
+        return AudioQuality.auto;
+      // Legacy migration keys
+      case 'lower':
+        return AudioQuality.low; // 48 kbps → 64 kbps (closest tier)
+      case 'medium':
+        return AudioQuality.normal; // 96 kbps → 96 kbps
+      case 'good':
+        return AudioQuality.high; // → 160 kbps
       case 'lossless':
-        return AudioQuality.lossless;
+        return AudioQuality.veryHigh; // 320 kbps → 320 kbps
       case 'ultra':
       case 'hires':
       case 'hi_res':
       case '480':
       case '480kbps':
-        return AudioQuality.ultra;
-      case 'auto':
-        return AudioQuality.auto;
+        return AudioQuality.veryHigh; // 480 kbps → 320 kbps (capped)
       default:
         return AudioQuality.high;
+    }
+  }
+}
+
+/// Controls when background downloads are allowed.
+enum BackgroundDownloadMode {
+  alwaysOn('always_on', 'Always On'),
+  wifiOnly('wifi_only', 'Wi-Fi Only'),
+  onlyWhileCharging('only_while_charging', 'Only While Charging'),
+  disabled('disabled', 'Disabled');
+
+  const BackgroundDownloadMode(this.storageKey, this.label);
+
+  final String storageKey;
+  final String label;
+
+  String get description {
+    switch (this) {
+      case BackgroundDownloadMode.alwaysOn:
+        return 'Downloads run in the background over any network';
+      case BackgroundDownloadMode.wifiOnly:
+        return 'Downloads only when connected to Wi-Fi';
+      case BackgroundDownloadMode.onlyWhileCharging:
+        return 'Downloads only when the device is charging';
+      case BackgroundDownloadMode.disabled:
+        return 'Downloads pause when the app is in the background';
+    }
+  }
+
+  static BackgroundDownloadMode fromStorageKey(String? value) {
+    final key = (value ?? '').trim().toLowerCase();
+    switch (key) {
+      case 'always_on':
+      case 'alwayson':
+        return BackgroundDownloadMode.alwaysOn;
+      case 'wifi_only':
+      case 'wifionly':
+        return BackgroundDownloadMode.wifiOnly;
+      case 'only_while_charging':
+      case 'onlywhilecharging':
+      case 'charging':
+        return BackgroundDownloadMode.onlyWhileCharging;
+      case 'disabled':
+      case 'off':
+        return BackgroundDownloadMode.disabled;
+      default:
+        return BackgroundDownloadMode.wifiOnly;
     }
   }
 }
@@ -99,15 +159,16 @@ class UserPreferences {
   final bool autoplayEnabled;
   final AudioQuality audioQuality;
   final AudioQuality downloadQuality;
-  final bool mobileDataSaverEnabled;
+  final bool dataSaverEnabled;
   final bool dolbyEffectEnabled;
   final SmartConversationAssistMode smartConversationAssistMode;
   final int conversationAssistReductionPercent;
   final int conversationAssistAutoRestoreSeconds;
   final bool conversationAssistIgnoreSingleEarbud;
-  final bool downloadWifiOnly;
+  final BackgroundDownloadMode backgroundDownloadMode;
+  final bool smartDownloadEnabled;
+  final bool prefetchNextSongEnabled;
   final bool autoDownloadPlayedSongs;
-  final bool autoDownloadEnabled;
   final bool autoDownloadNewPlaylistSongs;
   final bool removeMissingPlaylistSongs;
   final bool downloadLyricsWithSongs;
@@ -125,17 +186,18 @@ class UserPreferences {
     this.email,
     this.onboardingComplete = false,
     this.autoplayEnabled = true,
-    this.audioQuality = AudioQuality.high,
+    this.audioQuality = AudioQuality.auto,
     this.downloadQuality = AudioQuality.high,
-    this.mobileDataSaverEnabled = false,
+    this.dataSaverEnabled = false,
     this.dolbyEffectEnabled = false,
     this.smartConversationAssistMode = SmartConversationAssistMode.off,
     this.conversationAssistReductionPercent = 30,
     this.conversationAssistAutoRestoreSeconds = 60,
     this.conversationAssistIgnoreSingleEarbud = false,
-    this.downloadWifiOnly = true,
+    this.backgroundDownloadMode = BackgroundDownloadMode.wifiOnly,
+    this.smartDownloadEnabled = false,
+    this.prefetchNextSongEnabled = true,
     this.autoDownloadPlayedSongs = false,
-    this.autoDownloadEnabled = true,
     this.autoDownloadNewPlaylistSongs = true,
     this.removeMissingPlaylistSongs = true,
     this.downloadLyricsWithSongs = true,
@@ -148,6 +210,33 @@ class UserPreferences {
 
   factory UserPreferences.fromJson(Map<String, dynamic> json) {
     final rawArtists = json['favoriteArtists'] as List? ?? const [];
+
+    // --- Migrate legacy background download fields ---
+    // Old field: downloadWifiOnly (bool) → new: backgroundDownloadMode enum
+    // Old field: autoDownloadEnabled (bool) → new: smartDownloadEnabled
+    BackgroundDownloadMode bgMode;
+    if (json.containsKey('backgroundDownloadMode')) {
+      bgMode = BackgroundDownloadMode.fromStorageKey(
+        json['backgroundDownloadMode']?.toString(),
+      );
+    } else if (json.containsKey('downloadWifiOnly')) {
+      // Legacy migration: downloadWifiOnly=true → wifiOnly, false → alwaysOn
+      bgMode = json['downloadWifiOnly'] == true
+          ? BackgroundDownloadMode.wifiOnly
+          : BackgroundDownloadMode.alwaysOn;
+    } else {
+      bgMode = BackgroundDownloadMode.wifiOnly;
+    }
+
+    // Migrate smartDownloadEnabled from old autoDownloadEnabled
+    final smartDownload = json['smartDownloadEnabled'] ??
+        json['autoDownloadEnabled'] ??
+        false;
+
+    // Migrate dataSaverEnabled from old mobileDataSaverEnabled
+    final dataSaver = json['dataSaverEnabled'] == true ||
+        json['mobileDataSaverEnabled'] == true;
+
     return UserPreferences(
       uid: json['uid'] ?? '',
       languages: LanguageUtils.normalizeLanguageList(
@@ -175,9 +264,7 @@ class UserPreferences {
       downloadQuality: AudioQuality.fromStorageKey(
         json['downloadQuality']?.toString(),
       ),
-      mobileDataSaverEnabled:
-          json['mobileDataSaverEnabled'] == true ||
-          json['dataSaverEnabled'] == true,
+      dataSaverEnabled: dataSaver,
       dolbyEffectEnabled:
           json['dolbyEffectEnabled'] == true ||
           json['dolbyLikeEffectEnabled'] == true ||
@@ -202,9 +289,10 @@ class UserPreferences {
       ),
       conversationAssistIgnoreSingleEarbud:
           json['conversationAssistIgnoreSingleEarbud'] == true,
-      downloadWifiOnly: json['downloadWifiOnly'] != false,
+      backgroundDownloadMode: bgMode,
+      smartDownloadEnabled: smartDownload == true,
+      prefetchNextSongEnabled: json['prefetchNextSongEnabled'] != false,
       autoDownloadPlayedSongs: json['autoDownloadPlayedSongs'] == true || json['autoDownload'] == true,
-      autoDownloadEnabled: json['autoDownloadEnabled'] != false,
       autoDownloadNewPlaylistSongs: json['autoDownloadNewPlaylistSongs'] != false,
       removeMissingPlaylistSongs: json['removeMissingPlaylistSongs'] != false,
       downloadLyricsWithSongs: json['downloadLyricsWithSongs'] != false,
@@ -227,7 +315,7 @@ class UserPreferences {
       'autoplayEnabled': autoplayEnabled,
       'audioQuality': audioQuality.storageKey,
       'downloadQuality': downloadQuality.storageKey,
-      'mobileDataSaverEnabled': mobileDataSaverEnabled,
+      'dataSaverEnabled': dataSaverEnabled,
       'dolbyEffectEnabled': dolbyEffectEnabled,
       'smartConversationAssistMode': smartConversationAssistMode.storageKey,
       'conversationAssistReductionPercent': conversationAssistReductionPercent,
@@ -235,9 +323,10 @@ class UserPreferences {
           conversationAssistAutoRestoreSeconds,
       'conversationAssistIgnoreSingleEarbud':
           conversationAssistIgnoreSingleEarbud,
-      'downloadWifiOnly': downloadWifiOnly,
+      'backgroundDownloadMode': backgroundDownloadMode.storageKey,
+      'smartDownloadEnabled': smartDownloadEnabled,
+      'prefetchNextSongEnabled': prefetchNextSongEnabled,
       'autoDownloadPlayedSongs': autoDownloadPlayedSongs,
-      'autoDownloadEnabled': autoDownloadEnabled,
       'autoDownloadNewPlaylistSongs': autoDownloadNewPlaylistSongs,
       'removeMissingPlaylistSongs': removeMissingPlaylistSongs,
       'downloadLyricsWithSongs': downloadLyricsWithSongs,
@@ -258,15 +347,16 @@ class UserPreferences {
     bool? autoplayEnabled,
     AudioQuality? audioQuality,
     AudioQuality? downloadQuality,
-    bool? mobileDataSaverEnabled,
+    bool? dataSaverEnabled,
     bool? dolbyEffectEnabled,
     SmartConversationAssistMode? smartConversationAssistMode,
     int? conversationAssistReductionPercent,
     int? conversationAssistAutoRestoreSeconds,
     bool? conversationAssistIgnoreSingleEarbud,
-    bool? downloadWifiOnly,
+    BackgroundDownloadMode? backgroundDownloadMode,
+    bool? smartDownloadEnabled,
+    bool? prefetchNextSongEnabled,
     bool? autoDownloadPlayedSongs,
-    bool? autoDownloadEnabled,
     bool? autoDownloadNewPlaylistSongs,
     bool? removeMissingPlaylistSongs,
     bool? downloadLyricsWithSongs,
@@ -288,8 +378,8 @@ class UserPreferences {
       autoplayEnabled: autoplayEnabled ?? this.autoplayEnabled,
       audioQuality: audioQuality ?? this.audioQuality,
       downloadQuality: downloadQuality ?? this.downloadQuality,
-      mobileDataSaverEnabled:
-          mobileDataSaverEnabled ?? this.mobileDataSaverEnabled,
+      dataSaverEnabled:
+          dataSaverEnabled ?? this.dataSaverEnabled,
       dolbyEffectEnabled: dolbyEffectEnabled ?? this.dolbyEffectEnabled,
       smartConversationAssistMode:
           smartConversationAssistMode ?? this.smartConversationAssistMode,
@@ -306,10 +396,14 @@ class UserPreferences {
       conversationAssistIgnoreSingleEarbud:
           conversationAssistIgnoreSingleEarbud ??
           this.conversationAssistIgnoreSingleEarbud,
-      downloadWifiOnly: downloadWifiOnly ?? this.downloadWifiOnly,
+      backgroundDownloadMode:
+          backgroundDownloadMode ?? this.backgroundDownloadMode,
+      smartDownloadEnabled:
+          smartDownloadEnabled ?? this.smartDownloadEnabled,
+      prefetchNextSongEnabled:
+          prefetchNextSongEnabled ?? this.prefetchNextSongEnabled,
       autoDownloadPlayedSongs:
           autoDownloadPlayedSongs ?? this.autoDownloadPlayedSongs,
-      autoDownloadEnabled: autoDownloadEnabled ?? this.autoDownloadEnabled,
       autoDownloadNewPlaylistSongs:
           autoDownloadNewPlaylistSongs ?? this.autoDownloadNewPlaylistSongs,
       removeMissingPlaylistSongs:

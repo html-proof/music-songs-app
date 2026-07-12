@@ -28,11 +28,11 @@ class PreferencesProvider extends ChangeNotifier {
       ListeningSafetyService.reminderHighVolumeGateEnabled;
   bool get autoplayEnabled => _preferences?.autoplayEnabled ?? true;
   AudioQuality get audioQuality =>
-      _preferences?.audioQuality ?? AudioQuality.high;
+      _preferences?.audioQuality ?? AudioQuality.auto;
   AudioQuality get downloadQuality =>
       _preferences?.downloadQuality ?? AudioQuality.high;
-  bool get mobileDataSaverEnabled =>
-      _preferences?.mobileDataSaverEnabled ?? false;
+  bool get dataSaverEnabled =>
+      _preferences?.dataSaverEnabled ?? false;
   bool get dolbyEffectEnabled => _preferences?.dolbyEffectEnabled ?? false;
   SmartConversationAssistMode get smartConversationAssistMode =>
       _preferences?.smartConversationAssistMode ??
@@ -43,9 +43,11 @@ class PreferencesProvider extends ChangeNotifier {
       _preferences?.conversationAssistAutoRestoreSeconds ?? 60;
   bool get conversationAssistIgnoreSingleEarbud =>
       _preferences?.conversationAssistIgnoreSingleEarbud ?? false;
-  bool get downloadWifiOnly => _preferences?.downloadWifiOnly ?? true;
+  BackgroundDownloadMode get backgroundDownloadMode =>
+      _preferences?.backgroundDownloadMode ?? BackgroundDownloadMode.wifiOnly;
+  bool get smartDownloadEnabled => _preferences?.smartDownloadEnabled ?? false;
+  bool get prefetchNextSongEnabled => _preferences?.prefetchNextSongEnabled ?? true;
   bool get autoDownloadPlayedSongs => _preferences?.autoDownloadPlayedSongs ?? false;
-  bool get autoDownloadEnabled => _preferences?.autoDownloadEnabled ?? true;
   bool get autoDownloadNewPlaylistSongs => _preferences?.autoDownloadNewPlaylistSongs ?? true;
   bool get removeMissingPlaylistSongs => _preferences?.removeMissingPlaylistSongs ?? true;
   bool get downloadLyricsWithSongs => _preferences?.downloadLyricsWithSongs ?? true;
@@ -78,10 +80,10 @@ class PreferencesProvider extends ChangeNotifier {
       if (token != _syncToken) return;
       _preferences = null;
       await PlayerService.setAudioQualityPreference(
-        AudioQuality.high,
+        AudioQuality.auto,
         applyNow: true,
       );
-      await PlayerService.setMobileDataSaverEnabled(false, applyNow: true);
+      await PlayerService.setDataSaverEnabled(false, applyNow: true);
       await PlayerService.setDolbyEffectEnabled(false, applyNow: true);
       await PlayerService.setSmartConversationAssistConfig(
         mode: SmartConversationAssistMode.off,
@@ -109,11 +111,11 @@ class PreferencesProvider extends ChangeNotifier {
           onboardingComplete: false,
         );
     await PlayerService.setAudioQualityPreference(
-      _preferences?.audioQuality ?? AudioQuality.high,
+      _preferences?.audioQuality ?? AudioQuality.auto,
       applyNow: false,
     );
-    await PlayerService.setMobileDataSaverEnabled(
-      _preferences?.mobileDataSaverEnabled ?? false,
+    await PlayerService.setDataSaverEnabled(
+      _preferences?.dataSaverEnabled ?? false,
       applyNow: false,
     );
     await PlayerService.setDolbyEffectEnabled(
@@ -136,6 +138,8 @@ class PreferencesProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Central save method — only fields that are explicitly passed are changed;
+  /// all others fall through to their current stored value.
   Future<void> savePreferences({
     required List<String> languages,
     required List<Map<String, String>> favoriteArtists,
@@ -143,15 +147,16 @@ class PreferencesProvider extends ChangeNotifier {
     bool? autoplayEnabled,
     AudioQuality? audioQuality,
     AudioQuality? downloadQuality,
-    bool? mobileDataSaverEnabled,
+    bool? dataSaverEnabled,
     bool? dolbyEffectEnabled,
     SmartConversationAssistMode? smartConversationAssistMode,
     int? conversationAssistReductionPercent,
     int? conversationAssistAutoRestoreSeconds,
     bool? conversationAssistIgnoreSingleEarbud,
-    bool? downloadWifiOnly,
+    BackgroundDownloadMode? backgroundDownloadMode,
+    bool? smartDownloadEnabled,
+    bool? prefetchNextSongEnabled,
     bool? autoDownloadPlayedSongs,
-    bool? autoDownloadEnabled,
     bool? autoDownloadNewPlaylistSongs,
     bool? removeMissingPlaylistSongs,
     bool? downloadLyricsWithSongs,
@@ -187,12 +192,12 @@ class PreferencesProvider extends ChangeNotifier {
       onboardingComplete: onboardingComplete,
       autoplayEnabled: autoplayEnabled ?? _preferences?.autoplayEnabled ?? true,
       audioQuality:
-          audioQuality ?? _preferences?.audioQuality ?? AudioQuality.high,
+          audioQuality ?? _preferences?.audioQuality ?? AudioQuality.auto,
       downloadQuality:
           downloadQuality ?? _preferences?.downloadQuality ?? AudioQuality.high,
-      mobileDataSaverEnabled:
-          mobileDataSaverEnabled ??
-          _preferences?.mobileDataSaverEnabled ??
+      dataSaverEnabled:
+          dataSaverEnabled ??
+          _preferences?.dataSaverEnabled ??
           false,
       dolbyEffectEnabled:
           dolbyEffectEnabled ?? _preferences?.dolbyEffectEnabled ?? false,
@@ -212,12 +217,16 @@ class PreferencesProvider extends ChangeNotifier {
           conversationAssistIgnoreSingleEarbud ??
           _preferences?.conversationAssistIgnoreSingleEarbud ??
           false,
-      downloadWifiOnly:
-          downloadWifiOnly ?? _preferences?.downloadWifiOnly ?? true,
+      backgroundDownloadMode:
+          backgroundDownloadMode ??
+          _preferences?.backgroundDownloadMode ??
+          BackgroundDownloadMode.wifiOnly,
+      smartDownloadEnabled:
+          smartDownloadEnabled ?? _preferences?.smartDownloadEnabled ?? false,
+      prefetchNextSongEnabled:
+          prefetchNextSongEnabled ?? _preferences?.prefetchNextSongEnabled ?? true,
       autoDownloadPlayedSongs:
           autoDownloadPlayedSongs ?? _preferences?.autoDownloadPlayedSongs ?? false,
-      autoDownloadEnabled:
-          autoDownloadEnabled ?? _preferences?.autoDownloadEnabled ?? true,
       autoDownloadNewPlaylistSongs:
           autoDownloadNewPlaylistSongs ?? _preferences?.autoDownloadNewPlaylistSongs ?? true,
       removeMissingPlaylistSongs:
@@ -241,8 +250,8 @@ class PreferencesProvider extends ChangeNotifier {
       updated.audioQuality,
       applyNow: false,
     );
-    await PlayerService.setMobileDataSaverEnabled(
-      updated.mobileDataSaverEnabled,
+    await PlayerService.setDataSaverEnabled(
+      updated.dataSaverEnabled,
       applyNow: false,
     );
     await PlayerService.setDolbyEffectEnabled(
@@ -260,6 +269,8 @@ class PreferencesProvider extends ChangeNotifier {
     _version++;
     notifyListeners();
   }
+
+  // ── Convenience setters (each delegates to savePreferences) ──
 
   Future<void> updateLanguages(List<String> languages) async {
     final current = _preferences;
@@ -309,15 +320,6 @@ class PreferencesProvider extends ChangeNotifier {
       favoriteArtists: current.favoriteArtists,
       onboardingComplete: true,
       autoplayEnabled: enabled,
-      mobileDataSaverEnabled: current.mobileDataSaverEnabled,
-      dolbyEffectEnabled: current.dolbyEffectEnabled,
-      smartConversationAssistMode: current.smartConversationAssistMode,
-      conversationAssistReductionPercent:
-          current.conversationAssistReductionPercent,
-      conversationAssistAutoRestoreSeconds:
-          current.conversationAssistAutoRestoreSeconds,
-      conversationAssistIgnoreSingleEarbud:
-          current.conversationAssistIgnoreSingleEarbud,
     );
   }
 
@@ -334,18 +336,7 @@ class PreferencesProvider extends ChangeNotifier {
       languages: current.languages,
       favoriteArtists: current.favoriteArtists,
       onboardingComplete: true,
-      autoplayEnabled: current.autoplayEnabled,
       audioQuality: quality,
-      downloadQuality: current.downloadQuality,
-      mobileDataSaverEnabled: current.mobileDataSaverEnabled,
-      dolbyEffectEnabled: current.dolbyEffectEnabled,
-      smartConversationAssistMode: current.smartConversationAssistMode,
-      conversationAssistReductionPercent:
-          current.conversationAssistReductionPercent,
-      conversationAssistAutoRestoreSeconds:
-          current.conversationAssistAutoRestoreSeconds,
-      conversationAssistIgnoreSingleEarbud:
-          current.conversationAssistIgnoreSingleEarbud,
     );
   }
 
@@ -361,86 +352,47 @@ class PreferencesProvider extends ChangeNotifier {
       languages: current.languages,
       favoriteArtists: current.favoriteArtists,
       onboardingComplete: true,
-      autoplayEnabled: current.autoplayEnabled,
-      audioQuality: current.audioQuality,
       downloadQuality: quality,
-      mobileDataSaverEnabled: current.mobileDataSaverEnabled,
-      dolbyEffectEnabled: current.dolbyEffectEnabled,
-      smartConversationAssistMode: current.smartConversationAssistMode,
-      conversationAssistReductionPercent:
-          current.conversationAssistReductionPercent,
-      conversationAssistAutoRestoreSeconds:
-          current.conversationAssistAutoRestoreSeconds,
-      conversationAssistIgnoreSingleEarbud:
-          current.conversationAssistIgnoreSingleEarbud,
-      downloadWifiOnly: current.downloadWifiOnly,
     );
   }
 
-  Future<void> setDownloadWifiOnly(bool value) async {
-    final current = _preferences;
-    if (current == null) {
-      _version++;
-      notifyListeners();
-      return;
-    }
-
-    await savePreferences(
-      languages: current.languages,
-      favoriteArtists: current.favoriteArtists,
-      onboardingComplete: true,
-      autoplayEnabled: current.autoplayEnabled,
-      audioQuality: current.audioQuality,
-      downloadQuality: current.downloadQuality,
-      mobileDataSaverEnabled: current.mobileDataSaverEnabled,
-      dolbyEffectEnabled: current.dolbyEffectEnabled,
-      smartConversationAssistMode: current.smartConversationAssistMode,
-      conversationAssistReductionPercent:
-          current.conversationAssistReductionPercent,
-      conversationAssistAutoRestoreSeconds:
-          current.conversationAssistAutoRestoreSeconds,
-      conversationAssistIgnoreSingleEarbud:
-          current.conversationAssistIgnoreSingleEarbud,
-      downloadWifiOnly: value,
-    );
-  }
-
-  Future<void> setAutoDownloadPlayedSongs(bool value) async {
-    final current = _preferences;
-    if (current == null) {
-      _version++;
-      notifyListeners();
-      return;
-    }
-
-    await savePreferences(
-      languages: current.languages,
-      favoriteArtists: current.favoriteArtists,
-      onboardingComplete: true,
-      autoplayEnabled: current.autoplayEnabled,
-      audioQuality: current.audioQuality,
-      downloadQuality: current.downloadQuality,
-      mobileDataSaverEnabled: current.mobileDataSaverEnabled,
-      dolbyEffectEnabled: current.dolbyEffectEnabled,
-      smartConversationAssistMode: current.smartConversationAssistMode,
-      conversationAssistReductionPercent:
-          current.conversationAssistReductionPercent,
-      conversationAssistAutoRestoreSeconds:
-          current.conversationAssistAutoRestoreSeconds,
-      conversationAssistIgnoreSingleEarbud:
-          current.conversationAssistIgnoreSingleEarbud,
-      downloadWifiOnly: current.downloadWifiOnly,
-      autoDownloadPlayedSongs: value,
-    );
-  }
-
-  Future<void> setAutoDownloadEnabled(bool value) async {
+  Future<void> setBackgroundDownloadMode(BackgroundDownloadMode mode) async {
     final current = _preferences;
     if (current == null) return;
     await savePreferences(
       languages: current.languages,
       favoriteArtists: current.favoriteArtists,
-      autoDownloadEnabled: value,
+      backgroundDownloadMode: mode,
+    );
+  }
+
+  Future<void> setSmartDownloadEnabled(bool value) async {
+    final current = _preferences;
+    if (current == null) return;
+    await savePreferences(
+      languages: current.languages,
+      favoriteArtists: current.favoriteArtists,
+      smartDownloadEnabled: value,
+    );
+  }
+
+  Future<void> setPrefetchNextSongEnabled(bool value) async {
+    final current = _preferences;
+    if (current == null) return;
+    await savePreferences(
+      languages: current.languages,
+      favoriteArtists: current.favoriteArtists,
+      prefetchNextSongEnabled: value,
+    );
+  }
+
+  Future<void> setAutoDownloadPlayedSongs(bool value) async {
+    final current = _preferences;
+    if (current == null) return;
+    await savePreferences(
+      languages: current.languages,
+      favoriteArtists: current.favoriteArtists,
+      autoDownloadPlayedSongs: value,
     );
   }
 
@@ -524,8 +476,11 @@ class PreferencesProvider extends ChangeNotifier {
     );
   }
 
-  Future<void> setMobileDataSaverEnabled(bool enabled) async {
-    await PlayerService.setMobileDataSaverEnabled(enabled, applyNow: true);
+  /// Data Saver: when enabled, suppresses background downloads, prefetch,
+  /// smart downloads, and caps streaming quality.
+  /// When disabled, restores background download mode to Wi-Fi Only.
+  Future<void> setDataSaverEnabled(bool enabled) async {
+    await PlayerService.setDataSaverEnabled(enabled, applyNow: true);
     final current = _preferences;
     if (current == null) {
       _version++;
@@ -533,22 +488,28 @@ class PreferencesProvider extends ChangeNotifier {
       return;
     }
 
-    await savePreferences(
-      languages: current.languages,
-      favoriteArtists: current.favoriteArtists,
-      onboardingComplete: true,
-      autoplayEnabled: current.autoplayEnabled,
-      audioQuality: current.audioQuality,
-      mobileDataSaverEnabled: enabled,
-      dolbyEffectEnabled: current.dolbyEffectEnabled,
-      smartConversationAssistMode: current.smartConversationAssistMode,
-      conversationAssistReductionPercent:
-          current.conversationAssistReductionPercent,
-      conversationAssistAutoRestoreSeconds:
-          current.conversationAssistAutoRestoreSeconds,
-      conversationAssistIgnoreSingleEarbud:
-          current.conversationAssistIgnoreSingleEarbud,
-    );
+    if (enabled) {
+      // Data Saver ON: disable all background activity
+      await savePreferences(
+        languages: current.languages,
+        favoriteArtists: current.favoriteArtists,
+        onboardingComplete: true,
+        dataSaverEnabled: true,
+        backgroundDownloadMode: BackgroundDownloadMode.disabled,
+        smartDownloadEnabled: false,
+        prefetchNextSongEnabled: false,
+      );
+    } else {
+      // Data Saver OFF: restore sane defaults
+      await savePreferences(
+        languages: current.languages,
+        favoriteArtists: current.favoriteArtists,
+        onboardingComplete: true,
+        dataSaverEnabled: false,
+        backgroundDownloadMode: BackgroundDownloadMode.wifiOnly,
+        prefetchNextSongEnabled: true,
+      );
+    }
   }
 
   Future<void> setDolbyEffectEnabled(bool enabled) async {
@@ -564,17 +525,7 @@ class PreferencesProvider extends ChangeNotifier {
       languages: current.languages,
       favoriteArtists: current.favoriteArtists,
       onboardingComplete: true,
-      autoplayEnabled: current.autoplayEnabled,
-      audioQuality: current.audioQuality,
-      mobileDataSaverEnabled: current.mobileDataSaverEnabled,
       dolbyEffectEnabled: enabled,
-      smartConversationAssistMode: current.smartConversationAssistMode,
-      conversationAssistReductionPercent:
-          current.conversationAssistReductionPercent,
-      conversationAssistAutoRestoreSeconds:
-          current.conversationAssistAutoRestoreSeconds,
-      conversationAssistIgnoreSingleEarbud:
-          current.conversationAssistIgnoreSingleEarbud,
     );
   }
 
@@ -593,17 +544,7 @@ class PreferencesProvider extends ChangeNotifier {
       languages: current.languages,
       favoriteArtists: current.favoriteArtists,
       onboardingComplete: true,
-      autoplayEnabled: current.autoplayEnabled,
-      audioQuality: current.audioQuality,
-      mobileDataSaverEnabled: current.mobileDataSaverEnabled,
-      dolbyEffectEnabled: current.dolbyEffectEnabled,
       smartConversationAssistMode: mode,
-      conversationAssistReductionPercent:
-          current.conversationAssistReductionPercent,
-      conversationAssistAutoRestoreSeconds:
-          current.conversationAssistAutoRestoreSeconds,
-      conversationAssistIgnoreSingleEarbud:
-          current.conversationAssistIgnoreSingleEarbud,
     );
   }
 
@@ -621,16 +562,7 @@ class PreferencesProvider extends ChangeNotifier {
       languages: current.languages,
       favoriteArtists: current.favoriteArtists,
       onboardingComplete: true,
-      autoplayEnabled: current.autoplayEnabled,
-      audioQuality: current.audioQuality,
-      mobileDataSaverEnabled: current.mobileDataSaverEnabled,
-      dolbyEffectEnabled: current.dolbyEffectEnabled,
-      smartConversationAssistMode: current.smartConversationAssistMode,
       conversationAssistReductionPercent: safe,
-      conversationAssistAutoRestoreSeconds:
-          current.conversationAssistAutoRestoreSeconds,
-      conversationAssistIgnoreSingleEarbud:
-          current.conversationAssistIgnoreSingleEarbud,
     );
   }
 
@@ -648,16 +580,7 @@ class PreferencesProvider extends ChangeNotifier {
       languages: current.languages,
       favoriteArtists: current.favoriteArtists,
       onboardingComplete: true,
-      autoplayEnabled: current.autoplayEnabled,
-      audioQuality: current.audioQuality,
-      mobileDataSaverEnabled: current.mobileDataSaverEnabled,
-      dolbyEffectEnabled: current.dolbyEffectEnabled,
-      smartConversationAssistMode: current.smartConversationAssistMode,
-      conversationAssistReductionPercent:
-          current.conversationAssistReductionPercent,
       conversationAssistAutoRestoreSeconds: safe,
-      conversationAssistIgnoreSingleEarbud:
-          current.conversationAssistIgnoreSingleEarbud,
     );
   }
 
@@ -674,15 +597,6 @@ class PreferencesProvider extends ChangeNotifier {
       languages: current.languages,
       favoriteArtists: current.favoriteArtists,
       onboardingComplete: true,
-      autoplayEnabled: current.autoplayEnabled,
-      audioQuality: current.audioQuality,
-      mobileDataSaverEnabled: current.mobileDataSaverEnabled,
-      dolbyEffectEnabled: current.dolbyEffectEnabled,
-      smartConversationAssistMode: current.smartConversationAssistMode,
-      conversationAssistReductionPercent:
-          current.conversationAssistReductionPercent,
-      conversationAssistAutoRestoreSeconds:
-          current.conversationAssistAutoRestoreSeconds,
       conversationAssistIgnoreSingleEarbud: ignore,
     );
   }

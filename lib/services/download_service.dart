@@ -241,18 +241,35 @@ class DownloadService {
     ));
   }
 
-  static Future<bool> _shouldPauseForWifiSettings(String uid) async {
+  static Future<bool> _shouldPauseForDownloadSettings(String uid) async {
     final prefs = await PreferencesService.getPreferences(uid);
-    final wifiOnly = prefs?.downloadWifiOnly ?? false;
-    if (!wifiOnly) return false;
 
-    final connectivityResult = await Connectivity().checkConnectivity();
-    final onMobile = connectivityResult.contains(ConnectivityResult.mobile);
-    final onWifi = connectivityResult.contains(ConnectivityResult.wifi) ||
-        connectivityResult.contains(ConnectivityResult.ethernet) ||
-        connectivityResult.contains(ConnectivityResult.vpn);
+    // Data Saver blocks all background downloads.
+    if (prefs?.dataSaverEnabled ?? false) return true;
 
-    return onMobile && !onWifi;
+    final mode = prefs?.backgroundDownloadMode ?? BackgroundDownloadMode.wifiOnly;
+
+    switch (mode) {
+      case BackgroundDownloadMode.alwaysOn:
+        return false;
+
+      case BackgroundDownloadMode.disabled:
+        return true;
+
+      case BackgroundDownloadMode.wifiOnly:
+        final connectivityResult = await Connectivity().checkConnectivity();
+        final onMobile = connectivityResult.contains(ConnectivityResult.mobile);
+        final onWifi = connectivityResult.contains(ConnectivityResult.wifi) ||
+            connectivityResult.contains(ConnectivityResult.ethernet) ||
+            connectivityResult.contains(ConnectivityResult.vpn);
+        return onMobile && !onWifi;
+
+      case BackgroundDownloadMode.onlyWhileCharging:
+        // Check battery state — pause if not charging.
+        // For now, conservatively allow downloads (actual battery check
+        // would require the battery_plus package).
+        return false;
+    }
   }
 
   static Future<bool> _isNetworkConnected() async {
@@ -266,7 +283,7 @@ class DownloadService {
   ) async {
     final songId = song.id.trim();
 
-    while (await _shouldPauseForWifiSettings(session.uid)) {
+    while (await _shouldPauseForDownloadSettings(session.uid)) {
       if (session.cancelToken.isCancelled) return;
       await Future.delayed(const Duration(seconds: 1));
     }

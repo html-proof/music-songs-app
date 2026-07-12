@@ -709,13 +709,13 @@ class OfflineService {
         }
         await tempFile.rename(audioPath);
         final newBitrate = _extractBitrate(bestUrl);
-        entry['quality'] = newBitrate >= AudioQuality.ultra.kbps
-            ? 'ultra'
-            : newBitrate >= AudioQuality.lossless.kbps
+        entry['quality'] = newBitrate >= AudioQuality.veryHigh.kbps
             ? 'very_high'
-            : newBitrate >= 160
+            : newBitrate >= AudioQuality.high.kbps
             ? 'high'
-            : 'medium';
+            : newBitrate >= 96
+            ? 'normal'
+            : 'low';
         entry['bitrate_kbps'] = newBitrate;
         entry['updated_at'] = DateTime.now().millisecondsSinceEpoch;
         await _persistEntry(songId, entry);

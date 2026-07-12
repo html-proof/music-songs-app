@@ -1,11 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import 'package:connectivity_plus/connectivity_plus.dart';
 import '../models/artist.dart';
 import '../models/song.dart';
 import '../models/album.dart';
 import '../providers/player_provider.dart';
 import '../services/api_service.dart';
+import '../services/download_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/song_tile.dart';
 import '../widgets/album_card.dart';
@@ -40,6 +42,34 @@ class _ArtistDetailScreenState extends State<ArtistDetailScreen> {
 
   Future<void> _fetchArtistDetails() async {
     try {
+      final connectivity = await Connectivity().checkConnectivity();
+      final isOffline = connectivity.contains(ConnectivityResult.none);
+
+      if (isOffline) {
+        final offlineSongs = (await DownloadService.getDownloadedSongs())
+            .where((s) => s.artist?.toLowerCase().trim() == widget.artist.name.toLowerCase().trim())
+            .toList();
+
+        final offlineAlbums = await AlbumFilter.filterAndDeduplicate(
+          offlineSongs.map((s) => Album(
+            id: s.albumId ?? 'song_album_${s.album?.toLowerCase().replaceAll(RegExp(r'\s+'), '_')}',
+            name: s.album ?? 'Unknown Album',
+            artist: s.artist,
+            imageUrl: s.imageUrl,
+            songCount: 1,
+          )).toList(),
+        );
+
+        if (!mounted) return;
+        setState(() {
+          _topTracks = offlineSongs;
+          _albums = offlineAlbums;
+          _isLoading = false;
+          _error = null;
+        });
+        return;
+      }
+
       final id = widget.artist.id;
       final results = await Future.wait([
         ApiService.getArtistById(id),
@@ -53,26 +83,32 @@ class _ArtistDetailScreenState extends State<ArtistDetailScreen> {
       final songsJson = results[1] as List;
       final albumsJson = results[2] as List;
 
+      final parsedTracks = songsJson
+          .map((s) => Song.fromJson(Map<String, dynamic>.from(s)))
+          .take(10)
+          .toList();
+      final parsedAlbums = await AlbumFilter.filterAndDeduplicate(
+        albumsJson
+            .map((a) => Album.fromJson(Map<String, dynamic>.from(a)))
+            .toList(),
+      );
+
+      if (!mounted) return;
       setState(() {
         if (artistJson != null) {
           _detailedArtist = Artist.fromJson(artistJson);
         }
-        _topTracks = songsJson
-            .map((s) => Song.fromJson(Map<String, dynamic>.from(s)))
-            .take(10)
-            .toList();
-        _albums = AlbumFilter.filterAndDeduplicate(
-          albumsJson
-              .map((a) => Album.fromJson(Map<String, dynamic>.from(a)))
-              .toList(),
-        );
+        _topTracks = parsedTracks;
+        _albums = parsedAlbums;
         _isLoading = false;
+        _error = null;
       });
     } catch (e) {
       debugPrint('Error fetching artist details: $e');
       if (!mounted) return;
       setState(() {
         _isLoading = false;
+        _error = 'Failed to load artist details';
       });
     }
   }
@@ -114,6 +150,35 @@ class _ArtistDetailScreenState extends State<ArtistDetailScreen> {
                         ),
                       )
                     else ...[
+                      if (context.select<PlayerProvider, bool>((p) => p.isOffline))
+                        SliverToBoxAdapter(
+                          child: Container(
+                            width: double.infinity,
+                            margin: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                            decoration: BoxDecoration(
+                              color: Colors.orangeAccent.withValues(alpha: 0.15),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: Colors.orangeAccent.withValues(alpha: 0.4)),
+                            ),
+                            child: const Row(
+                              children: [
+                                Icon(Icons.cloud_off_rounded, color: Colors.orangeAccent, size: 20),
+                                SizedBox(width: 12),
+                                Expanded(
+                                  child: Text(
+                                    'Offline Mode — displaying downloaded songs and albums only',
+                                    style: TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
                       SliverToBoxAdapter(
                         child: Padding(
                           padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),

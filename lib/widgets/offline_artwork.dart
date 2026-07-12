@@ -153,7 +153,7 @@ class _OfflineArtworkState extends State<OfflineArtwork> {
       }
     }
 
-    final keyString = _localFile?.path ?? widget.imageUrl ?? widget.songId ?? widget.albumId ?? widget.playlistId ?? '';
+    final keyString = widget.songId ?? widget.imageUrl ?? widget.albumId ?? widget.playlistId ?? '';
 
     return AnimatedSwitcher(
       duration: const Duration(milliseconds: 300),

@@ -18,6 +18,7 @@ import 'offline_service.dart';
 import 'player_service.dart';
 import 'lyrics_service.dart';
 import 'lyrics_cache.dart';
+import '../utils/album_filter.dart';
 import 'artwork_service.dart';
 import 'playlist_service.dart';
 
@@ -514,11 +515,23 @@ class DownloadService {
     if (uid == null || uid.isEmpty) return;
 
     final metadata = await _readMetadataEntries();
+    final deletedEntry = metadata.cast<Map<String, dynamic>?>().firstWhere(
+      (entry) => entry != null && _entrySongId(entry) == songId && _entryUid(entry) == uid,
+      orElse: () => null,
+    );
+
     metadata.removeWhere(
       (entry) => _entrySongId(entry) == songId && _entryUid(entry) == uid,
     );
     await _writeMetadataEntries(metadata);
     await SessionStateService.clearDownloadState(uid: uid, songId: songId);
+
+    if (deletedEntry != null) {
+      final albumId = (deletedEntry['albumId'] ?? deletedEntry['album_id'] ?? '').toString().trim();
+      if (albumId.isNotEmpty) {
+        unawaited(AlbumFilter.invalidateCache(albumId));
+      }
+    }
 
     // Remove file only if no other account still references this song.
     final hasOtherOwner = metadata.any(
@@ -753,6 +766,9 @@ class DownloadService {
         
         // Found local copy (auto-cached). Transition to manual and uncache.
         unawaited(OfflineService.uncacheRecord(songId));
+        if (song.albumId != null && song.albumId!.isNotEmpty) {
+          unawaited(AlbumFilter.invalidateCache(song.albumId!));
+        }
         
         _progress[songId] = 1.0;
         onProgress?.call(1.0);
@@ -922,6 +938,9 @@ class DownloadService {
       // Successfully downloaded. Remove from auto-cache tracker (metadata only)
       // to avoid duplicate management of the same file.
       unawaited(OfflineService.uncacheRecord(songId));
+      if (song.albumId != null && song.albumId!.isNotEmpty) {
+        unawaited(AlbumFilter.invalidateCache(song.albumId!));
+      }
       _downloadCompletedController.add(songId);
       
       _progress[songId] = 1.0;

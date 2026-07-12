@@ -13,6 +13,7 @@ import '../utils/album_filter.dart';
 import '../models/user_playlist.dart';
 import '../services/playlist_service.dart';
 import '../services/download_service.dart';
+import '../services/background_learning_service.dart';
 
 class SearchProvider extends ChangeNotifier {
   static const String _recentSearchesKey = 'recent_searches_v1';
@@ -254,17 +255,28 @@ class SearchProvider extends ChangeNotifier {
       }
 
       final List<Artist> artists = [];
-      final Set<String> seenArtistNames = {};
+      final Map<String, int> artistSongCounts = {};
+      final Map<String, String?> artistImages = {};
       for (final song in songs) {
         final artistName = song.artist ?? '';
-        if (artistName.isNotEmpty && seenArtistNames.add(artistName.toLowerCase())) {
-          artists.add(Artist(
-            id: 'art_${artistName.toLowerCase().replaceAll(RegExp(r'\s+'), '_')}',
-            name: artistName,
-            imageUrl: song.imageUrl,
-          ));
+        if (artistName.isNotEmpty) {
+          final key = artistName.toLowerCase().trim();
+          artistSongCounts[key] = (artistSongCounts[key] ?? 0) + 1;
+          if (artistImages[key] == null && song.imageUrl != null) {
+            artistImages[key] = song.imageUrl;
+          }
         }
       }
+      artistSongCounts.forEach((name, count) {
+        final cleanName = name.replaceAll(RegExp(r'\s+'), ' ');
+        final originalName = songs.firstWhere((s) => s.artist?.toLowerCase().trim() == name).artist ?? cleanName;
+        artists.add(Artist(
+          id: 'art_${name.replaceAll(RegExp(r'\s+'), '_')}',
+          name: originalName,
+          imageUrl: artistImages[name],
+          role: '$count downloaded ${count == 1 ? "song" : "songs"}',
+        ));
+      });
 
       _addToLocalIndex(songs: songs, albums: albums, artists: artists);
     } catch (e) {
@@ -412,7 +424,7 @@ class SearchProvider extends ChangeNotifier {
             .where((song) => _offlineSongIds.contains(song.id))
             .toList(growable: false),
       );
-      final offlineAlbums = _sanitizeAlbums(
+      final offlineAlbums = await _sanitizeAlbums(
         _localAlbumIndex
             .where((album) => _offlineAlbumIds.contains(album.id))
             .toList(growable: false),
@@ -453,8 +465,10 @@ class SearchProvider extends ChangeNotifier {
         getName: (art) => art.name,
         getArtist: (art) => '',
         getLanguage: (art) => '',
-        getQualityScore: (art) => 1.0,
+        getQualityScore: (art) => art.isVerified ? 10.0 : 1.0,
         getId: (art) => art.id,
+        getDedupeKey: (art) => art.name.toLowerCase().trim(),
+        merge: _mergeArtists,
       );
       _playlists = _rankAndMerge<UserPlaylist>(
         local: matchingLocalPlaylists,
@@ -542,10 +556,12 @@ class SearchProvider extends ChangeNotifier {
     // 1. First, try local search for instant feedback
     final localSongs = _searchLocalSongs(normalizedQuery);
     final localAlbums = _searchLocalAlbums(normalizedQuery);
+    final localArtists = _searchLocalArtists(normalizedQuery);
 
-    if (localSongs.isNotEmpty || localAlbums.isNotEmpty) {
+    if (localSongs.isNotEmpty || localAlbums.isNotEmpty || localArtists.isNotEmpty) {
       _songs = localSongs;
       _albums = localAlbums;
+      _artists = localArtists;
       _loading = false;
       notifyListeners();
       // We still proceed to network search to get fresh/more results
@@ -563,7 +579,7 @@ class SearchProvider extends ChangeNotifier {
       var networkSongs = _sanitizeSongs(
         _parseList<Song>(data['songs'] ?? const [], Song.fromJson),
       );
-      var networkAlbums = _sanitizeAlbums(
+      var networkAlbums = await _sanitizeAlbums(
         _parseList<Album>(data['albums'] ?? const [], Album.fromJson),
       );
       var networkArtists = _parseList<Artist>(
@@ -587,7 +603,7 @@ class SearchProvider extends ChangeNotifier {
           );
           if (relaxedSongs.isNotEmpty) {
             networkSongs = relaxedSongs;
-            networkAlbums = _sanitizeAlbums(
+            networkAlbums = await _sanitizeAlbums(
               _parseList<Album>(data['albums'] ?? const [], Album.fromJson),
             );
             networkArtists = _parseList<Artist>(
@@ -630,7 +646,7 @@ class SearchProvider extends ChangeNotifier {
             albumRaw,
             Album.fromJson,
           );
-          networkAlbums = _sanitizeAlbums(
+          networkAlbums = await _sanitizeAlbums(
             _mergeUniqueItems<Album>(
               existing: networkAlbums,
               incoming: supplementalAlbums,
@@ -645,7 +661,7 @@ class SearchProvider extends ChangeNotifier {
       if (networkAlbums.length < _minAlbumsPerSearch &&
           networkSongs.isNotEmpty) {
         final derivedAlbums = _deriveAlbumsFromSongs(networkSongs);
-        networkAlbums = _sanitizeAlbums(
+        networkAlbums = await _sanitizeAlbums(
           _mergeUniqueItems<Album>(
             existing: networkAlbums,
             incoming: derivedAlbums,
@@ -675,7 +691,7 @@ class SearchProvider extends ChangeNotifier {
 
       _albums = _rankAndMerge<Album>(
         local: localAlbums,
-        network: _sanitizeAlbums(networkAlbums),
+        network: await _sanitizeAlbums(networkAlbums),
         query: normalizedQuery,
         getName: (a) => a.name,
         getArtist: (a) => a.artist ?? '',
@@ -685,7 +701,18 @@ class SearchProvider extends ChangeNotifier {
         minCount: _minAlbumsPerSearch,
       );
 
-      _artists = networkArtists.take(_maxSearchResults).toList(growable: false);
+      _artists = _rankAndMerge<Artist>(
+        local: localArtists,
+        network: networkArtists,
+        query: normalizedQuery,
+        getName: (art) => art.name,
+        getArtist: (art) => '',
+        getLanguage: (art) => '',
+        getQualityScore: (art) => art.isVerified ? 10.0 : 1.0,
+        getId: (art) => art.id,
+        getDedupeKey: (art) => art.name.toLowerCase().trim(),
+        merge: _mergeArtists,
+      );
 
       final localPlaylists = await PlaylistService.getPlaylists();
       final matchingLocalPlaylists = localPlaylists.where((p) {
@@ -745,6 +772,8 @@ class SearchProvider extends ChangeNotifier {
     required String Function(T) getLanguage,
     required double Function(T) getQualityScore,
     required String Function(T) getId,
+    String Function(T)? getDedupeKey,
+    T Function(T, T)? merge,
     int minCount = 0,
   }) {
     final networkRankById = <String, int>{};
@@ -762,17 +791,23 @@ class SearchProvider extends ChangeNotifier {
     }
 
     final list = <T>[];
-    final seenIds = <String>{};
+    final mergedMap = <String, T>{};
     for (final item in network) {
-      final id = getId(item).trim();
-      if (id.isEmpty || !seenIds.add(id)) continue;
-      list.add(item);
+      final key = getDedupeKey != null ? getDedupeKey(item) : getId(item).trim();
+      if (key.isEmpty) continue;
+      mergedMap[key] = item;
     }
     for (final item in local) {
-      final id = getId(item).trim();
-      if (id.isEmpty || !seenIds.add(id)) continue;
-      list.add(item);
+      final key = getDedupeKey != null ? getDedupeKey(item) : getId(item).trim();
+      if (key.isEmpty) continue;
+      final existing = mergedMap[key];
+      if (existing != null && merge != null) {
+        mergedMap[key] = merge(existing, item);
+      } else if (existing == null) {
+        mergedMap[key] = item;
+      }
     }
+    list.addAll(mergedMap.values);
 
     if (list.isEmpty) return <T>[];
     final fuzzyScores = _buildFuzzyScores<T>(
@@ -825,6 +860,11 @@ class SearchProvider extends ChangeNotifier {
       final sourceRank =
           networkRankById[id] ?? (1000 + (localRankById[id] ?? 0));
 
+      double biasBoost = 0.0;
+      if (item is Song) {
+        biasBoost = BackgroundLearningService.getBiasBoost(id, query: query);
+      }
+
       final candidate = _RankedCandidate<T>(
         item: item,
         languageBucket: 0,
@@ -833,7 +873,8 @@ class SearchProvider extends ChangeNotifier {
             match.score +
             (isOfficial ? 14.0 : -4.0) +
             _computeSearchPriorityBoost(item) +
-            _computeSourceOrderBoost(sourceRank),
+            _computeSourceOrderBoost(sourceRank) +
+            biasBoost,
         qualityScore: getQualityScore(item),
         sourceRank: sourceRank,
         tieBreaker: name,
@@ -933,7 +974,7 @@ class SearchProvider extends ChangeNotifier {
   }
 
   List<Album> _searchLocalAlbums(String query) {
-    final safeLocalAlbums = _sanitizeAlbums(_localAlbumIndex);
+    final safeLocalAlbums = _sanitizeAlbumsSync(_localAlbumIndex);
     return _rankAndMerge<Album>(
       local: safeLocalAlbums,
       network: const <Album>[],
@@ -943,6 +984,20 @@ class SearchProvider extends ChangeNotifier {
       getLanguage: (a) => a.language ?? '',
       getQualityScore: (a) => _computeAlbumQuality(a),
       getId: (a) => a.id,
+    );
+  }
+
+  List<Artist> _searchLocalArtists(String query) {
+    return _rankAndMerge<Artist>(
+      local: _localArtistIndex,
+      network: const <Artist>[],
+      query: query,
+      getName: (art) => art.name,
+      getArtist: (art) => '',
+      getLanguage: (art) => '',
+      getQualityScore: (art) => art.isVerified ? 10.0 : 1.0,
+      getId: (art) => art.id,
+      getDedupeKey: (art) => art.name.toLowerCase().trim(),
     );
   }
 
@@ -1547,11 +1602,18 @@ class SearchProvider extends ChangeNotifier {
     return output;
   }
 
-  List<Album> _sanitizeAlbums(List<Album> albums) {
+  Future<List<Album>> _sanitizeAlbums(List<Album> albums) async {
     final languageFiltered = albums
         .where((album) => _matchesPreferredLanguage(album.language))
         .toList();
-    return AlbumFilter.filterAndDeduplicate(languageFiltered);
+    return await AlbumFilter.filterAndDeduplicate(languageFiltered);
+  }
+
+  List<Album> _sanitizeAlbumsSync(List<Album> albums) {
+    final languageFiltered = albums
+        .where((album) => _matchesPreferredLanguage(album.language))
+        .toList();
+    return AlbumFilter.filterAndDeduplicateSync(languageFiltered);
   }
 
   Song _preferSong(Song a, Song b) {
@@ -1699,6 +1761,7 @@ class SearchProvider extends ChangeNotifier {
   bool _isValidSongForSearch(Song song) {
     final title = song.name.trim();
     if (title.isEmpty) return false;
+    if ((song.artist ?? '').trim().isEmpty) return false;
     if (!ContentFilter.isAllowedSongTitle(title)) return false;
 
     final combined = '$title ${song.artist ?? ''} ${song.album ?? ''}';
@@ -1820,6 +1883,19 @@ class SearchProvider extends ChangeNotifier {
       }
     }
     return deduped.values.toList(growable: false);
+  }
+
+  Artist _mergeArtists(Artist a, Artist b) {
+    final bestImage = (a.imageUrl != null && a.imageUrl!.isNotEmpty) ? a.imageUrl : b.imageUrl;
+    final role = (a.role != null && a.role!.contains('downloaded')) ? a.role : b.role;
+    return Artist(
+      id: a.id.startsWith('art_') ? b.id : a.id,
+      name: a.name,
+      imageUrl: bestImage,
+      role: role ?? a.role ?? b.role,
+      isVerified: a.isVerified || b.isVerified,
+      followerCount: a.followerCount ?? b.followerCount,
+    );
   }
 }
 

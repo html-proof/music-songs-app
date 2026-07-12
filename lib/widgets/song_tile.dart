@@ -5,6 +5,8 @@ import '../models/song.dart';
 import '../theme/app_theme.dart';
 import 'offline_artwork.dart';
 
+import '../providers/player_provider.dart';
+
 class SongTile extends StatelessWidget {
   final Song song;
   final VoidCallback? onTap;
@@ -20,155 +22,169 @@ class SongTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isDownloaded = context.watch<DownloadProvider>().isDownloaded(song.id);
+    final isOffline = context.watch<PlayerProvider>().isOffline;
+    final isPlayable = !isOffline || isDownloaded;
 
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-      decoration: BoxDecoration(
-        color: isPlaying
-            ? AppTheme.accentPurple.withValues(alpha: 0.12)
-            : Colors.transparent,
-        borderRadius: BorderRadius.circular(16),
-      ),
-      child: ListTile(
-        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-        leading: ClipRRect(
-          borderRadius: BorderRadius.circular(8),
-          child: SizedBox(
-            width: 48,
-            height: 48,
-            child: OfflineArtwork(
-              songId: song.id,
-              imageUrl: song.imageUrl,
-              fit: BoxFit.cover,
-              placeholder: Container(
-                color: AppTheme.cardDark,
-                child: const Icon(
-                  Icons.music_note,
-                  color: AppTheme.textMuted,
+    return Opacity(
+      opacity: isPlayable ? 1.0 : 0.45,
+      child: Container(
+        margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+        decoration: BoxDecoration(
+          color: isPlaying
+              ? AppTheme.accentPurple.withValues(alpha: 0.12)
+              : Colors.transparent,
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: ListTile(
+          contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          leading: ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: SizedBox(
+              width: 48,
+              height: 48,
+              child: OfflineArtwork(
+                songId: song.id,
+                imageUrl: song.imageUrl,
+                fit: BoxFit.cover,
+                placeholder: Container(
+                  color: AppTheme.cardDark,
+                  child: const Icon(
+                    Icons.music_note,
+                    color: AppTheme.textMuted,
+                  ),
                 ),
-              ),
-              errorWidget: Container(
-                color: AppTheme.cardDark,
-                child: const Icon(
-                  Icons.music_note,
-                  color: AppTheme.textMuted,
+                errorWidget: Container(
+                  color: AppTheme.cardDark,
+                  child: const Icon(
+                    Icons.music_note,
+                    color: AppTheme.textMuted,
+                  ),
                 ),
               ),
             ),
           ),
-        ),
-        title: Row(
-          children: [
-            Expanded(
-              child: Text(
-                song.name,
-                style: TextStyle(
-                  color: isPlaying ? AppTheme.accentPurple : AppTheme.textPrimary,
-                  fontWeight: FontWeight.bold,
-                  fontSize: 14,
-                ),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-            if (song.isExplicit)
-              Padding(
-                padding: const EdgeInsets.only(left: 4),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 4,
-                    vertical: 1,
-                  ),
-                  decoration: BoxDecoration(
-                    color: Colors.white24,
-                    borderRadius: BorderRadius.circular(4),
-                  ),
-                  child: const Text(
-                    'E',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 8,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ),
-              ),
-            if (song.type != null && song.type != 'SONG')
-              Padding(
-                padding: const EdgeInsets.only(left: 6),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 4,
-                    vertical: 1,
-                  ),
-                  decoration: BoxDecoration(
-                    color: AppTheme.accentPurple.withValues(alpha: 0.2),
-                    borderRadius: BorderRadius.circular(4),
-                  ),
-                  child: Text(
-                    song.type!,
-                    style: const TextStyle(
-                      color: AppTheme.accentPurple,
-                      fontSize: 8,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ),
-              ),
-          ],
-        ),
-        subtitle: Padding(
-          padding: const EdgeInsets.only(top: 4),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+          title: Row(
             children: [
-              Row(
-                children: [
-                  if (isDownloaded)
-                    const Padding(
-                      padding: EdgeInsets.only(right: 4),
-                      child: Icon(
-                        Icons.check_circle_rounded,
-                        color: AppTheme.accentPurple,
-                        size: 13,
-                      ),
+              Expanded(
+                child: Text(
+                  song.name,
+                  style: TextStyle(
+                    color: isPlaying ? AppTheme.accentPurple : AppTheme.textPrimary,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 14,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              if (song.isExplicit)
+                Padding(
+                  padding: const EdgeInsets.only(left: 4),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 4,
+                      vertical: 1,
                     ),
-                  Expanded(
-                    child: Text(
-                      '${song.artist ?? 'Unknown'} • ${song.album ?? 'Single'}${song.year != null ? ' • ${song.year}' : ''}',
-                      style: const TextStyle(
-                        color: AppTheme.textSecondary,
-                        fontSize: 12,
+                    decoration: BoxDecoration(
+                      color: Colors.white24,
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: const Text(
+                      'E',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 8,
+                        fontWeight: FontWeight.bold,
                       ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
                     ),
                   ),
-                ],
-              ),
-              const SizedBox(height: 2),
-              Text(
-                '${song.language?.toUpperCase() ?? 'MIX'} • ${_formatDuration(song.duration)}',
-                style: const TextStyle(color: AppTheme.textMuted, fontSize: 10),
-              ),
+                ),
+              if (song.type != null && song.type != 'SONG')
+                Padding(
+                  padding: const EdgeInsets.only(left: 6),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 4,
+                      vertical: 1,
+                    ),
+                    decoration: BoxDecoration(
+                      color: AppTheme.accentPurple.withValues(alpha: 0.2),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: Text(
+                      song.type!,
+                      style: const TextStyle(
+                        color: AppTheme.accentPurple,
+                        fontSize: 8,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                ),
             ],
           ),
+          subtitle: Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    if (isDownloaded)
+                      const Padding(
+                        padding: EdgeInsets.only(right: 4),
+                        child: Icon(
+                          Icons.check_circle_rounded,
+                          color: AppTheme.accentPurple,
+                          size: 13,
+                        ),
+                      ),
+                    Expanded(
+                      child: Text(
+                        '${song.artist ?? 'Unknown'} • ${song.album ?? 'Single'}${song.year != null ? ' • ${song.year}' : ''}',
+                        style: const TextStyle(
+                          color: AppTheme.textSecondary,
+                          fontSize: 12,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  '${song.language?.toUpperCase() ?? 'MIX'} • ${_formatDuration(song.duration)}',
+                  style: const TextStyle(color: AppTheme.textMuted, fontSize: 10),
+                ),
+              ],
+            ),
+          ),
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _buildDownloadButton(context),
+              const SizedBox(width: 8),
+              isPlaying
+                  ? const Icon(Icons.equalizer, color: AppTheme.accentPurple)
+                  : const Icon(
+                      Icons.play_arrow_rounded,
+                      color: AppTheme.textMuted,
+                      size: 26,
+                    ),
+            ],
+          ),
+          onTap: isPlayable
+              ? onTap
+              : () {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text('"${song.name}" is not downloaded. Connect to the internet to play.'),
+                      duration: const Duration(seconds: 2),
+                    ),
+                  );
+                },
         ),
-        trailing: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            _buildDownloadButton(context),
-            const SizedBox(width: 8),
-            isPlaying
-                ? const Icon(Icons.equalizer, color: AppTheme.accentPurple)
-                : const Icon(
-                    Icons.play_arrow_rounded,
-                    color: AppTheme.textMuted,
-                    size: 26,
-                  ),
-          ],
-        ),
-        onTap: onTap,
       ),
     );
   }

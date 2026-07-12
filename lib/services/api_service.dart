@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import '../utils/content_filter.dart';
 import '../utils/language_utils.dart';
 
@@ -238,11 +239,22 @@ class ApiService {
     return now - timestampMs <= ttl.inMilliseconds;
   }
 
-  static Future<dynamic> _readCache(String key, Duration ttl) async {
+  static Future<bool> _isOffline() async {
+    try {
+      final results = await Connectivity().checkConnectivity();
+      return results.contains(ConnectivityResult.none);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  static Future<dynamic> _readCache(String key, Duration ttl, {bool ignoreTtlIfOffline = true}) async {
     final memory = _memoryCache[key];
+    final offline = ignoreTtlIfOffline && await _isOffline();
+
     if (memory != null) {
       final ts = memory['ts'] as int? ?? 0;
-      if (_isFresh(ts, ttl)) {
+      if (offline || _isFresh(ts, ttl)) {
         return memory['data'];
       }
     }
@@ -260,7 +272,7 @@ class ApiService {
       if (parsed is! Map) return null;
       final payload = Map<String, dynamic>.from(parsed);
       final ts = payload['ts'] as int? ?? 0;
-      if (!_isFresh(ts, ttl)) {
+      if (!offline && !_isFresh(ts, ttl)) {
         await prefs.remove(key);
         return null;
       }

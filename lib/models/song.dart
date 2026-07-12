@@ -41,6 +41,8 @@ class Song {
   final int? popularity;
   final String? songUrl;
   final bool? hasLyrics;
+  final String? isrc;
+  final String? musicbrainzId;
 
   Song({
     required this.id,
@@ -65,6 +67,8 @@ class Song {
     this.popularity,
     this.songUrl,
     this.hasLyrics,
+    this.isrc,
+    this.musicbrainzId,
   });
 
   factory Song.fromJson(Map<String, dynamic> json) {
@@ -146,6 +150,11 @@ class Song {
       popularity: popularity,
       songUrl: json['url']?.toString() ?? json['perma_url']?.toString(),
       hasLyrics: json['hasLyrics'] == true || json['has_lyrics'] == true,
+      isrc: json['isrc']?.toString() ?? json['ISRC']?.toString(),
+      musicbrainzId: json['musicbrainzId']?.toString() ??
+          json['musicbrainz_id']?.toString() ??
+          json['mbid']?.toString() ??
+          json['musicbrainz_track_id']?.toString(),
     );
   }
 
@@ -171,6 +180,8 @@ class Song {
     Object? popularity = _unset,
     Object? songUrl = _unset,
     Object? hasLyrics = _unset,
+    Object? isrc = _unset,
+    Object? musicbrainzId = _unset,
   }) {
     return Song(
       id: id ?? this.id,
@@ -204,6 +215,8 @@ class Song {
       popularity: popularity == _unset ? this.popularity : popularity as int?,
       songUrl: songUrl == _unset ? this.songUrl : songUrl as String?,
       hasLyrics: hasLyrics == _unset ? this.hasLyrics : hasLyrics as bool?,
+      isrc: isrc == _unset ? this.isrc : isrc as String?,
+      musicbrainzId: musicbrainzId == _unset ? this.musicbrainzId : musicbrainzId as String?,
     );
   }
 

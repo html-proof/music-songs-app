@@ -56,7 +56,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   PreferencesProvider? _preferencesProvider;
   int _lastSeenPreferencesVersion = -1;
   bool? _lastOfflineState;
-  bool _offlineRedirectScheduled = false;
   bool _reconnectRefreshInProgress = false;
   bool _handledReconnectMessageOnStart = false;
   String? _resumeHandledUid;
@@ -130,22 +129,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }) {
     if (!mounted) return;
 
-    if (isOffline) {
-      if (_offlineRedirectScheduled) return;
-      _offlineRedirectScheduled = true;
-      WidgetsBinding.instance.addPostFrameCallback((_) async {
-        if (!mounted) return;
-        await Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(builder: (_) => const OfflineLibraryScreen()),
-        );
-      });
-      return;
+    if (!isOffline && wasOffline) {
+      _refreshAfterReconnect();
     }
-
-    if (!wasOffline) return;
-
-    _refreshAfterReconnect();
   }
 
   Future<void> _refreshAfterReconnect() async {
@@ -265,7 +251,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         preferredLanguageSet,
       );
       final albums = _filterAlbumsByPreferredLanguages(
-        _parseAlbumsSafely(_asMapList(cachedData['recommendedAlbums'])),
+        _parseAlbumsSafelySync(_asMapList(cachedData['recommendedAlbums'])),
         preferredLanguageSet,
       );
       final trending = _filterSongsByPreferredLanguages(
@@ -273,7 +259,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         preferredLanguageSet,
       );
       final playlists = _filterAlbumsByPreferredLanguages(
-        _parseAlbumsSafely(_asMapList(cachedData['playlists'])),
+        _parseAlbumsSafelySync(_asMapList(cachedData['playlists'])),
         preferredLanguageSet,
       );
       final artists = _parseArtistsSafely(
@@ -387,7 +373,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         preferredLanguageSet,
       );
       final parsedRecommendedAlbums = _filterAlbumsByPreferredLanguages(
-        _parseAlbumsSafely(recommendedAlbumMaps),
+        await _parseAlbumsSafely(recommendedAlbumMaps),
         preferredLanguageSet,
       );
       final parsedTrendingSongs = _filterSongsByPreferredLanguages(
@@ -395,7 +381,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         preferredLanguageSet,
       );
       final parsedPlaylists = _filterAlbumsByPreferredLanguages(
-        _parseAlbumsSafely(playlistMaps),
+        await _parseAlbumsSafely(playlistMaps),
         preferredLanguageSet,
       );
       final parsedSuggestedArtists = _parseArtistsSafely(artistMaps);
@@ -1169,7 +1155,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     return '$cleanName|$artist';
   }
 
-  List<Album> _parseAlbumsSafely(List<Map<String, dynamic>> items) {
+  Future<List<Album>> _parseAlbumsSafely(List<Map<String, dynamic>> items) async {
     final rawAlbums = <Album>[];
     for (final item in items) {
       try {
@@ -1178,7 +1164,19 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         debugPrint('Skipped malformed home album: $e');
       }
     }
-    return AlbumFilter.filterAndDeduplicate(rawAlbums);
+    return await AlbumFilter.filterAndDeduplicate(rawAlbums);
+  }
+
+  List<Album> _parseAlbumsSafelySync(List<Map<String, dynamic>> items) {
+    final rawAlbums = <Album>[];
+    for (final item in items) {
+      try {
+        rawAlbums.add(Album.fromJson(item));
+      } catch (e) {
+        debugPrint('Skipped malformed home album: $e');
+      }
+    }
+    return AlbumFilter.filterAndDeduplicateSync(rawAlbums);
   }
 
   List<Artist> _parseArtistsSafely(List<Map<String, dynamic>> items) {

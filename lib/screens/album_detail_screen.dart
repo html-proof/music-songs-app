@@ -122,7 +122,7 @@ class _AlbumDetailScreenState extends State<AlbumDetailScreen> {
           })
           .toList(growable: false);
 
-      if (!AlbumFilter.isValidAlbum(widget.album, tracks: songs)) {
+      if (!await AlbumFilter.isValidAlbum(widget.album, tracks: songs)) {
         if (!mounted) return;
         // Album has no valid/playable songs — show unavailable state.
         setState(() {
@@ -199,12 +199,12 @@ class _AlbumDetailScreenState extends State<AlbumDetailScreen> {
             limit: remaining,
             blockedArtists: _blockedTrendingArtistNames(),
           );
-          final fallbackAlbums = trendingFallback
+          final candidates = trendingFallback
               .map((map) => Album.fromJson(map))
               .where((album) => album.id != widget.album.id)
               .where((album) => !topUpExcludeIds.contains(album.id))
-              .where((album) => AlbumFilter.isValidAlbum(album))
-              .take(remaining);
+              .toList();
+          final fallbackAlbums = (await AlbumFilter.filterValid(candidates)).take(remaining);
           topUp.addAll(fallbackAlbums);
         }
         initialBatch = topUp.take(_artistAlbumPageSize).toList(growable: false);
@@ -216,10 +216,11 @@ class _AlbumDetailScreenState extends State<AlbumDetailScreen> {
           limit: _artistAlbumPageSize,
           blockedArtists: _blockedTrendingArtistNames(),
         );
-        initialBatch = trendingFallback
+        final candidates = trendingFallback
             .map((map) => Album.fromJson(map))
             .where((album) => album.id != widget.album.id)
-            .where((album) => AlbumFilter.isValidAlbum(album))
+            .toList();
+        initialBatch = (await AlbumFilter.filterValid(candidates))
             .take(_artistAlbumPageSize)
             .toList(growable: false);
       }
@@ -273,10 +274,11 @@ class _AlbumDetailScreenState extends State<AlbumDetailScreen> {
           limit: batchSize,
           blockedArtists: _blockedTrendingArtistNames(),
         );
-        nextBatch = trendingMaps
+        final candidates = trendingMaps
             .map((map) => Album.fromJson(map))
             .where((album) => album.id != widget.album.id)
-            .where((album) => AlbumFilter.isValidAlbum(album))
+            .toList();
+        nextBatch = (await AlbumFilter.filterValid(candidates))
             .take(batchSize)
             .toList(growable: false);
       } else {
@@ -351,10 +353,11 @@ class _AlbumDetailScreenState extends State<AlbumDetailScreen> {
       limit: desiredCount,
     );
 
-    return output
+    final candidates = output
         .map((map) => Album.fromJson(map))
         .where((album) => album.id != widget.album.id)
-        .where((album) => AlbumFilter.isValidAlbum(album))
+        .toList();
+    return (await AlbumFilter.filterValid(candidates))
         .take(desiredCount)
         .toList(growable: false);
   }

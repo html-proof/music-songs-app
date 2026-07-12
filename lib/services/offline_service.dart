@@ -12,6 +12,7 @@ import '../models/song.dart';
 import '../models/user_preferences.dart';
 import 'preferences_service.dart';
 import 'download_service.dart';
+import '../utils/album_filter.dart';
 
 class OfflineSongRecord {
   final Song song;
@@ -473,6 +474,15 @@ class OfflineService {
     await _ensureReady();
     final normalizedId = songId.trim();
     if (normalizedId.isEmpty) return;
+
+    final entry = _readEntry(normalizedId);
+    if (entry != null) {
+      final albumId = (entry['albumId'] ?? entry['album_id'] ?? '').toString().trim();
+      if (albumId.isNotEmpty) {
+        unawaited(AlbumFilter.invalidateCache(albumId));
+      }
+    }
+
     await _deleteEntriesBySongIds(<String>{normalizedId});
   }
 
@@ -562,6 +572,10 @@ class OfflineService {
         entry['status'] = 'completed';
         entry['updated_at'] = DateTime.now().millisecondsSinceEpoch;
         await _persistEntry(songId, entry);
+        final albumId = (entry['album_id'] ?? song.albumId ?? '').toString().trim();
+        if (albumId.isNotEmpty) {
+          unawaited(AlbumFilter.invalidateCache(albumId));
+        }
         
         _activeDownloads.remove(songId);
         return;
@@ -627,6 +641,9 @@ class OfflineService {
         entry['cached_at'] = _toInt(entry['cached_at']) ?? now;
         entry['updated_at'] = now;
         await _persistEntry(songId, entry);
+        if (albumId.isNotEmpty) {
+          unawaited(AlbumFilter.invalidateCache(albumId));
+        }
       }
 
       await _downloadImage(song.imageUrl, imagePath, cancelToken: cancelToken);

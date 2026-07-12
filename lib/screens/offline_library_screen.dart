@@ -17,7 +17,6 @@ import '../services/download_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/mini_player.dart';
 import '../utils/content_filter.dart';
-import 'home_screen.dart';
 import 'playlist_detail_screen.dart';
 
 class OfflineLibraryScreen extends StatefulWidget {
@@ -32,7 +31,6 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
   List<OfflineSongRecord> _allOfflineSongs = [];
   bool _isLoading = true;
   bool? _lastOfflineState;
-  bool _onlineRedirectScheduled = false;
   String? _resumeHandledUid;
   bool _resumeCheckInProgress = false;
   Timer? _searchDebounce;
@@ -276,21 +274,7 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
     _maybeHandlePlaybackResume(auth);
 
     if (_lastOfflineState != isOffline) {
-      final wasOffline = _lastOfflineState ?? isOffline;
       _lastOfflineState = isOffline;
-      if (wasOffline && !isOffline && !_onlineRedirectScheduled) {
-        _onlineRedirectScheduled = true;
-        WidgetsBinding.instance.addPostFrameCallback((_) async {
-          if (!mounted) return;
-          await Navigator.pushReplacement(
-            context,
-            MaterialPageRoute(
-              builder: (_) =>
-                  const HomeScreen(showReconnectMessageOnStart: true),
-            ),
-          );
-        });
-      }
     }
 
     final allPlaylists = playlistsProvider.playlists;

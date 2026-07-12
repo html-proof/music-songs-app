@@ -24,6 +24,8 @@ import 'listening_safety_service.dart';
 import 'offline_service.dart';
 import 'preferences_service.dart';
 import 'session_state_service.dart';
+import 'verification_engine.dart';
+import 'background_learning_service.dart';
 
 enum PlaybackResumeResult {
   resumed,
@@ -194,6 +196,8 @@ class PlayerService {
   static final List<Song> _backupPlayableSongs = [];
   static int _activePlaybackSessionId = 0;
   static http.Client? _activeHttpClient;
+  static DateTime? _songPlayStartedAt;
+  static String? _songPlayStartedId;
 
   static final StreamController<Song?> _resolvingSongController =
       StreamController<Song?>.broadcast();
@@ -805,6 +809,7 @@ class PlayerService {
   }
 
   static Future<void> _initializeInternal() async {
+    await BackgroundLearningService.init();
     try {
       final prefs = await SharedPreferences.getInstance();
       _shuffleModeEnabled = prefs.getBool('playback_shuffle_enabled') ?? false;
@@ -1762,6 +1767,7 @@ class PlayerService {
     List<Song>? playlist,
     int? index,
   }) async {
+    _checkAndRecordSkipTelemetry();
     await init();
 
     _activeHttpClient?.close();
@@ -1861,6 +1867,8 @@ class PlayerService {
         _savePlaybackState(wasPlayingOverride: false);
         return;
       }
+      _songPlayStartedAt = DateTime.now();
+      _songPlayStartedId = playableSong.id;
       _savePlaybackState();
       unawaited(_triggerAutoplayIfNeeded());
 
@@ -2143,11 +2151,15 @@ class PlayerService {
         final updatedQueue = _queue
             .map((song) => song.id == localSong.id ? localSong : song)
             .toList(growable: false);
-        await _setQueueSource(
-          localSong,
-          playlist: updatedQueue,
+        await _replaceCurrentAudioSource(
+          updatedSong: localSong,
           index: _currentIndex,
+          position: lastPosition,
+          replacementQueue: updatedQueue,
         );
+        _queue
+          ..clear()
+          ..addAll(updatedQueue);
       } else {
         await _setSingleSource(localSong);
       }
@@ -2659,42 +2671,54 @@ class PlayerService {
       if (sessionId != null && sessionId != _activePlaybackSessionId) return null;
 
       if (resolvedSong != null && _hasStreamUrl(resolvedSong)) {
-        final newUrl = (resolvedSong.streamUrl ?? '').trim();
-        final isValid = await _validateStreamUrl(newUrl, localClient);
-        if (sessionId != null && sessionId != _activePlaybackSessionId) return null;
+        final confidence = VerificationEngine.calculateConfidence(resolvedSong, song);
+        final isVerified = confidence >= VerificationEngine.threshold;
 
         if (sessionId == _activePlaybackSessionId) {
-          _activeLogger?.logStep('URL validation', isValid, detail: isValid ? 'SUCCESS' : 'FAILED');
+          _activeLogger?.logStep('Verification Engine', isVerified, detail: 'Score: $confidence%');
         }
 
-        if (isValid) {
-          if (forceRefresh && newUrl.isNotEmpty && newUrl == existingStreamUrl) {
-            debugPrint('Resolved stream URL is identical to failed URL. Triggering search fallback...');
-            final fallback = await _searchFallbackForSong(candidateSong, sessionId: sessionId, client: localClient);
-            if (fallback != null) return fallback;
+        if (isVerified) {
+          final newUrl = (resolvedSong.streamUrl ?? '').trim();
+          final isValid = await _validateStreamUrl(newUrl, localClient);
+          if (sessionId != null && sessionId != _activePlaybackSessionId) return null;
+
+          if (sessionId == _activePlaybackSessionId) {
+            _activeLogger?.logStep('URL validation', isValid, detail: isValid ? 'SUCCESS' : 'FAILED');
           }
 
-          _setCachedSongUrl(candidateSong, newUrl);
-          return _mergeSongWithResolvedStream(
-            base: candidateSong,
-            resolved: resolvedSong,
-          );
+          if (isValid) {
+            if (forceRefresh && newUrl.isNotEmpty && newUrl == existingStreamUrl) {
+              debugPrint('Resolved stream URL is identical to failed URL. Triggering search fallback...');
+              final fallback = await _searchFallbackForSong(candidateSong, sessionId: sessionId, client: localClient);
+              if (fallback != null) return fallback;
+            }
+
+            _setCachedSongUrl(candidateSong, newUrl);
+            return _mergeSongWithResolvedStream(
+              base: candidateSong,
+              resolved: resolvedSong,
+            );
+          }
         } else {
-          debugPrint('Fetched stream URL $newUrl was invalid. Triggering parallel search fallback...');
+          debugPrint('Resolved song failed verification (confidence: $confidence%). Rejecting candidate.');
         }
       }
 
-      // Fallbacks if resolution ultimately failed or returned invalid URL
+      // Fallbacks if resolution ultimately failed, returned invalid URL, or failed verification
       if (_hasStreamUrl(candidateSong)) {
-        final isValid = await _validateStreamUrl(candidateSong.streamUrl!, localClient);
-        if (sessionId != null && sessionId != _activePlaybackSessionId) return null;
+        final confidence = VerificationEngine.calculateConfidence(candidateSong, song);
+        if (confidence >= VerificationEngine.threshold) {
+          final isValid = await _validateStreamUrl(candidateSong.streamUrl!, localClient);
+          if (sessionId != null && sessionId != _activePlaybackSessionId) return null;
 
-        if (isValid) {
-          if (forceRefresh) {
-            final fallback = await _searchFallbackForSong(candidateSong, sessionId: sessionId, client: localClient);
-            if (fallback != null) return fallback;
+          if (isValid) {
+            if (forceRefresh) {
+              final fallback = await _searchFallbackForSong(candidateSong, sessionId: sessionId, client: localClient);
+              if (fallback != null) return fallback;
+            }
+            return candidateSong;
           }
-          return candidateSong;
         }
       }
 
@@ -2795,10 +2819,18 @@ class PlayerService {
 
       if (uniqueCandidates.isEmpty) return null;
 
-      // Score and rank candidates
+      // Score and rank candidates using VerificationEngine and BackgroundLearningService telemetry
       final scoredCandidates = uniqueCandidates.values.map((candidate) {
-        return MapEntry(candidate, _scoreCandidate(candidate, song));
-      }).toList();
+        final confidence = VerificationEngine.calculateConfidence(candidate, song);
+        final baseScore = _scoreCandidate(candidate, song).toDouble();
+        final bias = BackgroundLearningService.getBiasBoost(candidate.id, query: song.name);
+        final finalScore = confidence >= VerificationEngine.threshold
+            ? (confidence + baseScore + bias)
+            : -1.0;
+        return MapEntry(candidate, finalScore);
+      }).where((entry) => entry.value >= 0.0).toList();
+
+      if (scoredCandidates.isEmpty) return null;
 
       scoredCandidates.sort((a, b) => b.value.compareTo(a.value));
 
@@ -3219,6 +3251,7 @@ class PlayerService {
   }
 
   static Future<void> _advanceQueue({required bool isUserTriggered}) async {
+    _checkAndRecordSkipTelemetry();
     final wasPlaying = _player.playing ||
         (!_userPausedOrStoppedPlayback &&
             !_pausedByAudioInterruption &&
@@ -3240,12 +3273,20 @@ class PlayerService {
         }
         
         if (nextDownloadedIndex != null) {
+          await _resolveOfflineSourceForQueueIndex(nextDownloadedIndex);
           _currentIndex = nextDownloadedIndex;
           _currentSong = _queue[_currentIndex];
-          final localSong = await _resolveLocalSongCopy(_currentSong!);
-          await _setSingleSource(localSong);
-          if (wasPlaying) {
-            await _playEnsuringAudioFocus();
+          if (_player.audioSource != null && nextDownloadedIndex < _player.sequence.length) {
+            await _player.seek(Duration.zero, index: nextDownloadedIndex);
+            if (wasPlaying) {
+              await _playEnsuringAudioFocus();
+            }
+          } else {
+            final localSong = await _resolveLocalSongCopy(_currentSong!);
+            await _setSingleSource(localSong);
+            if (wasPlaying) {
+              await _playEnsuringAudioFocus();
+            }
           }
           _savePlaybackState();
         } else {
@@ -3302,12 +3343,20 @@ class PlayerService {
             }
           }
           if (nextDownloadedIndex != null) {
+            await _resolveOfflineSourceForQueueIndex(nextDownloadedIndex);
             _currentIndex = nextDownloadedIndex;
             _currentSong = _queue[_currentIndex];
-            final localSong = await _resolveLocalSongCopy(_currentSong!);
-            await _setSingleSource(localSong);
-            if (wasPlaying) {
-              await _playEnsuringAudioFocus();
+            if (_player.audioSource != null && nextDownloadedIndex < _player.sequence.length) {
+              await _player.seek(Duration.zero, index: nextDownloadedIndex);
+              if (wasPlaying) {
+                await _playEnsuringAudioFocus();
+              }
+            } else {
+              final localSong = await _resolveLocalSongCopy(_currentSong!);
+              await _setSingleSource(localSong);
+              if (wasPlaying) {
+                await _playEnsuringAudioFocus();
+              }
             }
             _savePlaybackState();
           } else {
@@ -3341,6 +3390,7 @@ class PlayerService {
   }
 
   static Future<void> skipPrevious() async {
+    _checkAndRecordSkipTelemetry();
     await init();
     // Drop re-entrant taps and taps while a new song is still resolving or
     // a source switch (offline ↔ online) is in progress.
@@ -4344,6 +4394,7 @@ class PlayerService {
     }
 
     if (_currentSong != null) {
+      unawaited(BackgroundLearningService.recordReplay(songId: _currentSong!.id));
       unawaited(
         OfflineService.recordPlaybackProgress(
           _currentSong!,
@@ -4368,6 +4419,17 @@ class PlayerService {
 
     // 3. Centralized Queue progression
     await _advanceQueue(isUserTriggered: false);
+  }
+
+  static void _checkAndRecordSkipTelemetry() {
+    if (_songPlayStartedAt != null && _songPlayStartedId != null) {
+      final elapsed = DateTime.now().difference(_songPlayStartedAt!);
+      if (elapsed.inSeconds < 5) {
+        unawaited(BackgroundLearningService.recordImmediateSkip(songId: _songPlayStartedId!));
+      }
+      _songPlayStartedAt = null;
+      _songPlayStartedId = null;
+    }
   }
 
   static Future<bool> _isLikelyConnectivityIssue(String message) async {
@@ -4484,11 +4546,15 @@ class PlayerService {
           final updatedQueue = _queue
               .map((s) => s.id == localSong.id ? localSong : s)
               .toList(growable: false);
-          await _setQueueSource(
-            localSong,
-            playlist: updatedQueue,
+          await _replaceCurrentAudioSource(
+            updatedSong: localSong,
             index: _currentIndex,
+            position: lastPosition,
+            replacementQueue: updatedQueue,
           );
+          _queue
+            ..clear()
+            ..addAll(updatedQueue);
         } else {
           await _setSingleSource(localSong);
         }
@@ -4663,22 +4729,36 @@ class PlayerService {
 
     var localPath = OfflineService.getLocalPath(song.id);
     localPath ??= await DownloadService.getLocalPath(song.id);
-    if (localPath == null || localPath.isEmpty) return;
+    if (localPath == null || localPath.isEmpty || !File(localPath).existsSync()) return;
 
     final offlineSong = song.copyWith(streamUrl: localPath);
     _queue[index] = offlineSong;
 
-    // Rebuild the queue source so just_audio sees the local URI.
     try {
-      final targetSong = index == _currentIndex
-          ? offlineSong
-          : (_activeQueueSong() ?? _currentSong!);
-      await _setQueueSource(
-        targetSong,
-        playlist: _queue,
-        index: index == _currentIndex ? index : _currentIndex,
-        initialPosition: _player.position,
-      );
+      if (index == _currentIndex) {
+        final wasPlaying = _player.playing;
+        final currentPosition = _player.position;
+        await _replaceCurrentAudioSource(
+          updatedSong: offlineSong,
+          index: index,
+          position: currentPosition,
+        );
+        if (wasPlaying) {
+          await _player.play();
+        }
+      } else {
+        final resolvedTarget = _resolvePlaybackTarget(offlineSong);
+        await _runSerializedSourceMutation(() async {
+          final currentSequence = _player.sequence;
+          if (_player.audioSource != null && index < currentSequence.length) {
+            final currentItem = currentSequence[index].tag;
+            if (currentItem is MediaItem && currentItem.id == song.id) {
+              await _player.insertAudioSource(index, resolvedTarget.audioSource);
+              await _player.removeAudioSourceAt(index + 1);
+            }
+          }
+        });
+      }
     } catch (e) {
       debugPrint('_resolveOfflineSourceForQueueIndex($index) failed: $e');
     }
@@ -5102,7 +5182,17 @@ class PlayerService {
   static Future<bool> _validateStreamUrl(String url, http.Client client) async {
     final cleanUrl = url.trim();
     if (cleanUrl.isEmpty) return false;
-    if (_isLocalFilePath(cleanUrl)) return true;
+    if (_isLocalFilePath(cleanUrl)) {
+      try {
+        final file = File(cleanUrl);
+        if (!file.existsSync()) return false;
+        final length = file.lengthSync();
+        if (length <= 0) return false;
+        return true;
+      } catch (_) {
+        return false;
+      }
+    }
 
     try {
       final uri = Uri.parse(cleanUrl);

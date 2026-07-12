@@ -4,11 +4,12 @@ import 'dart:io';
 
 import 'package:fluttertoast/fluttertoast.dart';
 
-import 'package:connectivity_plus/connectivity_plus.dart';
+import 'connectivity_manager.dart';
 import 'package:dio/dio.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
+import 'stability_logger.dart';
 
 import '../models/song.dart';
 import '../models/user_preferences.dart';
@@ -258,12 +259,8 @@ class DownloadService {
         return true;
 
       case BackgroundDownloadMode.wifiOnly:
-        final connectivityResult = await Connectivity().checkConnectivity();
-        final onMobile = connectivityResult.contains(ConnectivityResult.mobile);
-        final onWifi = connectivityResult.contains(ConnectivityResult.wifi) ||
-            connectivityResult.contains(ConnectivityResult.ethernet) ||
-            connectivityResult.contains(ConnectivityResult.vpn);
-        return onMobile && !onWifi;
+        final onWifi = await ConnectivityManager.isOnWifiOrEthernet();
+        return !onWifi;
 
       case BackgroundDownloadMode.onlyWhileCharging:
         // Check battery state — pause if not charging.
@@ -274,8 +271,7 @@ class DownloadService {
   }
 
   static Future<bool> _isNetworkConnected() async {
-    final connectivityResult = await Connectivity().checkConnectivity();
-    return connectivityResult.any((result) => result != ConnectivityResult.none);
+    return ConnectivityManager.isConnected;
   }
 
   static Future<void> _downloadPlaylistSong(
@@ -467,10 +463,7 @@ class DownloadService {
     final uid = _currentUserUid();
     if (uid == null || uid.isEmpty) return;
 
-    final connectivityResult = await Connectivity().checkConnectivity();
-    final hasConnectivity = connectivityResult.any(
-      (result) => result != ConnectivityResult.none,
-    );
+    final hasConnectivity = ConnectivityManager.isConnected;
     if (!hasConnectivity) {
       return;
     }
@@ -515,6 +508,12 @@ class DownloadService {
     if (uid == null || uid.isEmpty) return;
 
     final metadata = await _readMetadataEntries();
+    if (metadata == null) {
+      StabilityLogger.warning('Download', 'Could not read metadata to delete song. Aborting deletion.');
+      return;
+    }
+    StabilityLogger.info('Download', 'Explicit request to delete downloaded song: $songId (UID: $uid)');
+
     final deletedEntry = metadata.cast<Map<String, dynamic>?>().firstWhere(
       (entry) => entry != null && _entrySongId(entry) == songId && _entryUid(entry) == uid,
       orElse: () => null,
@@ -538,6 +537,7 @@ class DownloadService {
       (entry) => _entrySongId(entry) == songId,
     );
     if (!hasOtherOwner) {
+      StabilityLogger.info('Download', 'Deleting local files for song $songId (no other owner references)');
       final dir = await _downloadsDir;
       final songDir = Directory('${dir.path}/songs/$songId');
       if (await songDir.exists()) {
@@ -561,6 +561,7 @@ class DownloadService {
     if (uid == null || uid.isEmpty) return null;
 
     final metadata = await _readMetadataEntries();
+    if (metadata == null) return null;
     final entry = metadata.cast<Map<String, dynamic>?>().firstWhere(
       (item) =>
           item != null &&
@@ -583,11 +584,8 @@ class DownloadService {
     final song = _songFromStateMap(entry) ?? Song.fromJson(entry);
     _triggerBackgroundReDownload(song);
 
-    metadata.removeWhere(
-      (item) => _entrySongId(item) == songId && _entryUid(item) == uid,
-    );
-    await _writeMetadataEntries(metadata);
-    await SessionStateService.clearDownloadState(uid: uid, songId: songId);
+    // Keep database entry intact! Do NOT delete!
+    StabilityLogger.warning('Download', 'Downloaded file for song $songId (UID: $uid) is missing/invalid but database entry is preserved.');
     return null;
   }
 
@@ -611,29 +609,20 @@ class DownloadService {
     return null;
   }
 
-  /// Get all downloaded songs metadata for current user.
   static Future<List<Song>> getDownloadedSongs() async {
     final uid = _currentUserUid();
-    if (uid == null || uid.isEmpty) return [];
-
-    final file = await _metadataFile;
-    if (!await file.exists()) return [];
+    if (uid == null || uid.isEmpty) return <Song>[];
 
     try {
-      final content = await file.readAsString();
-      final dynamic decoded = jsonDecode(content);
-      if (decoded is! List) return [];
+      final entries = await _readMetadataEntries();
+      if (entries == null || entries.isEmpty) return <Song>[];
 
-      final entries = decoded
-          .whereType<Map>()
-          .map((e) => Map<String, dynamic>.from(e))
-          .toList();
       var mutated = false;
 
+      // Auto-assign owner to pre-auth downloads if any
       for (final entry in entries) {
         final owner = _entryUid(entry);
         if (owner.isEmpty) {
-          // One-time migration for pre-account metadata.
           entry['uid'] = uid;
           mutated = true;
         }
@@ -654,11 +643,9 @@ class DownloadService {
 
         final resolvedPath = await _resolveValidDownloadedPathForEntry(entry);
         if (resolvedPath == null) {
-          mutated = true;
-          await SessionStateService.clearDownloadState(
-            uid: uid,
-            songId: _entrySongId(entry),
-          );
+          // Keep the entry in the database even if the file is missing/unusable!
+          cleanedEntries.add(entry);
+          songs.add(_songFromStateMap(entry) ?? Song.fromJson(entry));
           continue;
         }
 
@@ -668,7 +655,7 @@ class DownloadService {
         }
 
         cleanedEntries.add(entry);
-        songs.add(Song.fromJson(entry));
+        songs.add(_songFromStateMap(entry) ?? Song.fromJson(entry));
       }
 
       if (mutated) {
@@ -676,8 +663,9 @@ class DownloadService {
       }
 
       return songs;
-    } catch (_) {
-      return [];
+    } catch (e) {
+      StabilityLogger.error('Download', 'Failed to retrieve downloaded songs list', e);
+      return <Song>[];
     }
   }
 
@@ -725,6 +713,7 @@ class DownloadService {
     final cancelToken = externalCancelToken ?? CancelToken();
     _cancelTokens[songId] = cancelToken;
 
+    StabilityLogger.info('Download', 'Starting download task for song: ${song.name} (ID: ${song.id})');
     try {
       final dir = await _downloadsDir;
       final songDir = Directory('${dir.path}/songs/$songId');
@@ -933,6 +922,7 @@ class DownloadService {
         }),
       ]);
 
+      StabilityLogger.info('Download', 'Download completed successfully for song: ${song.name} (ID: ${song.id})');
       await SessionStateService.clearDownloadState(uid: uid, songId: songId);
       
       // Successfully downloaded. Remove from auto-cache tracker (metadata only)
@@ -971,10 +961,12 @@ class DownloadService {
         receivedBytes: received,
         totalBytes: total,
       );
-      if (!cancelled) {
+      if (cancelled) {
+        StabilityLogger.info('Download', 'Download cancelled/paused for song: ${song.name} (ID: ${song.id})');
+      } else {
+        StabilityLogger.error('Download', 'Download failed (DioException) for song: ${song.name} (ID: ${song.id})', e);
         await _cleanupFailedDownload(songId, uid: uid, onProgress: onProgress);
         showDownloadFailureToast();
-        debugPrint('Download error for $songId: $e');
       }
       return false;
     } catch (e) {
@@ -986,9 +978,9 @@ class DownloadService {
         totalBytes: total,
       );
       _progress[songId] = progress;
+      StabilityLogger.error('Download', 'Download failed (GeneralException) for song: ${song.name} (ID: ${song.id})', e);
       await _cleanupFailedDownload(songId, uid: uid, onProgress: onProgress);
       showDownloadFailureToast();
-      debugPrint('Download error for $songId: $e');
       return false;
     } finally {
       _downloading[songId] = false;
@@ -1185,12 +1177,8 @@ class DownloadService {
       if (await _isUsableDownloadedFile(file)) {
         return file.path;
       }
-
-      try {
-        await file.delete();
-      } catch (_) {
-        // Ignore cleanup failures; we still treat the entry as invalid.
-      }
+      // Do NOT delete the file automatically. Just log a warning.
+      StabilityLogger.warning('Download', 'Downloaded file exists at $path but failed usability check.');
     }
 
     return null;
@@ -1199,8 +1187,12 @@ class DownloadService {
   static Future<bool> _isUsableDownloadedFile(File file) async {
     try {
       if (!await file.exists()) return false;
-      return await file.length() >= _minValidDownloadedBytes;
-    } catch (_) {
+      if (await file.length() < _minValidDownloadedBytes) return false;
+      final raf = await file.open(mode: FileMode.read);
+      await raf.close();
+      return true;
+    } catch (e) {
+      StabilityLogger.warning('Download', 'File verification failed for ${file.path}: $e');
       return false;
     }
   }
@@ -1211,7 +1203,7 @@ class DownloadService {
   static String _entryUid(Map<String, dynamic> entry) =>
       (entry['uid'] ?? '').toString().trim();
 
-  static Future<List<Map<String, dynamic>>> _readMetadataEntries() async {
+  static Future<List<Map<String, dynamic>>?> _readMetadataEntries() async {
     final file = await _metadataFile;
     if (!await file.exists()) return <Map<String, dynamic>>[];
 
@@ -1223,8 +1215,9 @@ class DownloadService {
           .whereType<Map>()
           .map((e) => Map<String, dynamic>.from(e))
           .toList();
-    } catch (_) {
-      return <Map<String, dynamic>>[];
+    } catch (e, st) {
+      StabilityLogger.error('Download', 'Failed to read download metadata JSON file. Preserving data.', e, st);
+      return null;
     }
   }
 
@@ -1241,6 +1234,10 @@ class DownloadService {
     required String filePath,
   }) async {
     final entries = await _readMetadataEntries();
+    if (entries == null) {
+      StabilityLogger.warning('Download', 'Could not read metadata to save new song. Aborting metadata persist.');
+      return;
+    }
     entries.removeWhere(
       (entry) => _entrySongId(entry) == song.id && _entryUid(entry) == uid,
     );

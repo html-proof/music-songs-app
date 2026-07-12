@@ -1,11 +1,12 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
-import 'package:http/http.dart' as http;
+import 'package:http/http.dart' as raw_http;
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:connectivity_plus/connectivity_plus.dart';
+import 'stability_logger.dart';
+import 'connectivity_manager.dart';
 import '../utils/content_filter.dart';
 import '../utils/language_utils.dart';
 
@@ -240,12 +241,7 @@ class ApiService {
   }
 
   static Future<bool> _isOffline() async {
-    try {
-      final results = await Connectivity().checkConnectivity();
-      return results.contains(ConnectivityResult.none);
-    } catch (_) {
-      return false;
-    }
+    return ConnectivityManager.isOffline;
   }
 
   static Future<dynamic> _readCache(String key, Duration ttl, {bool ignoreTtlIfOffline = true}) async {
@@ -614,7 +610,7 @@ class ApiService {
               _deriveAlbumsFromSongs(finalSongs),
               languages: normalizedLanguages,
             ),
-            'artists': const [],
+            'artists': _deriveArtistsFromSongs(finalSongs),
           };
         }
       } catch (e) {
@@ -2045,6 +2041,57 @@ class ApiService {
     return albumsByKey.values.toList(growable: false);
   }
 
+  /// Derive unique artist entries from a list of raw song JSON maps.
+  static List<dynamic> _deriveArtistsFromSongs(List<dynamic> songs) {
+    final artistsByKey = <String, Map<String, dynamic>>{};
+
+    for (final entry in songs) {
+      if (entry is! Map) continue;
+      final song = Map<String, dynamic>.from(entry);
+
+      // Try structured artists map first, then fall back to primaryArtists string.
+      final artistsMap = song['artists'];
+      if (artistsMap is Map) {
+        final primary = artistsMap['primary'];
+        if (primary is List) {
+          for (final a in primary) {
+            if (a is! Map) continue;
+            final id = (a['id'] ?? '').toString().trim();
+            final name = (a['name'] ?? '').toString().trim();
+            if (name.isEmpty) continue;
+            final key = id.isNotEmpty ? id : name.toLowerCase();
+            if (artistsByKey.containsKey(key)) continue;
+            artistsByKey[key] = {
+              'id': id.isNotEmpty ? id : key,
+              'name': name,
+              'image': a['image'],
+              'role': (a['role'] ?? a['type'] ?? '').toString(),
+            };
+          }
+          continue;
+        }
+      }
+
+      // Fallback: split comma-separated primaryArtists string.
+      final primaryArtists = (song['primaryArtists'] ?? song['primary_artists'] ?? '').toString().trim();
+      if (primaryArtists.isEmpty) continue;
+      final parts = primaryArtists.split(RegExp(r',\s*'));
+      for (final part in parts) {
+        final name = part.trim();
+        if (name.isEmpty) continue;
+        final key = name.toLowerCase();
+        if (artistsByKey.containsKey(key)) continue;
+        artistsByKey[key] = {
+          'id': key,
+          'name': name,
+          'image': song['image'],
+        };
+      }
+    }
+
+    return artistsByKey.values.toList(growable: false);
+  }
+
   static List<dynamic> _mergeAlbumLists(
     List<dynamic> primary,
     List<dynamic> fallback, {
@@ -2311,3 +2358,33 @@ class ApiService {
     return true;
   }
 }
+
+class _HttpLogWrapper {
+  const _HttpLogWrapper();
+
+  Future<raw_http.Response> get(Uri url, {Map<String, String>? headers}) async {
+    StabilityLogger.debug('API', 'GET request: $url');
+    try {
+      final response = await raw_http.get(url, headers: headers);
+      StabilityLogger.debug('API', 'GET response: ${response.statusCode} for $url');
+      return response;
+    } catch (e) {
+      StabilityLogger.error('API', 'GET error for $url', e);
+      rethrow;
+    }
+  }
+
+  Future<raw_http.Response> post(Uri url, {Map<String, String>? headers, Object? body, Encoding? encoding}) async {
+    StabilityLogger.debug('API', 'POST request: $url');
+    try {
+      final response = await raw_http.post(url, headers: headers, body: body, encoding: encoding);
+      StabilityLogger.debug('API', 'POST response: ${response.statusCode} for $url');
+      return response;
+    } catch (e) {
+      StabilityLogger.error('API', 'POST error for $url', e);
+      rethrow;
+    }
+  }
+}
+
+const http = _HttpLogWrapper();

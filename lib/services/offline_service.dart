@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:connectivity_plus/connectivity_plus.dart';
+import 'connectivity_manager.dart';
 import 'package:dio/dio.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
@@ -164,19 +164,12 @@ class OfflineService {
     await _imagesDir;
   }
 
-  static Future<List<ConnectivityResult>> _connectivityResults() async {
-    return Connectivity().checkConnectivity();
-  }
-
   static Future<bool> isConnected() async {
-    final result = await _connectivityResults();
-    return !result.contains(ConnectivityResult.none);
+    return ConnectivityManager.isConnected;
   }
 
   static Future<bool> _isOnWifiLikeConnection() async {
-    final result = await _connectivityResults();
-    return result.contains(ConnectivityResult.wifi) ||
-        result.contains(ConnectivityResult.ethernet);
+    return ConnectivityManager.isOnWifiOrEthernet();
   }
 
   static bool isCached(String songId) {

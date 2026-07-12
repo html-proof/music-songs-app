@@ -6,7 +6,9 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:fluttertoast/fluttertoast.dart';
 
 import 'package:audio_session/audio_session.dart';
+import 'connectivity_manager.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
+import 'stability_logger.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:just_audio/just_audio.dart';
@@ -153,7 +155,7 @@ class PlayerService {
   static StreamSubscription<PlayerException>? _errorSubscription;
   static StreamSubscription<AudioOutputRouteState>? _outputDeviceSubscription;
   static StreamSubscription<int?>? _androidAudioSessionIdSubscription;
-  static StreamSubscription<List<ConnectivityResult>>?
+  static StreamSubscription<ConnectivityEvent>?
   _connectivitySubscription;
   static Future<void> _sourceMutationTail = Future<void>.value();
   static int _sourceMutationDepth = 0;
@@ -607,11 +609,13 @@ class PlayerService {
     // Ensure interruption listener is alive.
     await _setupAudioFocusListener();
 
-    // Force a clean focus cycle: deactivate -> reactivate.
-    // The deactivation is fast and does not affect the Dart-level
-    // interruptionEventStream subscription - it only abandons the OS-level
-    // AudioFocus so that the subsequent requestAudioFocus is guaranteed to
-    // go through to the OS.
+    if (_hasAudioFocus) {
+      StabilityLogger.debug('Playback', 'Already has audio focus, proceeding to play.');
+      await _player.play();
+      return true;
+    }
+
+    // Force a clean focus cycle only if we don't have focus
     try {
       final session = await AudioSession.instance;
       await session.setActive(false);
@@ -620,10 +624,10 @@ class PlayerService {
     }
     _hasAudioFocus = false;
 
-    debugPrint('Requesting audio focus for playback.');
+    StabilityLogger.info('Playback', 'Requesting audio focus for playback.');
     final focusGranted = await _setAudioSessionActive(true);
     if (!focusGranted) {
-      debugPrint('Audio focus denied. Skipping playback start/resume.');
+      StabilityLogger.warning('Playback', 'Audio focus denied. Skipping playback start/resume.');
       return false;
     }
     await _player.play();
@@ -885,6 +889,22 @@ class PlayerService {
     });
 
     _playerStateSubscription ??= _player.playerStateStream.listen((state) {
+      final isPlaying = state.playing;
+      if (isPlaying) {
+        _userPausedOrStoppedPlayback = false;
+        _pausedByNetworkLoss = false;
+        _pausedByAudioInterruption = false;
+        _pausedByOutputDisconnect = false;
+        _pausedByVideoPlayback = false;
+      } else {
+        if (!_pausedByAudioInterruption &&
+            !_pausedByOutputDisconnect &&
+            !_pausedByVideoPlayback &&
+            !_pausedByNetworkLoss) {
+          _userPausedOrStoppedPlayback = true;
+        }
+      }
+      _savePlaybackState();
     });
 
     if (_isAndroid) {
@@ -917,6 +937,10 @@ class PlayerService {
     }
 
     _errorSubscription ??= _player.errorStream.listen((error) {
+      if (_isLoadingNewSong) {
+        StabilityLogger.debug('Playback', 'Ignoring player error stream event during song loading: ${error.message}');
+        return;
+      }
       unawaited(
         _handlePlayerError(error).catchError((Object e, StackTrace st) {
           debugPrint('Player error handler failed: $e');
@@ -1015,14 +1039,11 @@ class PlayerService {
     await _syncQualityPreferenceFromStorage();
     _lastObservedPlayerVolume = _player.volume.clamp(0.0, 1.0).toDouble();
     await _syncConversationAssistRuntimeBindings();
-    final connectivity = Connectivity();
-    final initialConnectivity = await connectivity.checkConnectivity();
-    _isNetworkAvailable = _hasConnectivity(initialConnectivity);
+    await ConnectivityManager.init();
+    _isNetworkAvailable = ConnectivityManager.isConnected;
 
-    _connectivitySubscription ??= connectivity.onConnectivityChanged.listen((
-      results,
-    ) {
-      unawaited(_handleConnectivityChange(results));
+    _connectivitySubscription ??= ConnectivityManager.eventStream.listen((event) {
+      unawaited(_handleConnectivityChange(event));
     });
 
     _isInitialized = true;
@@ -1438,9 +1459,9 @@ class PlayerService {
   }
 
   static Future<void> _handleConnectivityChange(
-    List<ConnectivityResult> results,
+    ConnectivityEvent event,
   ) async {
-    final isConnected = _hasConnectivity(results);
+    final isConnected = event != ConnectivityEvent.disconnected;
     _isNetworkAvailable = isConnected;
 
     if (!isConnected) {
@@ -1448,26 +1469,56 @@ class PlayerService {
       _networkDropGraceTimer?.cancel();
       _cachedNetworkSpeedMbps = null;
       _lastNetworkSpeedProbeAt = null;
+
+      final prefs = await _getOfflinePlaybackPreferences();
+      final offlinePlaybackEnabled = prefs['offlinePlaybackEnabled'] ?? true;
+      if (offlinePlaybackEnabled) {
+        await _handleNetworkDropDuringPlayback();
+      } else {
+        final wasPlaying = _player.playing;
+        if (wasPlaying) {
+          _pausedByNetworkLoss = true;
+          _userPausedOrStoppedPlayback = true;
+          await _player.pause();
+          _savePlaybackState();
+          _qualityAdjustmentMsgController.add('No internet. Playback paused.');
+        }
+      }
       return;
     }
 
     _networkDropGraceTimer?.cancel();
     _networkDropGraceTimer = null;
 
-    if (_pausedByNetworkLoss) {
-      _networkReEvalTimer?.cancel();
-      _networkReEvalTimer = Timer(const Duration(milliseconds: 400), () async {
-        if (!_pausedByNetworkLoss) return;
+    if (event == ConnectivityEvent.restored) {
+      unawaited(_runReconnectionSync());
+
+      if (_pausedByNetworkLoss) {
         _pausedByNetworkLoss = false;
-        _qualityAdjustmentMsgController.add(
-          'Connection restored. Tap Play to continue.',
-        );
-      });
-      return;
+        _userPausedOrStoppedPlayback = false;
+
+        final current = _currentSong;
+        if (current != null && !_isSongUsingLocalSource(current)) {
+          final lastPosition = _player.position;
+          final resolved = await _resolveSongForPlayback(current, forceRefresh: true);
+          if (resolved != null) {
+            _currentSong = resolved;
+            if (_queue.isNotEmpty && _currentIndex >= 0 && _currentIndex < _queue.length) {
+              _queue[_currentIndex] = resolved;
+            }
+            await _replaceCurrentAudioSource(
+              updatedSong: resolved,
+              index: _currentIndex,
+              position: lastPosition,
+            );
+          }
+        }
+
+        await _playEnsuringAudioFocus();
+        _qualityAdjustmentMsgController.add('Connection restored. Resuming playback.');
+      }
     }
 
-    // Keep currently playing local/offline sources pinned when connectivity
-    // changes. This avoids unexpected source swaps while the user is listening.
     if (_isSongUsingLocalSource(_activeQueueSong())) {
       _networkReEvalTimer?.cancel();
       return;
@@ -1481,7 +1532,6 @@ class PlayerService {
       return;
     }
 
-    // Debounce quality re-evaluation on network changes.
     _networkReEvalTimer?.cancel();
     _networkReEvalTimer = Timer(const Duration(seconds: 2), () {
       _temporaryAutoKbps = null;
@@ -1589,7 +1639,8 @@ class PlayerService {
     }
 
     final connectivity = await Connectivity().checkConnectivity();
-    if (!_hasConnectivity(connectivity)) {
+    final hasConn = connectivity.any((r) => r != ConnectivityResult.none);
+    if (!hasConn) {
       return _adaptiveLowKbps;
     }
 
@@ -1640,7 +1691,7 @@ class PlayerService {
       return _cachedNetworkSpeedMbps!;
     }
 
-    if (!_hasConnectivity(connectivity)) {
+    if (!connectivity.any((r) => r != ConnectivityResult.none)) {
       _cachedNetworkSpeedMbps = 0.0;
       _lastNetworkSpeedProbeAt = now;
       return 0.0;
@@ -1767,6 +1818,26 @@ class PlayerService {
     List<Song>? playlist,
     int? index,
   }) async {
+    StabilityLogger.info('Playback', 'Play requested for song: ${song.name} (ID: ${song.id})');
+
+    // If the same song is actively resolving, ignore the duplicate request
+    if (_resolvingSong?.id == song.id) {
+      StabilityLogger.debug('Playback', 'Play request ignored: Song ${song.name} is already resolving.');
+      return;
+    }
+
+    // If the same song is already the current song
+    if (_currentSong?.id == song.id) {
+      if (_player.playing) {
+        StabilityLogger.debug('Playback', 'Play request ignored: Song ${song.name} is already playing.');
+        return;
+      } else {
+        StabilityLogger.info('Playback', 'Play request: Song ${song.name} is paused. Resuming instead of restarting.');
+        await resume();
+        return;
+      }
+    }
+
     _checkAndRecordSkipTelemetry();
     await init();
 
@@ -1807,12 +1878,14 @@ class PlayerService {
     }
 
     if (sessionId != _activePlaybackSessionId) {
-      _activeLogger?.logStep('Playback started', false, detail: 'Superseded by newer request');
+      _activeLogger?.logStep('Playback started', false, detail: 'SUPERSEDED by newer request');
       _activeLogger?.printReport('SUPERSEDED: Ignored');
-      debugPrint('Playback request for ${song.name} superseded by a newer request. Ignoring.');
+      StabilityLogger.info('Playback', 'Playback request for ${song.name} superseded by a newer request. Ignoring.');
       return;
     }
 
+    _activeLogger?.logStep('Source resolved', true, detail: playableSong.streamUrl);
+    StabilityLogger.info('Playback', 'Source resolved for: ${playableSong.name} - ${playableSong.streamUrl}');
     _activeLogger?.logStep('Playback started', true);
     _activeLogger?.printReport('SUCCESS');
 
@@ -1863,10 +1936,12 @@ class PlayerService {
 
       final started = await _playEnsuringAudioFocus();
       if (!started) {
+        StabilityLogger.warning('Playback', 'Playback failed to start for song: ${playableSong.name} (audio focus denied).');
         _userPausedOrStoppedPlayback = true;
         _savePlaybackState(wasPlayingOverride: false);
         return;
       }
+      StabilityLogger.info('Playback', 'Playback started successfully for: ${playableSong.name}');
       _songPlayStartedAt = DateTime.now();
       _songPlayStartedId = playableSong.id;
       _savePlaybackState();
@@ -1922,6 +1997,8 @@ class PlayerService {
     final activeSong = _currentSong;
     if (activeSong == null) return;
     if (message.contains('loading interrupted')) return;
+
+    StabilityLogger.error('Playback', 'Player error triggered for song: ${activeSong.name} (Error: ${error.message})', error);
 
     // 1. De-duplicate error events
     final songId = activeSong.id;
@@ -2518,32 +2595,34 @@ class PlayerService {
   static Future<Song?> _resolveSongForPlayback(Song song, {bool forceRefresh = false, int? sessionId, http.Client? client}) async {
     if (sessionId != null && sessionId != _activePlaybackSessionId) return null;
 
+    final songId = song.id.trim();
+    if (songId.isNotEmpty) {
+      final downloadPath = await DownloadService.getLocalPath(songId);
+      if (downloadPath != null && downloadPath.isNotEmpty) {
+        StabilityLogger.info('Playback', 'Playback priority: playing manual download for $songId from $downloadPath');
+        return song.copyWith(streamUrl: downloadPath);
+      }
+
+      final offlinePath = OfflineService.getLocalPath(songId);
+      if (offlinePath != null && offlinePath.isNotEmpty) {
+        StabilityLogger.info('Playback', 'Playback priority: playing offline cache for $songId from $offlinePath');
+        return song.copyWith(streamUrl: offlinePath);
+      }
+    }
+
     final localClient = client ?? http.Client();
     try {
       var candidateSong = _optimizeRemoteStreamForCurrentQuality(song);
-      final songId = candidateSong.id.trim();
       final existingStreamUrl = (candidateSong.streamUrl ?? '').trim();
       final hasNetwork = await _isNetworkConnected();
 
       if (sessionId != null && sessionId != _activePlaybackSessionId) return null;
 
-      final offlinePath = songId.isEmpty
-          ? null
-          : OfflineService.getLocalPath(songId);
-      final downloadPath = songId.isEmpty
-          ? null
-          : await DownloadService.getLocalPath(songId);
       final explicitLocalPath = _isLocalFilePath(existingStreamUrl)
           ? existingStreamUrl
           : null;
 
-      final hasOfflineCopy = offlinePath != null && offlinePath.isNotEmpty;
-      final hasManualDownload = downloadPath != null && downloadPath.isNotEmpty;
-      final localPath = hasManualDownload
-          ? downloadPath
-          : hasOfflineCopy
-          ? offlinePath
-          : explicitLocalPath;
+      final localPath = explicitLocalPath;
 
       final hasLocalCopy = localPath != null && localPath.isNotEmpty;
       if (sessionId == _activePlaybackSessionId) {
@@ -2555,9 +2634,7 @@ class PlayerService {
           return candidateSong.copyWith(streamUrl: localPath);
         }
 
-        // Respect explicit manual downloads, cached offline copies, and custom local paths.
-        // We always prefer local files immediately over streaming.
-        if (hasManualDownload || hasOfflineCopy || explicitLocalPath != null) {
+        if (explicitLocalPath != null) {
           return candidateSong.copyWith(streamUrl: localPath);
         }
 
@@ -3016,6 +3093,7 @@ class PlayerService {
     _deviceConnectResumeTimer = null;
     await _resetDuckState(restoreVolume: true);
     _setInterruptionActive(false);
+    StabilityLogger.info('Playback', 'Playback paused by user.');
     await _player.pause();
     // NOTE: We intentionally do NOT call _setAudioSessionActive(false) here.
     // Keeping the session active mirrors Spotify behavior: resume is instant,
@@ -3093,6 +3171,7 @@ class PlayerService {
       _savePlaybackState(wasPlayingOverride: false);
       return;
     }
+    StabilityLogger.info('Playback', 'Playback resumed by coordinator.');
     _pausedByNetworkLoss = false;
     _recordConversationUserAction(_ConversationActionType.resume);
     _savePlaybackState();
@@ -3262,38 +3341,7 @@ class PlayerService {
     // If there is next item in sequence/queue
     if (_currentIndex < _queue.length - 1) {
       if (!_isNetworkAvailable) {
-        // Offline: prepare next downloaded track in queue
-        int? nextDownloadedIndex;
-        for (int i = _currentIndex + 1; i < _queue.length; i++) {
-          final resolved = await _resolveLocalSongCopy(_queue[i]);
-          if (_isSongUsingLocalSource(resolved)) {
-            nextDownloadedIndex = i;
-            break;
-          }
-        }
-        
-        if (nextDownloadedIndex != null) {
-          await _resolveOfflineSourceForQueueIndex(nextDownloadedIndex);
-          _currentIndex = nextDownloadedIndex;
-          _currentSong = _queue[_currentIndex];
-          if (_player.audioSource != null && nextDownloadedIndex < _player.sequence.length) {
-            await _player.seek(Duration.zero, index: nextDownloadedIndex);
-            if (wasPlaying) {
-              await _playEnsuringAudioFocus();
-            }
-          } else {
-            final localSong = await _resolveLocalSongCopy(_currentSong!);
-            await _setSingleSource(localSong);
-            if (wasPlaying) {
-              await _playEnsuringAudioFocus();
-            }
-          }
-          _savePlaybackState();
-        } else {
-          _qualityAdjustmentMsgController.add('No more downloaded tracks.');
-          await _handleNetworkDropDuringPlayback();
-          _savePlaybackState();
-        }
+        await _advanceQueueOffline(wasPlaying);
       } else {
         // Online: advance natively using superSeekToNext
         if (_player.hasNext) {
@@ -3334,34 +3382,7 @@ class PlayerService {
       // If new songs were successfully appended, advance to the first appended song
       if (_currentIndex < _queue.length - 1) {
         if (!_isNetworkAvailable) {
-          int? nextDownloadedIndex;
-          for (int i = _currentIndex + 1; i < _queue.length; i++) {
-            final resolved = await _resolveLocalSongCopy(_queue[i]);
-            if (_isSongUsingLocalSource(resolved)) {
-              nextDownloadedIndex = i;
-              break;
-            }
-          }
-          if (nextDownloadedIndex != null) {
-            await _resolveOfflineSourceForQueueIndex(nextDownloadedIndex);
-            _currentIndex = nextDownloadedIndex;
-            _currentSong = _queue[_currentIndex];
-            if (_player.audioSource != null && nextDownloadedIndex < _player.sequence.length) {
-              await _player.seek(Duration.zero, index: nextDownloadedIndex);
-              if (wasPlaying) {
-                await _playEnsuringAudioFocus();
-              }
-            } else {
-              final localSong = await _resolveLocalSongCopy(_currentSong!);
-              await _setSingleSource(localSong);
-              if (wasPlaying) {
-                await _playEnsuringAudioFocus();
-              }
-            }
-            _savePlaybackState();
-          } else {
-            await _stopAtQueueEndAfterSkipNext();
-          }
+          await _advanceQueueOffline(wasPlaying);
         } else {
           if (_player.hasNext) {
             await _player.superSeekToNext();
@@ -3795,7 +3816,6 @@ class PlayerService {
             inserted = true;
             await _player.seek(position, index: normalizedIndex);
             await _player.removeAudioSourceAt(normalizedIndex + 1);
-            await _player.seek(position, index: normalizedIndex);
             return;
           } catch (_) {
             if (inserted) {
@@ -4055,8 +4075,7 @@ class PlayerService {
     PlaybackResumeCandidate candidate,
   ) async {
     try {
-      final connectivity = await Connectivity().checkConnectivity();
-      final isOffline = !_hasConnectivity(connectivity);
+      final isOffline = ConnectivityManager.isOffline;
 
       var songToRestore = candidate.song;
       if (isOffline) {
@@ -4447,12 +4466,124 @@ class PlayerService {
   }
 
   static Future<bool> _isNetworkConnected() async {
-    final connectivityResult = await Connectivity().checkConnectivity();
-    return _hasConnectivity(connectivityResult);
+    return ConnectivityManager.isConnected;
   }
 
-  static bool _hasConnectivity(List<ConnectivityResult> results) {
-    return results.any((result) => result != ConnectivityResult.none);
+  static Future<Map<String, bool>> _getOfflinePlaybackPreferences() async {
+    final uid = _currentUserUidSafely();
+    if (uid == null) {
+      return {'offlinePlaybackEnabled': true, 'skipUnavailableOffline': true};
+    }
+    final prefs = await PreferencesService.getPreferences(uid);
+    if (prefs == null) {
+      return {'offlinePlaybackEnabled': true, 'skipUnavailableOffline': true};
+    }
+    return {
+      'offlinePlaybackEnabled': prefs.offlinePlaybackEnabled,
+      'skipUnavailableOffline': prefs.skipUnavailableOffline,
+    };
+  }
+
+  static Future<void> _runReconnectionSync() async {
+    try {
+      if (_queue.isEmpty) return;
+
+      // 1. Refresh future songs in the queue
+      for (int i = 0; i < _queue.length; i++) {
+        if (i == _currentIndex) continue; // Skip currently playing song
+        final song = _queue[i];
+        if (_isSongUsingLocalSource(song)) continue; // Keep local downloads local
+
+        final resolved = await _resolveSongForPlayback(song, forceRefresh: true);
+        if (resolved != null) {
+          _queue[i] = resolved;
+          if (_player.audioSource != null && i < _player.sequence.length) {
+            final target = _resolvePlaybackTarget(resolved);
+            await _runSerializedSourceMutation(() async {
+              try {
+                await _player.insertAudioSource(i, target.audioSource);
+                await _player.removeAudioSourceAt(i + 1);
+              } catch (e) {
+                StabilityLogger.warning('Playback', 'Failed to update background queue source at index $i: $e');
+              }
+            });
+          }
+        }
+      }
+    } catch (e) {
+      StabilityLogger.error('Playback', 'Reconnection background sync error', e);
+    }
+  }
+
+  static Future<void> _advanceQueueOffline(bool wasPlaying) async {
+    final nextSongIndex = _currentIndex + 1;
+    if (nextSongIndex >= _queue.length) return;
+
+    final immediateNextSong = _queue[nextSongIndex];
+    final resolvedImmediateNext = await _resolveLocalSongCopy(immediateNextSong);
+    final isImmediateNextDownloaded = _isSongUsingLocalSource(resolvedImmediateNext);
+
+    if (isImmediateNextDownloaded) {
+      await _resolveOfflineSourceForQueueIndex(nextSongIndex);
+      _currentIndex = nextSongIndex;
+      _currentSong = _queue[_currentIndex];
+      if (_player.audioSource != null && nextSongIndex < _player.sequence.length) {
+        await _player.seek(Duration.zero, index: nextSongIndex);
+        if (wasPlaying) {
+          await _playEnsuringAudioFocus();
+        }
+      } else {
+        final localSong = await _resolveLocalSongCopy(_currentSong!);
+        await _setSingleSource(localSong);
+        if (wasPlaying) {
+          await _playEnsuringAudioFocus();
+        }
+      }
+      _savePlaybackState();
+    } else {
+      final prefs = await _getOfflinePlaybackPreferences();
+      final skipUnavailable = prefs['skipUnavailableOffline'] ?? true;
+      if (skipUnavailable) {
+        int? nextDownloadedIndex;
+        for (int i = nextSongIndex; i < _queue.length; i++) {
+          final resolved = await _resolveLocalSongCopy(_queue[i]);
+          if (_isSongUsingLocalSource(resolved)) {
+            nextDownloadedIndex = i;
+            break;
+          }
+        }
+        if (nextDownloadedIndex != null) {
+          await _resolveOfflineSourceForQueueIndex(nextDownloadedIndex);
+          _currentIndex = nextDownloadedIndex;
+          _currentSong = _queue[_currentIndex];
+          if (_player.audioSource != null && nextDownloadedIndex < _player.sequence.length) {
+            await _player.seek(Duration.zero, index: nextDownloadedIndex);
+            if (wasPlaying) {
+              await _playEnsuringAudioFocus();
+            }
+          } else {
+            final localSong = await _resolveLocalSongCopy(_currentSong!);
+            await _setSingleSource(localSong);
+            if (wasPlaying) {
+              await _playEnsuringAudioFocus();
+            }
+          }
+          _savePlaybackState();
+        } else {
+          _qualityAdjustmentMsgController.add('No more downloaded tracks.');
+          await _handleNetworkDropDuringPlayback();
+          _savePlaybackState();
+        }
+      } else {
+        _currentIndex = nextSongIndex;
+        _currentSong = _queue[_currentIndex];
+        _qualityAdjustmentMsgController.add('Song unavailable offline.');
+        _pausedByNetworkLoss = true;
+        _userPausedOrStoppedPlayback = true;
+        await _player.pause();
+        _savePlaybackState();
+      }
+    }
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -4694,16 +4825,19 @@ class PlayerService {
 
     _setSourceSwitching(true);
     try {
-      if (_queue.length > 1) {
+      if (_player.audioSource != null && _queue.length > 1) {
         final updatedQueue = _queue
             .map((s) => s.id == playableSong.id ? playableSong : s)
             .toList(growable: false);
-        await _setQueueSource(
-          playableSong,
-          playlist: updatedQueue,
+        await _replaceCurrentAudioSource(
+          updatedSong: playableSong,
           index: _currentIndex,
-          initialPosition: reloadInitialPos,
+          position: reloadInitialPos,
+          replacementQueue: updatedQueue,
         );
+        _queue
+          ..clear()
+          ..addAll(updatedQueue);
       } else {
         await _setSingleSource(playableSong, initialPosition: reloadInitialPos);
       }

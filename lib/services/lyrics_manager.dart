@@ -4,6 +4,7 @@ import '../models/song.dart';
 import 'lyrics_cache.dart';
 import 'lyrics_service.dart';
 import 'player_service.dart';
+import 'connectivity_manager.dart';
 
 // ─────────────────────────────────────────────────────────────
 // State enum — replaces 10+ booleans in _PlayerScreenState
@@ -41,24 +42,14 @@ class LyricsManager extends ChangeNotifier {
   String get statusMessage {
     switch (_state) {
       case LyricsLoadState.searching:
-        return _searchStatusMessages[_searchStatusIndex.clamp(0, _searchStatusMessages.length - 1)];
       case LyricsLoadState.retrying:
-        return '🔍 Still searching for lyrics…';
+      case LyricsLoadState.idle:
       case LyricsLoadState.ready:
         return '';
       case LyricsLoadState.unavailable:
-        return "Lyrics aren't available for this song.";
-      case LyricsLoadState.idle:
-        return '';
+        return "Lyrics not found";
     }
   }
-
-  static const List<String> _searchStatusMessages = [
-    '🎵 Searching lyrics...',
-    'Trying another source...',
-    'Matching song...',
-    '✓ Almost there...',
-  ];
 
   // ── Private state ─────────────────────────────────────────
   LyricsLoadState _state = LyricsLoadState.idle;
@@ -68,9 +59,7 @@ class LyricsManager extends ChangeNotifier {
   Song? _currentSong;
 
   int _generation = 0; // Incremented on every song change — prevents stale async updates
-  int _searchStatusIndex = 0;
 
-  Timer? _statusTimer;
   Timer? _retryTimer;
   Timer? _hardStopTimer;
 
@@ -79,8 +68,23 @@ class LyricsManager extends ChangeNotifier {
   StreamSubscription<Song?>? _resolvingSongSub;
   StreamSubscription<int?>? _currentIndexSub;
 
+  StreamSubscription<ConnectivityEvent>? _connectivitySub;
+
   LyricsManager() {
     _listenToPlayerService();
+    _listenToConnectivity();
+  }
+
+  void _listenToConnectivity() {
+    _connectivitySub = ConnectivityManager.eventStream.listen((event) {
+      if (event == ConnectivityEvent.restored) {
+        final song = _currentSong;
+        if (song != null && (_payload == null || _state == LyricsLoadState.unavailable)) {
+          _onSongChanging(song);
+          _scheduleFetch(song);
+        }
+      }
+    });
   }
 
   void _listenToPlayerService() {
@@ -113,7 +117,6 @@ class LyricsManager extends ChangeNotifier {
 
     _currentSong = song;
     _state = LyricsLoadState.searching;
-    _searchStatusIndex = 0;
     _payload = null;
     _originalSyncedLines = const [];
     _translationSyncedLines = const [];
@@ -152,7 +155,6 @@ class LyricsManager extends ChangeNotifier {
       _generation++;
       _cancelTimers();
       _state = LyricsLoadState.searching;
-      _searchStatusIndex = 0;
       _payload = null;
       _originalSyncedLines = const [];
       _translationSyncedLines = const [];
@@ -181,7 +183,15 @@ class LyricsManager extends ChangeNotifier {
     final album = (song.sourceAlbumName ?? song.album ?? '').trim();
     final duration = song.duration ?? 0;
 
-    // ── Fast path: check cache before network ──
+    // 1. Check local download directory LRC first (instantly)
+    final localLrc = await LyricsService.loadLocalLrc(songId);
+    if (!_isMyGeneration(myGeneration)) return;
+    if (localLrc != null) {
+      _applyPayload(localLrc, myGeneration);
+      return;
+    }
+
+    // 2. Fast path: check cache before network
     final cached = await LyricsCache.get(
       songId: songId,
       title: title,
@@ -207,10 +217,13 @@ class LyricsManager extends ChangeNotifier {
       }
     }
 
-    // ── Start status animation ──
-    _startStatusAnimation(myGeneration);
+    // 3. Check connectivity. If offline, fail immediately to prevent hanging
+    if (ConnectivityManager.isOffline) {
+      _applyUnavailable();
+      return;
+    }
 
-    // ── Phase 1: Run concurrent searches ──
+    // 4. Run Phase 1 searches in background (no status timer!)
     LyricsPayload? found;
     String providerSource = '';
 
@@ -241,8 +254,10 @@ class LyricsManager extends ChangeNotifier {
 
     if (!_isMyGeneration(myGeneration)) return;
 
-    _cancelStatusTimer();
+    _retryTimer?.cancel();
+    _retryTimer = null;
     _hardStopTimer?.cancel();
+    _hardStopTimer = null;
 
     if (found != null && found.hasAny) {
       // Cache and apply
@@ -263,8 +278,13 @@ class LyricsManager extends ChangeNotifier {
       return;
     }
 
+    // If offline now, don't schedule phase 2 retries
+    if (ConnectivityManager.isOffline) {
+      _applyUnavailable();
+      return;
+    }
+
     // ── Phase 1 failed — transition to background retrying ──
-    if (!_isMyGeneration(myGeneration)) return;
     _state = LyricsLoadState.retrying;
     notifyListeners();
 
@@ -288,6 +308,13 @@ class LyricsManager extends ChangeNotifier {
     const delays = [15, 30, 60]; // seconds
 
     void scheduleNext() {
+      if (ConnectivityManager.isOffline) {
+        if (_isMyGeneration(myGeneration)) {
+          _applyUnavailable();
+        }
+        return;
+      }
+
       if (attempt > maxAttempts) {
         if (_isMyGeneration(myGeneration)) {
           // Cache unavailable to prevent hammering
@@ -310,6 +337,10 @@ class LyricsManager extends ChangeNotifier {
       _retryTimer?.cancel();
       _retryTimer = Timer(Duration(seconds: delaySecs), () async {
         if (!_isMyGeneration(myGeneration)) return;
+        if (ConnectivityManager.isOffline) {
+          _applyUnavailable();
+          return;
+        }
 
         final albumName = song.album ?? song.sourceAlbumName ?? '';
         final queries = <String>[
@@ -389,34 +420,7 @@ class LyricsManager extends ChangeNotifier {
     debugPrint('[LyricsManager] Lyrics unavailable for "${_currentSong?.name}"');
   }
 
-  // ─────────────────────────────────────────────────────────
-  // Status animation
-  // ─────────────────────────────────────────────────────────
-  void _startStatusAnimation(int myGeneration) {
-    _cancelStatusTimer();
-    _searchStatusIndex = 0;
 
-    _statusTimer = Timer.periodic(const Duration(milliseconds: 2000), (timer) {
-      if (!_isMyGeneration(myGeneration) || _state != LyricsLoadState.searching) {
-        timer.cancel();
-        return;
-      }
-      if (_searchStatusIndex < _searchStatusMessages.length - 1) {
-        _searchStatusIndex++;
-        notifyListeners();
-      }
-    });
-
-    // Hard stop: after 10s, transition to retrying so UI never stays stuck
-    _hardStopTimer = Timer(const Duration(seconds: 10), () {
-      if (!_isMyGeneration(myGeneration)) return;
-      if (_state == LyricsLoadState.searching) {
-        _cancelStatusTimer();
-        _state = LyricsLoadState.retrying;
-        notifyListeners();
-      }
-    });
-  }
 
   // ─────────────────────────────────────────────────────────
   // Synced lyric parsing (moved from _PlayerScreenState)
@@ -522,16 +526,10 @@ class LyricsManager extends ChangeNotifier {
   bool _isMyGeneration(int gen) => gen == _generation;
 
   void _cancelTimers() {
-    _cancelStatusTimer();
     _retryTimer?.cancel();
     _retryTimer = null;
     _hardStopTimer?.cancel();
     _hardStopTimer = null;
-  }
-
-  void _cancelStatusTimer() {
-    _statusTimer?.cancel();
-    _statusTimer = null;
   }
 
   void _prefetchNext() {
@@ -546,6 +544,7 @@ class LyricsManager extends ChangeNotifier {
   void dispose() {
     _resolvingSongSub?.cancel();
     _currentIndexSub?.cancel();
+    _connectivitySub?.cancel();
     _cancelTimers();
     super.dispose();
   }

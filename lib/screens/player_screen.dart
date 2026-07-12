@@ -531,6 +531,39 @@ class _PlayerScreenState extends State<PlayerScreen> {
                             device: player.outputDeviceState,
                           ),
                           const SizedBox(width: 6),
+                          if (player.isOffline) ...[
+                            const Icon(
+                              Icons.wifi_off_rounded,
+                              color: AppTheme.textMuted,
+                              size: 14,
+                            ),
+                            const SizedBox(width: 4),
+                            const Text(
+                              'Offline',
+                              style: TextStyle(
+                                color: AppTheme.textMuted,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            const SizedBox(width: 6),
+                          ] else if (player.isWeakConnection) ...[
+                            const Icon(
+                              Icons.signal_cellular_connected_no_internet_4_bar_rounded,
+                              color: Colors.orangeAccent,
+                              size: 14,
+                            ),
+                            const SizedBox(width: 4),
+                            const Text(
+                              'Weak',
+                              style: TextStyle(
+                                color: Colors.orangeAccent,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            const SizedBox(width: 6),
+                          ],
                           if (isDownloaded) ...[
                             const Icon(
                               Icons.check_circle_rounded,
@@ -886,105 +919,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
   Widget _buildLyricsPreviewCard(Song song, Duration visualPosition) {
     final lyricsManager = context.watch<LyricsManager>();
 
-    if (lyricsManager.state == LyricsLoadState.searching) {
-      final statusText = lyricsManager.statusMessage;
-      return Container(
-        margin: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-        decoration: BoxDecoration(
-          color: AppTheme.accentPurple.withValues(alpha: 0.08),
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: AppTheme.accentPurple.withValues(alpha: 0.15)),
-        ),
-        child: Row(
-          children: [
-            const SizedBox(
-              width: 14,
-              height: 14,
-              child: CircularProgressIndicator(
-                color: AppTheme.accentPurple,
-                strokeWidth: 2,
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: AnimatedSwitcher(
-                duration: const Duration(milliseconds: 250),
-                child: Text(
-                  statusText,
-                  key: ValueKey<String>(statusText),
-                  style: const TextStyle(
-                    color: AppTheme.textSecondary,
-                    fontSize: 13.5,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ),
-      );
+    if (lyricsManager.state == LyricsLoadState.searching ||
+        lyricsManager.state == LyricsLoadState.retrying ||
+        lyricsManager.state == LyricsLoadState.idle) {
+      return const SizedBox.shrink();
     }
 
-    if (lyricsManager.payload == null) {
-      if (lyricsManager.state == LyricsLoadState.unavailable) {
-        return Container(
-          margin: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
-          decoration: BoxDecoration(
-            color: AppTheme.surfaceDark.withValues(alpha: 0.45),
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
-          ),
-          child: const Row(
-            children: [
-              Icon(Icons.lyrics_rounded, color: AppTheme.textMuted, size: 20),
-              SizedBox(width: 8),
-              Text(
-                "Lyrics aren't available for this song.",
-                style: TextStyle(color: AppTheme.textMuted, fontSize: 13.5, fontWeight: FontWeight.w600),
-              ),
-            ],
-          ),
-        );
-      } else if (lyricsManager.state == LyricsLoadState.retrying) {
-        return Container(
-          margin: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-          decoration: BoxDecoration(
-            color: AppTheme.accentPurple.withValues(alpha: 0.08),
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: AppTheme.accentPurple.withValues(alpha: 0.15)),
-          ),
-          child: const Row(
-            children: [
-              SizedBox(
-                width: 14,
-                height: 14,
-                child: CircularProgressIndicator(
-                  color: AppTheme.accentPurple,
-                  strokeWidth: 2,
-                ),
-              ),
-              SizedBox(width: 12),
-              Expanded(
-                child: Text(
-                  "We're still looking... Lyrics will appear automatically if found.",
-                  style: TextStyle(
-                    color: AppTheme.textSecondary,
-                    fontSize: 13.5,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-            ],
-          ),
-        );
-      }
-    }
-
-    final syncedLyrics = _currentSyncedLyrics;
-    if (syncedLyrics.isEmpty) {
+    if (lyricsManager.state == LyricsLoadState.unavailable || lyricsManager.payload == null) {
       return Container(
         margin: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
@@ -998,10 +939,65 @@ class _PlayerScreenState extends State<PlayerScreen> {
             Icon(Icons.lyrics_rounded, color: AppTheme.textMuted, size: 20),
             SizedBox(width: 8),
             Text(
-              'Lyrics unavailable for this track',
+              "Lyrics not found",
               style: TextStyle(color: AppTheme.textMuted, fontSize: 13.5, fontWeight: FontWeight.w600),
             ),
           ],
+        ),
+      );
+    }
+
+    final syncedLyrics = _currentSyncedLyrics;
+    if (syncedLyrics.isEmpty) {
+      final plain = _plainLyricsForCurrentMode();
+      if (plain == null || plain.trim().isEmpty) {
+        return Container(
+          margin: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
+          decoration: BoxDecoration(
+            color: AppTheme.surfaceDark.withValues(alpha: 0.45),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
+          ),
+          child: const Row(
+            children: [
+              Icon(Icons.lyrics_rounded, color: AppTheme.textMuted, size: 20),
+              SizedBox(width: 8),
+              Text(
+                "Lyrics not found",
+                style: TextStyle(color: AppTheme.textMuted, fontSize: 13.5, fontWeight: FontWeight.w600),
+              ),
+            ],
+          ),
+        );
+      }
+
+      // Teaser for plain lyrics
+      return GestureDetector(
+        onTap: () {
+          setState(() {
+            _showLyrics = true;
+            _lyricsAutoScrollPausedByUser = false;
+          });
+        },
+        child: Container(
+          margin: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
+          decoration: BoxDecoration(
+            color: AppTheme.surfaceDark.withValues(alpha: 0.45),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
+          ),
+          child: const Row(
+            children: [
+              Icon(Icons.lyrics_rounded, color: AppTheme.accentPurple, size: 20),
+              SizedBox(width: 8),
+              Text(
+                'Lyrics (Plain Text) — Tap to view',
+                style: TextStyle(color: AppTheme.textPrimary, fontSize: 13.5, fontWeight: FontWeight.w600),
+              ),
+            ],
+          ),
         ),
       );
     }
@@ -1189,143 +1185,38 @@ class _PlayerScreenState extends State<PlayerScreen> {
   Widget _buildLyricsView(Song song, Duration visualPosition) {
     final lyricsManager = context.watch<LyricsManager>();
 
-    if (lyricsManager.state == LyricsLoadState.searching) {
-      final statusText = lyricsManager.statusMessage;
-      // Derive a smooth progress value based on current search step index
-      const steps = [
-        '🎵 Searching lyrics...',
-        'Trying another source...',
-        'Matching song...',
-        '✓ Almost there...',
-      ];
-      final stepIdx = steps.indexOf(statusText);
-      final progress = stepIdx >= 0 ? (stepIdx + 1) / steps.length : 0.25;
+    if (lyricsManager.state == LyricsLoadState.searching ||
+        lyricsManager.state == LyricsLoadState.retrying ||
+        lyricsManager.state == LyricsLoadState.idle) {
+      return const SizedBox.shrink();
+    }
 
-      return Center(
+    if (lyricsManager.state == LyricsLoadState.unavailable || lyricsManager.payload == null) {
+      return const Center(
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 32),
+          padding: EdgeInsets.symmetric(horizontal: 32),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(
-                Icons.music_note_rounded,
+              Icon(
+                Icons.lyrics_outlined,
                 size: 48,
-                color: AppTheme.accentPurple,
+                color: AppTheme.textMuted,
               ),
-              const SizedBox(height: 24),
-              AnimatedSwitcher(
-                duration: const Duration(milliseconds: 250),
-                child: Text(
-                  statusText,
-                  key: ValueKey<String>(statusText),
-                  style: const TextStyle(
-                    color: AppTheme.textPrimary,
-                    fontSize: 16,
-                    fontWeight: FontWeight.w600,
-                  ),
-                  textAlign: TextAlign.center,
+              SizedBox(height: 16),
+              Text(
+                "Lyrics not found",
+                style: TextStyle(
+                  color: AppTheme.textPrimary,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
                 ),
-              ),
-              const SizedBox(height: 20),
-              ClipRRect(
-                borderRadius: BorderRadius.circular(4),
-                child: SizedBox(
-                  width: 180,
-                  height: 6,
-                  child: LinearProgressIndicator(
-                    value: progress,
-                    backgroundColor: Colors.white.withValues(alpha: 0.1),
-                    valueColor: const AlwaysStoppedAnimation<Color>(AppTheme.accentPurple),
-                  ),
-                ),
+                textAlign: TextAlign.center,
               ),
             ],
           ),
         ),
       );
-    }
-
-    if (lyricsManager.payload == null) {
-      if (lyricsManager.state == LyricsLoadState.unavailable) {
-        return Center(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 32),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Icon(
-                  Icons.lyrics_outlined,
-                  size: 48,
-                  color: AppTheme.textMuted,
-                ),
-                const SizedBox(height: 16),
-                const Text(
-                  "Lyrics aren't available for this song.",
-                  style: TextStyle(
-                    color: AppTheme.textPrimary,
-                    fontSize: 16,
-                    fontWeight: FontWeight.w600,
-                  ),
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: 24),
-                ElevatedButton(
-                  onPressed: () {
-                    context.read<LyricsManager>().requestLyrics(song, forceRetry: true);
-                  },
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: AppTheme.accentPurple,
-                    foregroundColor: Colors.white,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                    padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-                  ),
-                  child: const Text('Retry Search Now'),
-                ),
-              ],
-            ),
-          ),
-        );
-      } else if (lyricsManager.state == LyricsLoadState.retrying) {
-        return Center(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 32),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const SizedBox(
-                  width: 32,
-                  height: 32,
-                  child: CircularProgressIndicator(
-                    color: AppTheme.accentPurple,
-                    strokeWidth: 3,
-                  ),
-                ),
-                const SizedBox(height: 24),
-                const Text(
-                  "We're still looking...",
-                  style: TextStyle(
-                    color: AppTheme.textPrimary,
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold,
-                  ),
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: 12),
-                Text(
-                  "Lyrics will appear automatically if found. We'll keep searching in the background while your music plays.",
-                  style: const TextStyle(
-                    color: AppTheme.textSecondary,
-                    fontSize: 13.5,
-                  ),
-                  textAlign: TextAlign.center,
-                ),
-              ],
-            ),
-          ),
-        );
-      }
     }
 
     final plainLyrics = _plainLyricsForCurrentMode();

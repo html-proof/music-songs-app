@@ -177,6 +177,8 @@ class UserPreferences {
   final bool lowStorageProtectionEnabled;
   final bool batterySaverEnabled;
   final bool autoCleanCacheEnabled;
+  final bool offlinePlaybackEnabled;
+  final bool skipUnavailableOffline;
 
   UserPreferences({
     required this.uid,
@@ -206,6 +208,8 @@ class UserPreferences {
     this.lowStorageProtectionEnabled = true,
     this.batterySaverEnabled = false,
     this.autoCleanCacheEnabled = true,
+    this.offlinePlaybackEnabled = true,
+    this.skipUnavailableOffline = true,
   });
 
   factory UserPreferences.fromJson(Map<String, dynamic> json) {
@@ -301,6 +305,8 @@ class UserPreferences {
       lowStorageProtectionEnabled: json['lowStorageProtectionEnabled'] != false,
       batterySaverEnabled: json['batterySaverEnabled'] == true,
       autoCleanCacheEnabled: json['autoCleanCacheEnabled'] != false,
+      offlinePlaybackEnabled: json['offlinePlaybackEnabled'] ?? true,
+      skipUnavailableOffline: json['skipUnavailableOffline'] ?? true,
     );
   }
 
@@ -335,6 +341,8 @@ class UserPreferences {
       'lowStorageProtectionEnabled': lowStorageProtectionEnabled,
       'batterySaverEnabled': batterySaverEnabled,
       'autoCleanCacheEnabled': autoCleanCacheEnabled,
+      'offlinePlaybackEnabled': offlinePlaybackEnabled,
+      'skipUnavailableOffline': skipUnavailableOffline,
     };
   }
 
@@ -365,6 +373,8 @@ class UserPreferences {
     bool? lowStorageProtectionEnabled,
     bool? batterySaverEnabled,
     bool? autoCleanCacheEnabled,
+    bool? offlinePlaybackEnabled,
+    bool? skipUnavailableOffline,
   }) {
     return UserPreferences(
       uid: uid,
@@ -418,6 +428,10 @@ class UserPreferences {
       batterySaverEnabled: batterySaverEnabled ?? this.batterySaverEnabled,
       autoCleanCacheEnabled:
           autoCleanCacheEnabled ?? this.autoCleanCacheEnabled,
+      offlinePlaybackEnabled:
+          offlinePlaybackEnabled ?? this.offlinePlaybackEnabled,
+      skipUnavailableOffline:
+          skipUnavailableOffline ?? this.skipUnavailableOffline,
     );
   }
 

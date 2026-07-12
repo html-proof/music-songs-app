@@ -1,11 +1,12 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:connectivity_plus/connectivity_plus.dart';
+import '../services/connectivity_manager.dart';
 import 'package:just_audio/just_audio.dart';
 import '../services/listening_safety_service.dart';
 import '../models/song.dart';
 import '../services/player_service.dart';
+import '../services/stability_logger.dart';
 
 class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
   Song? get currentSong => PlayerService.currentSong;
@@ -36,12 +37,17 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
   Song? _resolvingSong;
   bool _shuffleModeEnabled = false;
 
+  final List<StreamSubscription> _subscriptions = [];
+  DateTime _lastPositionUpdate = DateTime.now();
+  Timer? _watchdogTimer;
+
   Song? get resolvingSong => _resolvingSong;
   bool get isPlaying => _isPlaying;
   bool get shuffleModeEnabled => _shuffleModeEnabled;
   Duration get position => _position;
   Duration get duration => _duration;
   bool get isOffline => _isOffline;
+  bool get isWeakConnection => ConnectivityManager.isWeak;
   bool get isBuffering => _isBuffering || _resolvingSong != null;
   bool get isQualitySwitching => _isQualitySwitching;
   bool get isSwitchingSource => _isSwitchingSource;
@@ -85,28 +91,36 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
 
   PlayerProvider() {
     WidgetsBinding.instance.addObserver(this);
+    _bindListeners();
     _initConnectivity();
     _syncRuntimeSnapshot(notify: false);
     unawaited(_hydrateSongStateIfMissing(force: true));
+    _startWatchdog();
 
-    PlayerService.playingStream.listen((playing) {
+    _headphonesConnected = ListeningSafetyService.headphonesConnected;
+    _headphoneDeviceName = ListeningSafetyService.headphoneDeviceName;
+    _bluetoothHeadsetConnected =
+        ListeningSafetyService.bluetoothHeadsetConnected;
+    _bluetoothDeviceName = ListeningSafetyService.bluetoothDeviceName;
+    _outputDeviceState = ListeningSafetyService.outputDeviceState;
+    _isConversationMode = PlayerService.conversationModeActive;
+    _shuffleModeEnabled = PlayerService.shuffleModeEnabled;
+  }
+
+  void _bindListeners() {
+    _subscriptions.add(PlayerService.playingStream.listen((playing) {
       _isPlaying = playing;
       notifyListeners();
       if (playing) {
         unawaited(_hydrateSongStateIfMissing());
       }
-    });
+    }));
 
     int lastNotifiedMs = -1;
-    PlayerService.positionStream.listen((pos) {
+    _subscriptions.add(PlayerService.positionStream.listen((pos) {
+      _lastPositionUpdate = DateTime.now();
+
       if (_ignorePositionUntilZero) {
-        // Only clear the guard once the player confirms it is genuinely at/near
-        // the start of the new track. 300ms is tight enough to distinguish a
-        // true fresh start from a stale audio-buffer position carried over from
-        // the previous song (which typically shows up as 5–15 seconds).
-        //
-        // Fallback: If the player is already in ready state or actively playing,
-        // it means the transition has finished and we must not ignore the position.
         final state = PlayerService.player.processingState;
         final playing = PlayerService.player.playing;
         if (pos == Duration.zero ||
@@ -118,36 +132,47 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
           return;
         }
       }
-      if (!_isSeeking && _resolvingSong == null) {
+      if (!_isSeeking && _resolvingSong == null && !_isSwitchingSource && !_isQualitySwitching) {
         _position = pos;
         final currentMs = pos.inMilliseconds;
-        // Synced lyrics require higher frequency updates than once per second.
-        // We notify at 240ms intervals (~4.1Hz) which provides a good balance
-        // of UI fluidity and battery efficiency.
         if ((currentMs - lastNotifiedMs).abs() >= 240 || currentMs < 1000) {
           lastNotifiedMs = currentMs;
           notifyListeners();
         }
       }
-    });
+    }));
 
-    PlayerService.durationStream.listen((dur) {
-      _duration = dur ?? Duration.zero;
+    _subscriptions.add(PlayerService.durationStream.listen((dur) {
+      if (_isSwitchingSource || _isQualitySwitching) return;
+      if (dur != null && dur > Duration.zero) {
+        _duration = dur;
+      } else {
+        final song = activeSong;
+        if (song != null && song.duration != null && song.duration! > 0) {
+          _duration = Duration(seconds: song.duration!);
+        } else {
+          _duration = Duration.zero;
+        }
+      }
       notifyListeners();
-    });
+    }));
 
-    PlayerService.player.currentIndexStream.listen((index) {
+    _subscriptions.add(PlayerService.player.currentIndexStream.listen((index) {
+      if (_isSwitchingSource || _isQualitySwitching) return;
       final song = PlayerService.currentSong;
       if (song != null) {
         _position = Duration.zero;
-        _duration = Duration(seconds: song.duration ?? 0);
+        _duration = (song.duration != null && song.duration! > 0)
+            ? Duration(seconds: song.duration!)
+            : Duration.zero;
         _ignorePositionUntilZero = true;
       }
       notifyListeners();
       unawaited(_hydrateSongStateIfMissing());
-    });
+    }));
 
-    PlayerService.playerStateStream.listen((state) {
+    _subscriptions.add(PlayerService.playerStateStream.listen((state) {
+      if (_isSwitchingSource || _isQualitySwitching) return;
       _isBuffering =
           state.processingState == ProcessingState.buffering ||
           state.processingState == ProcessingState.loading;
@@ -158,79 +183,86 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
       if (state.processingState != ProcessingState.idle) {
         unawaited(_hydrateSongStateIfMissing());
       }
-    });
+    }));
 
-    PlayerService.qualitySwitchingStream.listen((switching) {
+    _subscriptions.add(PlayerService.qualitySwitchingStream.listen((switching) {
       _isQualitySwitching = switching;
       notifyListeners();
-    });
+    }));
 
-    PlayerService.sourceSwitchingStream.listen((switching) {
+    _subscriptions.add(PlayerService.sourceSwitchingStream.listen((switching) {
       _isSwitchingSource = switching;
       notifyListeners();
-    });
+    }));
 
-    PlayerService.interruptionActiveStream.listen((active) {
+    _subscriptions.add(PlayerService.interruptionActiveStream.listen((active) {
       _isInterruptionActive = active;
       notifyListeners();
-    });
+    }));
 
-    PlayerService.conversationModeStream.listen((active) {
+    _subscriptions.add(PlayerService.conversationModeStream.listen((active) {
       _isConversationMode = active;
       notifyListeners();
-    });
+    }));
 
-    ListeningSafetyService.headphoneStream.listen((connected) {
+    _subscriptions.add(ListeningSafetyService.headphoneStream.listen((connected) {
       _headphonesConnected = connected;
       _headphoneDeviceName = ListeningSafetyService.headphoneDeviceName;
       _bluetoothHeadsetConnected =
           ListeningSafetyService.bluetoothHeadsetConnected;
       _bluetoothDeviceName = ListeningSafetyService.bluetoothDeviceName;
       notifyListeners();
-    });
-    ListeningSafetyService.outputDeviceStream.listen((outputState) {
+    }));
+
+    _subscriptions.add(ListeningSafetyService.outputDeviceStream.listen((outputState) {
       _outputDeviceState = outputState;
       notifyListeners();
-    });
+    }));
 
-    PlayerService.qualityAdjustmentMessageStream.listen((message) {
+    _subscriptions.add(PlayerService.qualityAdjustmentMessageStream.listen((message) {
       _qualityAdjustmentMessage = message;
       notifyListeners();
-    });
+    }));
 
-    PlayerService.resolvingSongStream.listen((song) {
+    _subscriptions.add(PlayerService.resolvingSongStream.listen((song) {
       _resolvingSong = song;
       if (song != null) {
-        // A new song is being resolved — force position to 0:00 and block any
-        // position stream events from the old audio buffer.
         _position = Duration.zero;
         _ignorePositionUntilZero = true;
       } else {
-        // Resolution finished (song → null). Keep the guard active and hold
-        // position at 0:00 until positionStream confirms the player is truly
-        // at/near zero. Without this, the stale buffer position from the
-        // previous song can slip through in the brief gap between this event
-        // and the first tick of the new track's positionStream.
         _position = Duration.zero;
         _ignorePositionUntilZero = true;
       }
       notifyListeners();
-    });
+    }));
 
-    PlayerService.shuffleModeStream.listen((enabled) {
+    _subscriptions.add(PlayerService.shuffleModeStream.listen((enabled) {
       _shuffleModeEnabled = enabled;
       notifyListeners();
-    });
+    }));
+  }
 
-    // Initial state
-    _headphonesConnected = ListeningSafetyService.headphonesConnected;
-    _headphoneDeviceName = ListeningSafetyService.headphoneDeviceName;
-    _bluetoothHeadsetConnected =
-        ListeningSafetyService.bluetoothHeadsetConnected;
-    _bluetoothDeviceName = ListeningSafetyService.bluetoothDeviceName;
-    _outputDeviceState = ListeningSafetyService.outputDeviceState;
-    _isConversationMode = PlayerService.conversationModeActive;
-    _shuffleModeEnabled = PlayerService.shuffleModeEnabled;
+  void _startWatchdog() {
+    _watchdogTimer?.cancel();
+    _watchdogTimer = Timer.periodic(const Duration(seconds: 2), (timer) {
+      if (_isPlaying && !_isSeeking && !_isBuffering && !_isSwitchingSource && !_isQualitySwitching) {
+        final timeSinceLastUpdate = DateTime.now().difference(_lastPositionUpdate);
+        if (timeSinceLastUpdate > const Duration(seconds: 3)) {
+          StabilityLogger.warning('Playback', 'Watchdog detected stuck position stream (last update: ${timeSinceLastUpdate.inSeconds}s ago). Reconnecting listeners.');
+          reconnectListeners();
+        }
+      }
+    });
+  }
+
+  void reconnectListeners() {
+    StabilityLogger.info('Playback', 'Reconnecting PlayerProvider stream listeners.');
+    for (final sub in _subscriptions) {
+      sub.cancel();
+    }
+    _subscriptions.clear();
+    _bindListeners();
+    _initConnectivity();
   }
 
   @override
@@ -268,7 +300,17 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
   void _syncRuntimeSnapshot({bool notify = true}) {
     _isPlaying = PlayerService.player.playing;
     _position = PlayerService.player.position;
-    _duration = PlayerService.player.duration ?? Duration.zero;
+    final dur = PlayerService.player.duration;
+    if (dur != null && dur > Duration.zero) {
+      _duration = dur;
+    } else {
+      final song = activeSong;
+      if (song != null && song.duration != null && song.duration! > 0) {
+        _duration = Duration(seconds: song.duration!);
+      } else {
+        _duration = Duration.zero;
+      }
+    }
     final state = PlayerService.player.playerState.processingState;
     _isBuffering =
         state == ProcessingState.buffering || state == ProcessingState.loading;
@@ -351,27 +393,25 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> _initConnectivity() async {
-    final connectivity = Connectivity();
-    final result = await connectivity.checkConnectivity();
-    _isOffline = !_hasConnectivity(result);
+    _isOffline = ConnectivityManager.isOffline;
     notifyListeners();
 
-    connectivity.onConnectivityChanged.listen((results) {
+    _subscriptions.add(ConnectivityManager.statusStream.listen((status) {
       final wasOffline = _isOffline;
-      _isOffline = !_hasConnectivity(results);
+      _isOffline = status == ConnectionStatus.disconnected;
       if (wasOffline != _isOffline) {
         notifyListeners();
       }
-    });
-  }
-
-  bool _hasConnectivity(List<ConnectivityResult> results) {
-    return results.any((result) => result != ConnectivityResult.none);
+    }));
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _watchdogTimer?.cancel();
+    for (final sub in _subscriptions) {
+      sub.cancel();
+    }
     super.dispose();
   }
 }

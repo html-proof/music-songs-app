@@ -653,6 +653,39 @@ class _MiniPlayerState extends State<MiniPlayer> {
                                             const SizedBox(height: 2),
                                             Row(
                                               children: [
+                                                if (player.isOffline) ...[
+                                                  const Icon(
+                                                    Icons.wifi_off_rounded,
+                                                    color: AppTheme.textMuted,
+                                                    size: 12,
+                                                  ),
+                                                  const SizedBox(width: 4),
+                                                  const Text(
+                                                    'Offline',
+                                                    style: TextStyle(
+                                                      color: AppTheme.textMuted,
+                                                      fontSize: 10.5,
+                                                      fontWeight: FontWeight.w600,
+                                                    ),
+                                                  ),
+                                                  const SizedBox(width: 6),
+                                                ] else if (player.isWeakConnection) ...[
+                                                  const Icon(
+                                                    Icons.signal_cellular_connected_no_internet_4_bar_rounded,
+                                                    color: Colors.orangeAccent,
+                                                    size: 12,
+                                                  ),
+                                                  const SizedBox(width: 4),
+                                                  const Text(
+                                                    'Weak',
+                                                    style: TextStyle(
+                                                      color: Colors.orangeAccent,
+                                                      fontSize: 10.5,
+                                                      fontWeight: FontWeight.w600,
+                                                    ),
+                                                  ),
+                                                  const SizedBox(width: 6),
+                                                ],
                                                 if (isDownloaded) ...[
                                                   const Icon(
                                                     Icons.check_circle_rounded,

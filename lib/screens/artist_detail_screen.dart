@@ -1,7 +1,8 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
-import 'package:connectivity_plus/connectivity_plus.dart';
+import '../services/connectivity_manager.dart';
 import '../models/artist.dart';
 import '../models/song.dart';
 import '../models/album.dart';
@@ -29,29 +30,47 @@ class _ArtistDetailScreenState extends State<ArtistDetailScreen> {
   Artist? _detailedArtist;
   List<Song> _topTracks = [];
   List<Album> _albums = [];
+  List<Album> _singles = [];
+  List<Song> _downloadedSongs = [];
+  List<Artist> _relatedArtists = [];
+  String? _biography;
   bool _isLoading = true;
   String? _error;
   bool _isFollowing = false;
+  StreamSubscription? _connectivitySubscription;
 
   @override
   void initState() {
     super.initState();
     _detailedArtist = widget.artist;
     _fetchArtistDetails();
+    _connectivitySubscription = ConnectivityManager.eventStream.listen((event) {
+      if (event == ConnectivityEvent.restored) {
+        _fetchArtistDetails();
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _connectivitySubscription?.cancel();
+    super.dispose();
   }
 
   Future<void> _fetchArtistDetails() async {
     try {
-      final connectivity = await Connectivity().checkConnectivity();
-      final isOffline = connectivity.contains(ConnectivityResult.none);
+      final isOffline = ConnectivityManager.isOffline;
+
+      // Always load downloaded songs for this artist.
+      final allDownloaded = await DownloadService.getDownloadedSongs();
+      final artistNameLower = widget.artist.name.toLowerCase().trim();
+      final matchingDownloaded = allDownloaded
+          .where((s) => s.artist?.toLowerCase().trim() == artistNameLower)
+          .toList();
 
       if (isOffline) {
-        final offlineSongs = (await DownloadService.getDownloadedSongs())
-            .where((s) => s.artist?.toLowerCase().trim() == widget.artist.name.toLowerCase().trim())
-            .toList();
-
         final offlineAlbums = await AlbumFilter.filterAndDeduplicate(
-          offlineSongs.map((s) => Album(
+          matchingDownloaded.map((s) => Album(
             id: s.albumId ?? 'song_album_${s.album?.toLowerCase().replaceAll(RegExp(r'\s+'), '_')}',
             name: s.album ?? 'Unknown Album',
             artist: s.artist,
@@ -62,8 +81,12 @@ class _ArtistDetailScreenState extends State<ArtistDetailScreen> {
 
         if (!mounted) return;
         setState(() {
-          _topTracks = offlineSongs;
+          _topTracks = matchingDownloaded;
+          _downloadedSongs = matchingDownloaded;
           _albums = offlineAlbums;
+          _singles = [];
+          _relatedArtists = [];
+          _biography = null;
           _isLoading = false;
           _error = null;
         });
@@ -87,11 +110,45 @@ class _ArtistDetailScreenState extends State<ArtistDetailScreen> {
           .map((s) => Song.fromJson(Map<String, dynamic>.from(s)))
           .take(10)
           .toList();
-      final parsedAlbums = await AlbumFilter.filterAndDeduplicate(
+
+      final allParsedAlbums = await AlbumFilter.filterAndDeduplicate(
         albumsJson
             .map((a) => Album.fromJson(Map<String, dynamic>.from(a)))
             .toList(),
       );
+
+      // Split into albums vs singles based on type or songCount.
+      final albumsList = <Album>[];
+      final singlesList = <Album>[];
+      for (final album in allParsedAlbums) {
+        final type = (album.type ?? '').toUpperCase();
+        if (type == 'SINGLE' || (album.songCount != null && album.songCount! <= 2 && type != 'ALBUM')) {
+          singlesList.add(album);
+        } else {
+          albumsList.add(album);
+        }
+      }
+
+      // Extract biography from artist JSON.
+      String? bio;
+      if (artistJson != null) {
+        bio = (artistJson['bio'] ?? artistJson['biography'] ?? artistJson['wiki'] ?? '').toString().trim();
+        if (bio.isEmpty) bio = null;
+      }
+
+      // Extract related / similar artists from artist JSON.
+      List<Artist> related = [];
+      if (artistJson != null) {
+        final similarArtists = artistJson['similarArtists'] ?? artistJson['similar_artists'] ?? artistJson['relatedArtists'];
+        if (similarArtists is List) {
+          related = similarArtists
+              .whereType<Map>()
+              .map((a) => Artist.fromJson(Map<String, dynamic>.from(a)))
+              .where((a) => a.name.isNotEmpty)
+              .take(10)
+              .toList();
+        }
+      }
 
       if (!mounted) return;
       setState(() {
@@ -99,7 +156,11 @@ class _ArtistDetailScreenState extends State<ArtistDetailScreen> {
           _detailedArtist = Artist.fromJson(artistJson);
         }
         _topTracks = parsedTracks;
-        _albums = parsedAlbums;
+        _albums = albumsList;
+        _singles = singlesList;
+        _downloadedSongs = matchingDownloaded;
+        _relatedArtists = related;
+        _biography = bio;
         _isLoading = false;
         _error = null;
       });
@@ -238,6 +299,28 @@ class _ArtistDetailScreenState extends State<ArtistDetailScreen> {
                           ),
                         ),
                       ),
+
+                      // Biography
+                      if (_biography != null && _biography!.isNotEmpty) ...[
+                        _buildSectionHeader('About'),
+                        SliverToBoxAdapter(
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 20),
+                            child: Text(
+                              _biography!,
+                              style: const TextStyle(
+                                color: AppTheme.textSecondary,
+                                fontSize: 14,
+                                height: 1.5,
+                              ),
+                              maxLines: 5,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ),
+                      ],
+
+                      // Popular Songs
                       if (_topTracks.isNotEmpty) ...[
                         _buildSectionHeader('Popular Songs'),
                         SliverList(
@@ -254,8 +337,28 @@ class _ArtistDetailScreenState extends State<ArtistDetailScreen> {
                           ),
                         ),
                       ],
+
+                      // Downloaded Songs (only if there are downloaded songs not already in top tracks)
+                      if (_downloadedSongs.isNotEmpty && !ConnectivityManager.isOffline) ...[
+                        _buildSectionHeader('Downloaded'),
+                        SliverList(
+                          delegate: SliverChildBuilderDelegate(
+                            (context, index) {
+                              final song = _downloadedSongs[index];
+                              return SongTile(
+                                song: song,
+                                isPlaying: currentSongId == song.id,
+                                onTap: () => player.play(song, playlist: _downloadedSongs),
+                              );
+                            },
+                            childCount: _downloadedSongs.length > 5 ? 5 : _downloadedSongs.length,
+                          ),
+                        ),
+                      ],
+
+                      // Albums
                       if (_albums.isNotEmpty) ...[
-                        _buildSectionHeader('Albums & Singles'),
+                        _buildSectionHeader('Albums'),
                         SliverToBoxAdapter(
                           child: SizedBox(
                             height: 220,
@@ -281,6 +384,96 @@ class _ArtistDetailScreenState extends State<ArtistDetailScreen> {
                           ),
                         ),
                       ],
+
+                      // Singles
+                      if (_singles.isNotEmpty) ...[
+                        _buildSectionHeader('Singles'),
+                        SliverToBoxAdapter(
+                          child: SizedBox(
+                            height: 220,
+                            child: ListView.builder(
+                              scrollDirection: Axis.horizontal,
+                              padding: const EdgeInsets.symmetric(horizontal: 16),
+                              itemCount: _singles.length,
+                              itemBuilder: (context, index) {
+                                final album = _singles[index];
+                                return AlbumCard(
+                                  album: album,
+                                  onTap: () {
+                                    Navigator.push(
+                                      context,
+                                      MaterialPageRoute(
+                                        builder: (_) => AlbumDetailScreen(album: album),
+                                      ),
+                                    );
+                                  },
+                                );
+                              },
+                            ),
+                          ),
+                        ),
+                      ],
+
+                      // Related Artists
+                      if (_relatedArtists.isNotEmpty) ...[
+                        _buildSectionHeader('Fans Also Like'),
+                        SliverToBoxAdapter(
+                          child: SizedBox(
+                            height: 160,
+                            child: ListView.builder(
+                              scrollDirection: Axis.horizontal,
+                              padding: const EdgeInsets.symmetric(horizontal: 16),
+                              itemCount: _relatedArtists.length,
+                              itemBuilder: (context, index) {
+                                final related = _relatedArtists[index];
+                                return GestureDetector(
+                                  onTap: () {
+                                    Navigator.push(
+                                      context,
+                                      MaterialPageRoute(
+                                        builder: (_) => ArtistDetailScreen(artist: related),
+                                      ),
+                                    );
+                                  },
+                                  child: Container(
+                                    width: 110,
+                                    margin: const EdgeInsets.only(right: 14),
+                                    child: Column(
+                                      children: [
+                                        ArtistAvatar(
+                                          artistId: related.id,
+                                          artistName: related.name,
+                                          imageUrl: related.imageUrl,
+                                          radius: 45,
+                                          isCircle: true,
+                                        ),
+                                        const SizedBox(height: 10),
+                                        Text(
+                                          related.name,
+                                          style: const TextStyle(
+                                            color: AppTheme.textPrimary,
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                          maxLines: 2,
+                                          overflow: TextOverflow.ellipsis,
+                                          textAlign: TextAlign.center,
+                                        ),
+                                        if (related.isVerified)
+                                          const Padding(
+                                            padding: EdgeInsets.only(top: 2),
+                                            child: Icon(Icons.verified, color: Colors.blue, size: 14),
+                                          ),
+                                      ],
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                          ),
+                        ),
+                      ],
+
                       const SliverToBoxAdapter(child: SizedBox(height: 120)),
                     ],
                   ],

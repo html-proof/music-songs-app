@@ -139,6 +139,8 @@ class PreferencesScreen extends StatelessWidget {
                           preferences.conversationAssistAutoRestoreSeconds,
                       conversationAssistIgnoreSingleEarbud:
                           preferences.conversationAssistIgnoreSingleEarbud,
+                      offlinePlaybackEnabled: preferences.offlinePlaybackEnabled,
+                      skipUnavailableOffline: preferences.skipUnavailableOffline,
                       onAutoplayChanged: (enabled) async {
                         await preferences.setAutoplayEnabled(enabled);
                       },
@@ -170,6 +172,12 @@ class PreferencesScreen extends StatelessWidget {
                                   enabled,
                                 );
                           },
+                      onOfflinePlaybackChanged: (enabled) async {
+                        await preferences.setOfflinePlaybackEnabled(enabled);
+                      },
+                      onSkipUnavailableOfflineChanged: (enabled) async {
+                        await preferences.setSkipUnavailableOffline(enabled);
+                      },
                     ),
                     const SizedBox(height: 16),
                     const _OfflineStorageCard(),
@@ -220,6 +228,8 @@ class _PlaybackSettingsCard extends StatelessWidget {
   final int conversationAssistReductionPercent;
   final int conversationAssistAutoRestoreSeconds;
   final bool conversationAssistIgnoreSingleEarbud;
+  final bool offlinePlaybackEnabled;
+  final bool skipUnavailableOffline;
   final ValueChanged<bool> onAutoplayChanged;
   final ValueChanged<AudioQuality> onAudioQualityChanged;
   final ValueChanged<AudioQuality> onDownloadQualityChanged;
@@ -229,6 +239,8 @@ class _PlaybackSettingsCard extends StatelessWidget {
   final ValueChanged<int> onConversationAssistReductionChanged;
   final ValueChanged<int> onConversationAssistAutoRestoreChanged;
   final ValueChanged<bool> onConversationAssistIgnoreSingleEarbudChanged;
+  final ValueChanged<bool> onOfflinePlaybackChanged;
+  final ValueChanged<bool> onSkipUnavailableOfflineChanged;
 
   const _PlaybackSettingsCard({
     required this.autoplayEnabled,
@@ -239,6 +251,8 @@ class _PlaybackSettingsCard extends StatelessWidget {
     required this.conversationAssistReductionPercent,
     required this.conversationAssistAutoRestoreSeconds,
     required this.conversationAssistIgnoreSingleEarbud,
+    required this.offlinePlaybackEnabled,
+    required this.skipUnavailableOffline,
     required this.onAutoplayChanged,
     required this.onAudioQualityChanged,
     required this.onDownloadQualityChanged,
@@ -247,6 +261,8 @@ class _PlaybackSettingsCard extends StatelessWidget {
     required this.onConversationAssistReductionChanged,
     required this.onConversationAssistAutoRestoreChanged,
     required this.onConversationAssistIgnoreSingleEarbudChanged,
+    required this.onOfflinePlaybackChanged,
+    required this.onSkipUnavailableOfflineChanged,
   });
 
   @override
@@ -286,6 +302,36 @@ class _PlaybackSettingsCard extends StatelessWidget {
               style: TextStyle(color: AppTheme.textSecondary, fontSize: 12),
             ),
             onChanged: onAutoplayChanged,
+          ),
+          const Divider(height: 1, color: AppTheme.cardDark),
+          SwitchListTile.adaptive(
+            contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+            value: offlinePlaybackEnabled,
+            activeThumbColor: AppTheme.accentPurple,
+            title: const Text(
+              'Offline Playback',
+              style: TextStyle(color: AppTheme.textPrimary, fontSize: 14),
+            ),
+            subtitle: const Text(
+              'Automatically switch to downloaded songs when streaming fails.',
+              style: TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+            ),
+            onChanged: onOfflinePlaybackChanged,
+          ),
+          const Divider(height: 1, color: AppTheme.cardDark),
+          SwitchListTile.adaptive(
+            contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+            value: skipUnavailableOffline,
+            activeThumbColor: AppTheme.accentPurple,
+            title: const Text(
+              'Skip unavailable songs in Offline Mode',
+              style: TextStyle(color: AppTheme.textPrimary, fontSize: 14),
+            ),
+            subtitle: const Text(
+              'Skip songs that are not downloaded when device is offline.',
+              style: TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+            ),
+            onChanged: onSkipUnavailableOfflineChanged,
           ),
           const Divider(height: 1, color: AppTheme.cardDark),
 

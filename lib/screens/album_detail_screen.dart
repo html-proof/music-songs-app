@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../services/connectivity_manager.dart';
 
 import '../models/album.dart';
 import '../models/song.dart';
@@ -33,6 +35,7 @@ class _AlbumDetailScreenState extends State<AlbumDetailScreen> {
   static const int _artistAlbumTarget = 20;
 
   final ScrollController _moreAlbumsScrollController = ScrollController();
+  StreamSubscription? _connectivitySubscription;
 
   List<Song> _songs = [];
   bool _isLoading = true;
@@ -53,10 +56,16 @@ class _AlbumDetailScreenState extends State<AlbumDetailScreen> {
     super.initState();
     _moreAlbumsScrollController.addListener(_onMoreAlbumsScroll);
     _fetchAlbumDetails();
+    _connectivitySubscription = ConnectivityManager.eventStream.listen((event) {
+      if (event == ConnectivityEvent.restored) {
+        _fetchAlbumDetails();
+      }
+    });
   }
 
   @override
   void dispose() {
+    _connectivitySubscription?.cancel();
     _moreAlbumsScrollController
       ..removeListener(_onMoreAlbumsScroll)
       ..dispose();

@@ -261,7 +261,7 @@ class _SearchScreenState extends State<SearchScreen> {
 
               // Results
               Expanded(
-                child: search.loading
+                child: search.loading && search.songs.isEmpty && search.albums.isEmpty && search.artists.isEmpty
                     ? const _SkeletonLoader()
                     : showBrowseCategories
                         ? ListView(
@@ -573,7 +573,11 @@ class _SearchScreenState extends State<SearchScreen> {
       String name = '';
       if (item is Artist) {
         name = item.name.toLowerCase().trim();
-        if (item.isVerified) points += 20.0;
+        // Artists get a substantial type bonus so they surface as Top Result
+        // when the query clearly targets an artist name.
+        points += 30.0;
+        if (item.isVerified) points += 25.0;
+        if (item.followerCount != null && item.followerCount! > 0) points += 10.0;
         if (item.role != null && item.role!.contains('downloaded')) points += 10.0;
       } else if (item is Album) {
         name = item.name.toLowerCase().trim();
@@ -733,6 +737,10 @@ class _SearchScreenState extends State<SearchScreen> {
     if (remainingSongs.isEmpty || (_activeTab != 'All' && _activeTab != 'Songs')) {
       return const SizedBox.shrink();
     }
+    // On the 'All' tab, cap songs at 5 to keep the overview compact.
+    final displayedSongs = _activeTab == 'All' && remainingSongs.length > 5
+        ? remainingSongs.sublist(0, 5)
+        : remainingSongs;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -748,8 +756,8 @@ class _SearchScreenState extends State<SearchScreen> {
             ),
           ),
         ),
-        ...List.generate(remainingSongs.length, (index) {
-          final song = remainingSongs[index];
+        ...List.generate(displayedSongs.length, (index) {
+          final song = displayedSongs[index];
           final originalIndex = search.songs.indexOf(song);
           return SongTile(
             song: song,

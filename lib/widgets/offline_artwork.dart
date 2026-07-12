@@ -5,6 +5,8 @@ import '../services/download_service.dart';
 import '../theme/app_theme.dart';
 
 class OfflineArtwork extends StatefulWidget {
+  static final Map<String, String> _artworkPathCache = {};
+
   final String? songId;
   final String? albumId;
   final String? playlistId;
@@ -41,7 +43,7 @@ class _OfflineArtworkState extends State<OfflineArtwork> {
   @override
   void initState() {
     super.initState();
-    _checkLocalFile();
+    _initOrCheck();
   }
 
   @override
@@ -51,25 +53,28 @@ class _OfflineArtworkState extends State<OfflineArtwork> {
         oldWidget.albumId != widget.albumId ||
         oldWidget.playlistId != widget.playlistId ||
         oldWidget.imageUrl != widget.imageUrl) {
+      _initOrCheck();
+    }
+  }
+
+  void _initOrCheck() {
+    final keyString = widget.songId ?? widget.imageUrl ?? widget.albumId ?? widget.playlistId ?? '';
+    final cachedPath = OfflineArtwork._artworkPathCache[keyString];
+    if (cachedPath != null) {
+      _localFile = File(cachedPath);
+      _checked = true;
+    } else {
+      _localFile = null;
+      _checked = false;
       _checkLocalFile();
     }
   }
 
   Future<void> _checkLocalFile() async {
+    final keyString = widget.songId ?? widget.imageUrl ?? widget.albumId ?? widget.playlistId ?? '';
     try {
       String? path;
       if (widget.songId != null && widget.songId!.isNotEmpty) {
-        // For songs, we use the comprehensive resolution service
-        // which handles fallbacks to album and artist artwork.
-        // Note: We'd need a Song object here, but if we only have IDs,
-        // we'll have to resolve manually or pass the Song object to the widget.
-        // Since we are refactoring the widget, we'll assume songId is the primary key.
-
-        // For now, we can't use ArtworkService.getLocalArtworkPath directly
-        // because it requires a Song object. We'll implement a simplified version
-        // here or update the widget to take a Song object.
-
-        // Let's implement the folder check here.
         final dirPath = await DownloadService.getDownloadsDirPath();
         final songFile = File('$dirPath/songs/${widget.songId}/artwork.jpg');
         if (await songFile.exists()) {
@@ -77,7 +82,7 @@ class _OfflineArtworkState extends State<OfflineArtwork> {
         } else {
           final legacyFile = File('$dirPath/${widget.songId}.jpg');
           if (await legacyFile.exists()) {
-            path = legacyFile.path; // Migration happens in ArtworkService.getLocalArtworkPath
+            path = legacyFile.path;
           }
         }
       }
@@ -106,6 +111,10 @@ class _OfflineArtworkState extends State<OfflineArtwork> {
             path = legacyPlaylistFile.path;
           }
         }
+      }
+
+      if (path != null) {
+        OfflineArtwork._artworkPathCache[keyString] = path;
       }
 
       if (mounted) {

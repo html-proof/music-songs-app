@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:connectivity_plus/connectivity_plus.dart';
+import '../services/connectivity_manager.dart';
 import 'package:provider/provider.dart';
 import '../providers/auth_provider.dart';
 import '../providers/preferences_provider.dart';
@@ -62,10 +62,7 @@ class _SplashScreenState extends State<SplashScreen>
     if (!mounted) return;
     final auth = context.read<AuthProvider>();
     final preferences = context.read<PreferencesProvider>();
-    final connectivityResult = await Connectivity().checkConnectivity();
-    final isOffline = !connectivityResult.any(
-      (result) => result != ConnectivityResult.none,
-    );
+    final isOffline = ConnectivityManager.isOffline;
 
     int timeout = 0;
     while ((auth.loading || preferences.loading) && timeout < 60) {
@@ -94,6 +91,15 @@ class _SplashScreenState extends State<SplashScreen>
     Navigator.pushReplacement(
       context,
       PageRouteBuilder(
+        settings: RouteSettings(
+          name: destination is HomeScreen
+              ? '/home'
+              : destination is OfflineLibraryScreen
+                  ? '/offline_library'
+                  : destination is LanguageScreen
+                      ? '/onboarding'
+                      : null,
+        ),
         pageBuilder: (_, __, ___) => destination,
         transitionsBuilder: (_, anim, __, child) {
           final offsetAnim = Tween<Offset>(

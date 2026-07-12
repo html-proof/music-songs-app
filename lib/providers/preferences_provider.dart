@@ -56,6 +56,8 @@ class PreferencesProvider extends ChangeNotifier {
   bool get lowStorageProtectionEnabled => _preferences?.lowStorageProtectionEnabled ?? true;
   bool get batterySaverEnabled => _preferences?.batterySaverEnabled ?? false;
   bool get autoCleanCacheEnabled => _preferences?.autoCleanCacheEnabled ?? true;
+  bool get offlinePlaybackEnabled => _preferences?.offlinePlaybackEnabled ?? true;
+  bool get skipUnavailableOffline => _preferences?.skipUnavailableOffline ?? true;
 
   void syncWithAuth(User? user) {
     final nextUid = user?.uid;
@@ -165,6 +167,8 @@ class PreferencesProvider extends ChangeNotifier {
     bool? lowStorageProtectionEnabled,
     bool? batterySaverEnabled,
     bool? autoCleanCacheEnabled,
+    bool? offlinePlaybackEnabled,
+    bool? skipUnavailableOffline,
   }) async {
     final user = _currentUser;
     if (user == null) return;
@@ -243,6 +247,10 @@ class PreferencesProvider extends ChangeNotifier {
           batterySaverEnabled ?? _preferences?.batterySaverEnabled ?? false,
       autoCleanCacheEnabled:
           autoCleanCacheEnabled ?? _preferences?.autoCleanCacheEnabled ?? true,
+      offlinePlaybackEnabled:
+          offlinePlaybackEnabled ?? _preferences?.offlinePlaybackEnabled ?? true,
+      skipUnavailableOffline:
+          skipUnavailableOffline ?? _preferences?.skipUnavailableOffline ?? true,
     );
 
     await PreferencesService.savePreferences(updated);
@@ -373,6 +381,26 @@ class PreferencesProvider extends ChangeNotifier {
       languages: current.languages,
       favoriteArtists: current.favoriteArtists,
       smartDownloadEnabled: value,
+    );
+  }
+
+  Future<void> setOfflinePlaybackEnabled(bool value) async {
+    final current = _preferences;
+    if (current == null) return;
+    await savePreferences(
+      languages: current.languages,
+      favoriteArtists: current.favoriteArtists,
+      offlinePlaybackEnabled: value,
+    );
+  }
+
+  Future<void> setSkipUnavailableOffline(bool value) async {
+    final current = _preferences;
+    if (current == null) return;
+    await savePreferences(
+      languages: current.languages,
+      favoriteArtists: current.favoriteArtists,
+      skipUnavailableOffline: value,
     );
   }
 

@@ -21,11 +21,13 @@ import 'services/preferences_service.dart';
 import 'services/offline_service.dart';
 import 'services/session_state_service.dart';
 import 'services/download_service.dart';
+import 'services/connectivity_manager.dart';
 import 'services/lyrics_cache.dart';
 import 'services/lyrics_manager.dart';
 import 'screens/splash_screen.dart';
 import 'theme/app_theme.dart';
 import 'providers/playlist_provider.dart';
+import 'widgets/app_reconnection_listener.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -73,6 +75,7 @@ Future<void> _initializeAppServices() async {
   unawaited(ApiService.warmUpBackend());
 
   await Future.wait([
+    ConnectivityManager.init(),
     PreferencesService.init(),
     SessionStateService.init(),
     DownloadService.getDownloadsDirPath(),
@@ -227,7 +230,11 @@ class MusicHubApp extends StatelessWidget {
         title: 'Music Hub',
         debugShowCheckedModeBanner: false,
         theme: AppTheme.darkTheme,
+        navigatorKey: NavigatorHolder.navigatorKey,
         home: const SplashScreen(),
+        builder: (context, child) {
+          return AppReconnectionListener(child: child!);
+        },
       ),
     );
   }

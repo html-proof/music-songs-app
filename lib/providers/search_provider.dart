@@ -835,7 +835,9 @@ class SearchProvider extends ChangeNotifier {
       final name = _normalize(getName(item));
       final artist = _normalize(getArtist(item));
       final language = getLanguage(item);
-      if (!_matchesPreferredLanguage(language)) continue;
+      // Artists and playlists have no language metadata — never filter them.
+      final isLanguageExempt = item is Artist || item is UserPlaylist;
+      if (!isLanguageExempt && !_matchesPreferredLanguage(language)) continue;
 
       final targetTokens = _tokenize('$name $artist');
       final fuzzyBoost = (fuzzyScores[id] ?? 0.0).clamp(0.0, 1.0);

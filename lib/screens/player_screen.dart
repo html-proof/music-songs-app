@@ -424,54 +424,128 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   Future<void> _openAlbum(BuildContext context, Song song) async {
-    final albumId = (song.sourceAlbumId ?? song.albumId ?? '').trim();
+    var albumId = (song.sourceAlbumId ?? song.albumId ?? '').trim();
 
+    // If no album ID on the song, try fetching song details from API to discover it
     if (albumId.isEmpty) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Album not found')));
-      return;
+      try {
+        final songPayload = await ApiService.getSong(song.id);
+        final songData = songPayload['data'] ?? songPayload;
+
+        Map<String, dynamic>? songMap;
+        if (songData is Map) {
+          if (songData['songs'] is List && (songData['songs'] as List).isNotEmpty) {
+            songMap = Map<String, dynamic>.from((songData['songs'] as List).first as Map);
+          } else if (songData['results'] is List && (songData['results'] as List).isNotEmpty) {
+            songMap = Map<String, dynamic>.from((songData['results'] as List).first as Map);
+          } else {
+            songMap = Map<String, dynamic>.from(songData);
+          }
+        } else if (songData is List && songData.isNotEmpty && songData.first is Map) {
+          songMap = Map<String, dynamic>.from(songData.first as Map);
+        }
+
+        if (songMap != null) {
+          albumId = (songMap['sourceAlbumId'] ??
+                  songMap['source_album_id'] ??
+                  songMap['albumId'] ??
+                  songMap['album_id'] ??
+                  '')
+              .toString()
+              .trim();
+
+          // Try nested album object
+          if (albumId.isEmpty && songMap['album'] is Map) {
+            final albumObj = songMap['album'] as Map;
+            albumId = (albumObj['id'] ?? albumObj['albumId'] ?? '').toString().trim();
+          }
+        }
+      } catch (_) {}
     }
 
-    try {
-      final payload = await ApiService.getAlbums(id: albumId);
-      final data = payload['data'] ?? payload;
+    // If we found an album ID, fetch and navigate
+    if (albumId.isNotEmpty) {
+      try {
+        final payload = await ApiService.getAlbums(id: albumId);
+        final data = payload['data'] ?? payload;
 
-      Map<String, dynamic>? albumMap;
-      if (data is Map) {
-        albumMap = Map<String, dynamic>.from(data);
-      } else if (data is List && data.isNotEmpty && data.first is Map) {
-        albumMap = Map<String, dynamic>.from(data.first);
-      } else if (data is Map &&
-          data['results'] != null &&
-          data['results'] is List &&
-          (data['results'] as List).isNotEmpty) {
-        albumMap = Map<String, dynamic>.from((data['results'] as List).first);
-      }
+        Map<String, dynamic>? albumMap;
+        if (data is Map) {
+          final map = Map<String, dynamic>.from(data);
+          if (map['results'] is List && (map['results'] as List).isNotEmpty) {
+            albumMap = Map<String, dynamic>.from((map['results'] as List).first);
+          } else {
+            albumMap = map;
+          }
+        } else if (data is List && data.isNotEmpty && data.first is Map) {
+          albumMap = Map<String, dynamic>.from(data.first);
+        }
 
-      if (albumMap != null) {
-        final parsed = Album.fromJson(albumMap);
-        final album = parsed.id.trim().isNotEmpty
-            ? parsed
-            : Album(
-                id: albumId,
-                name: parsed.name,
-                artist: parsed.artist,
-                imageUrl: parsed.imageUrl,
-                language: parsed.language,
-                songCount: parsed.songCount,
-                year: parsed.year,
-              );
+        if (albumMap != null) {
+          final parsed = Album.fromJson(albumMap);
+          final album = parsed.id.trim().isNotEmpty
+              ? parsed
+              : Album(
+                  id: albumId,
+                  name: parsed.name,
+                  artist: parsed.artist,
+                  imageUrl: parsed.imageUrl,
+                  language: parsed.language,
+                  songCount: parsed.songCount,
+                  year: parsed.year,
+                );
 
-        if (!mounted) return;
-        Navigator.push(
-          context,
-          MaterialPageRoute(builder: (_) => AlbumDetailScreen(album: album)),
-        );
-        return;
-      }
-    } catch (_) {}
+          if (!mounted) return;
+          Navigator.push(
+            context,
+            MaterialPageRoute(builder: (_) => AlbumDetailScreen(album: album)),
+          );
+          return;
+        }
+      } catch (_) {}
+    }
+
+    // Last resort: search by album name
+    final albumName = (song.sourceAlbumName ?? song.album ?? '').trim();
+    if (albumName.isNotEmpty) {
+      try {
+        final payload = await ApiService.getAlbums(query: albumName);
+        final data = payload['data'] ?? payload;
+
+        List<dynamic>? results;
+        if (data is Map) {
+          results = (data['results'] ?? data['albums']) as List?;
+        } else if (data is List) {
+          results = data;
+        }
+
+        if (results != null && results.isNotEmpty) {
+          // Try to find a matching album by name
+          Map<String, dynamic>? bestMatch;
+          final lowerAlbumName = albumName.toLowerCase();
+          for (final item in results) {
+            if (item is! Map) continue;
+            final map = Map<String, dynamic>.from(item);
+            final name = (map['name'] ?? map['title'] ?? '').toString().trim().toLowerCase();
+            if (name == lowerAlbumName) {
+              bestMatch = map;
+              break;
+            }
+            bestMatch ??= map;
+          }
+
+          if (bestMatch != null) {
+            final parsed = Album.fromJson(bestMatch);
+            if (!mounted) return;
+            Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => AlbumDetailScreen(album: parsed)),
+            );
+            return;
+          }
+        }
+      } catch (_) {}
+    }
 
     if (!mounted) return;
     ScaffoldMessenger.of(

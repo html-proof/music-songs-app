@@ -439,10 +439,10 @@ class LyricsManager extends ChangeNotifier {
   // ─────────────────────────────────────────────────────────
 
   /// Lyrics from most LRC sources are timestamped slightly ahead of the
-  /// actual vocal onset. This negative offset delays the highlight so the
-  /// lyric appears exactly when the singer begins — matching Spotify / Apple
-  /// Music behaviour. Positive = lyrics appear later (delays highlight).
-  static const int _lyricsSyncOffsetMs = 500;
+  /// actual vocal onset. This offset delays the highlight so the lyric
+  /// appears exactly when the singer begins — matching Spotify / Apple Music
+  /// behaviour. Higher value = lyrics appear later (delays highlight).
+  static const int _lyricsSyncOffsetMs = 900;
 
   static int activeIndexForPosition(
     List<TimedLyricLine> lines,
@@ -472,8 +472,8 @@ class LyricsManager extends ChangeNotifier {
     final targetTime = lines[targetIndex].time;
     final drift = (millis - targetTime.inMilliseconds).abs();
 
-    // If drift is less than 50ms, keep the current line to avoid jitter / early transitions
-    if (drift < 50) {
+    // If drift is less than 150ms, keep the current line to avoid jitter / early transitions
+    if (drift < 150) {
       return cachedIndex;
     }
 

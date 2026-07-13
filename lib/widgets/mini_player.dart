@@ -908,24 +908,13 @@ class _GlassPlayPauseButtonState extends State<_GlassPlayPauseButton> {
                       ),
                     ],
             ),
-            child: widget.isLoading
-                ? const Center(
-                    child: SizedBox(
-                      width: 22,
-                      height: 22,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2.5,
-                        color: Colors.white,
-                      ),
-                    ),
-                  )
-                : Icon(
-                    widget.isPlaying
-                        ? Icons.pause_rounded
-                        : Icons.play_arrow_rounded,
-                    color: Colors.white,
-                    size: 28,
-                  ),
+            child: Icon(
+              widget.isPlaying
+                  ? Icons.pause_rounded
+                  : Icons.play_arrow_rounded,
+              color: Colors.white,
+              size: 28,
+            ),
           ),
         ),
       ),

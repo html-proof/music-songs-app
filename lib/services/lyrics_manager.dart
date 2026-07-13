@@ -456,7 +456,20 @@ class LyricsManager extends ChangeNotifier {
         right = mid - 1;
       }
     }
-    return right.clamp(0, lines.length - 1);
+    final targetIndex = right.clamp(0, lines.length - 1);
+
+    if (targetIndex == cachedIndex) return cachedIndex;
+    if (cachedIndex < 0 || cachedIndex >= lines.length) return targetIndex;
+
+    final targetTime = lines[targetIndex].time;
+    final drift = (millis - targetTime.inMilliseconds).abs();
+
+    // If drift is less than 50ms, keep the current line to avoid jitter / early transitions
+    if (drift < 50) {
+      return cachedIndex;
+    }
+
+    return targetIndex;
   }
 
   // ─────────────────────────────────────────────────────────

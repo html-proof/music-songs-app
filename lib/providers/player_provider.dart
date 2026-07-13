@@ -5,8 +5,10 @@ import '../services/connectivity_manager.dart';
 import 'package:just_audio/just_audio.dart';
 import '../services/listening_safety_service.dart';
 import '../models/song.dart';
+import '../models/playback_state.dart';
 import '../services/player_service.dart';
 import '../services/stability_logger.dart';
+import '../services/playback_coordinator.dart';
 
 class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
   Song? get currentSong => PlayerService.currentSong;
@@ -15,17 +17,36 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
   bool get canSkipPrevious => !PlayerService.isLoadingNewSong && !isSwitchingSource && PlayerService.canSkipPrevious;
   bool get canSkipNext => !PlayerService.isLoadingNewSong && !isSwitchingSource && PlayerService.canSkipNext;
 
-  /// The song the UI should display. During loading, this is the song the user
-  /// just tapped (resolvingSong). Once loaded, it falls back to currentSong.
-  /// This ensures artwork, title, and artist update instantly on tap.
-  Song? get activeSong => _resolvingSong ?? currentSong;
+  Song? get activeSong {
+    final identity = PlaybackCoordinator.currentIdentity;
+    if (identity != null) {
+      return Song(
+        id: identity.songId,
+        name: identity.title,
+        artist: identity.artist,
+        album: identity.album,
+        duration: identity.durationSeconds,
+        isExplicit: identity.isExplicit,
+        imageUrl: identity.imageUrl,
+      );
+    }
+    return PlayerService.currentSong;
+  }
 
   /// True while PlayerService is resolving a new song's stream URL.
-  bool get isLoadingNewSong => _resolvingSong != null;
+  bool get isLoadingNewSong =>
+      playbackState == PlaybackState.resolvingSong ||
+      playbackState == PlaybackState.verifyingIdentity ||
+      playbackState == PlaybackState.loadingStream ||
+      playbackState == PlaybackState.preparingDecoder;
 
   bool _isPlaying = false;
   Duration _position = Duration.zero;
   Duration _duration = Duration.zero;
+  Duration _bufferedPosition = Duration.zero;
+
+  Duration get bufferedPosition => _bufferedPosition;
+  PlaybackState get playbackState => PlayerService.playbackState;
   bool _isOffline = false;
   bool _isBuffering = false;
   bool _isQualitySwitching = false;
@@ -257,6 +278,20 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
       notifyListeners();
     }));
 
+    _subscriptions.add(PlaybackCoordinator.identityStream.listen((_) {
+      notifyListeners();
+    }));
+
+    _subscriptions.add(PlayerService.playbackStateStream.listen((_) {
+      notifyListeners();
+    }));
+
+    _subscriptions.add(PlayerService.player.bufferedPositionStream.listen((buf) {
+      if (_isQualitySwitching) return;
+      _bufferedPosition = buf;
+      notifyListeners();
+    }));
+
     _subscriptions.add(PlayerService.shuffleModeStream.listen((enabled) {
       _shuffleModeEnabled = enabled;
       notifyListeners();
@@ -321,6 +356,7 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
   void _syncRuntimeSnapshot({bool notify = true}) {
     _isPlaying = PlayerService.player.playing;
     _position = PlayerService.player.position;
+    _bufferedPosition = PlayerService.player.bufferedPosition;
     final dur = PlayerService.player.duration;
     if (dur != null && dur > Duration.zero) {
       _duration = dur;
@@ -346,6 +382,7 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
 
   Future<void> play(Song song, {List<Song>? playlist, int? index}) async {
     _position = Duration.zero;
+    _bufferedPosition = Duration.zero;
     _ignorePositionUntilZero = true;
     // Eagerly set duration from song metadata so the progress bar renders
     // immediately with the correct end time (e.g. "0:00 ── 3:45").

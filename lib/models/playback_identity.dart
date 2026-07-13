@@ -10,6 +10,7 @@ class PlaybackIdentity {
   final String? language;
   final bool isExplicit;
   final int sessionId;
+  final String? imageUrl;
 
   PlaybackIdentity({
     required this.songId,
@@ -21,6 +22,7 @@ class PlaybackIdentity {
     this.language,
     required this.isExplicit,
     required this.sessionId,
+    this.imageUrl,
   });
 
   factory PlaybackIdentity.fromSong(Song song, int sessionId) {
@@ -34,6 +36,7 @@ class PlaybackIdentity {
       language: song.language,
       isExplicit: song.isExplicit,
       sessionId: sessionId,
+      imageUrl: song.imageUrl,
     );
   }
 }

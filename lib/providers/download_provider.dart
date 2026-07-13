@@ -11,6 +11,7 @@ import '../services/offline_service.dart';
 class DownloadProvider extends ChangeNotifier {
   final Map<String, double> _progress = {};
   final Set<String> _downloadedIds = {};
+  final Map<String, String> _downloadStatuses = {};
   List<Song> _downloadedSongs = [];
   bool _smartDownloadEnabled = OfflineService.smartAutoCacheEnabled;
   String? _activeUid;
@@ -18,14 +19,22 @@ class DownloadProvider extends ChangeNotifier {
   PlaylistDownloadProgress? _playlistProgress;
   StreamSubscription<PlaylistDownloadProgress>? _playlistProgressSub;
   StreamSubscription<String>? _downloadCompletedSub;
+  StreamSubscription<Map<String, dynamic>>? _downloadStatusSub;
 
   Map<String, double> get progress => _progress;
   Set<String> get downloadedIds => _downloadedIds;
+  Map<String, String> get downloadStatuses => _downloadStatuses;
   List<Song> get downloadedSongs => _downloadedSongs;
   bool get smartDownloadEnabled => _smartDownloadEnabled;
   PlaylistDownloadProgress? get playlistProgress => _playlistProgress;
 
+  String getDownloadStatus(String songId) {
+    if (isDownloaded(songId)) return 'completed';
+    return _downloadStatuses[songId] ?? DownloadService.getDownloadStatus(songId);
+  }
+
   DownloadProvider() {
+    DownloadService.init();
     _playlistProgressSub = DownloadService.playlistProgressStream.listen((prog) {
       _playlistProgress = prog;
       if (prog.isCompleted) {
@@ -35,6 +44,26 @@ class DownloadProvider extends ChangeNotifier {
     });
     _downloadCompletedSub = DownloadService.downloadCompletedStream.listen((_) {
       _loadDownloaded();
+    });
+    _downloadStatusSub = DownloadService.downloadStatusStream.listen((event) {
+      final songId = event['songId'] as String;
+      final status = event['status'] as String;
+      final progressVal = event['progress'] as double;
+
+      _progress[songId] = progressVal;
+      _downloadStatuses[songId] = status;
+
+      if (status == 'completed') {
+        _downloadedIds.add(songId);
+        _progress.remove(songId);
+        _downloadStatuses.remove(songId);
+        _loadDownloaded();
+      } else if (status == 'failedPermanently' || status == 'cancelled') {
+        _progress.remove(songId);
+        _downloadStatuses.remove(songId);
+        _loadDownloaded();
+      }
+      notifyListeners();
     });
   }
 
@@ -232,7 +261,23 @@ class DownloadProvider extends ChangeNotifier {
   void dispose() {
     _playlistProgressSub?.cancel();
     _downloadCompletedSub?.cancel();
+    _downloadStatusSub?.cancel();
     super.dispose();
+  }
+
+  Future<void> pauseDownload(String songId) async {
+    await DownloadService.pauseDownload(songId);
+    notifyListeners();
+  }
+
+  Future<void> resumeDownload(String songId) async {
+    await DownloadService.resumeDownload(songId);
+    notifyListeners();
+  }
+
+  Future<void> cancelDownload(String songId) async {
+    await DownloadService.cancelDownload(songId);
+    notifyListeners();
   }
 
   Future<void> downloadPlaylist(

@@ -553,27 +553,85 @@ class SearchProvider extends ChangeNotifier {
       }
     }
 
-    // 1. First, try local search for instant feedback
+    // 1. First, try local search for instant feedback (emitted under 50ms)
     final localSongs = _searchLocalSongs(normalizedQuery);
     final localAlbums = _searchLocalAlbums(normalizedQuery);
     final localArtists = _searchLocalArtists(normalizedQuery);
 
-    if (localSongs.isNotEmpty || localAlbums.isNotEmpty || localArtists.isNotEmpty) {
-      _songs = localSongs;
-      _albums = localAlbums;
-      _artists = localArtists;
-      _loading = false;
-      notifyListeners();
-      // We still proceed to network search to get fresh/more results
-    }
+    final localPlaylists = await PlaylistService.getPlaylists();
+    final matchingLocalPlaylists = localPlaylists.where((p) {
+      final nameMatch = p.name.toLowerCase().contains(normalizedQuery);
+      final descMatch = p.description?.toLowerCase().contains(normalizedQuery) ?? false;
+      return nameMatch || descMatch;
+    }).toList();
+
+    _songs = _rankAndMerge<Song>(
+      local: localSongs,
+      network: const <Song>[],
+      query: normalizedQuery,
+      getName: (s) => s.name,
+      getArtist: (s) => s.artist ?? '',
+      getLanguage: (s) => s.language ?? '',
+      getQualityScore: (s) => _computeSongQuality(s),
+      getId: (s) => s.id,
+    );
+    _albums = _rankAndMerge<Album>(
+      local: localAlbums,
+      network: const <Album>[],
+      query: normalizedQuery,
+      getName: (a) => a.name,
+      getArtist: (a) => a.artist ?? '',
+      getLanguage: (a) => a.language ?? '',
+      getQualityScore: (a) => _computeAlbumQuality(a),
+      getId: (a) => a.id,
+    );
+    _artists = _rankAndMerge<Artist>(
+      local: localArtists,
+      network: const <Artist>[],
+      query: normalizedQuery,
+      getName: (art) => art.name,
+      getArtist: (art) => '',
+      getLanguage: (art) => '',
+      getQualityScore: (art) => art.isVerified ? 10.0 : 1.0,
+      getId: (art) => art.id,
+      getDedupeKey: (art) => art.name.toLowerCase().trim(),
+      merge: _mergeArtists,
+    );
+    _playlists = _rankAndMerge<UserPlaylist>(
+      local: matchingLocalPlaylists,
+      network: const <UserPlaylist>[],
+      query: normalizedQuery,
+      getName: (p) => p.name,
+      getArtist: (p) => p.description ?? '',
+      getLanguage: (p) => '',
+      getQualityScore: (p) => p.songs.length.toDouble(),
+      getId: (p) => p.id,
+    );
+    _searchRecommendations = _buildRecommendations(normalizedQuery);
+    notifyListeners();
 
     try {
-      // 2. Fetch from Network
-      var data = await ApiService.globalSearch(
+      // 2. Fire network searches in parallel
+      final primarySearchFuture = ApiService.globalSearch(
         normalizedQuery,
         preferredLanguages: _preferredLanguages,
         limit: _maxSearchResults,
       );
+
+      final pageTwoSongsFuture = ApiService.searchSongs(
+        normalizedQuery,
+        page: 2,
+        preferredLanguages: _preferredLanguages,
+        limit: _maxSearchResults,
+      ).catchError((_) => <dynamic>[]);
+
+      final Future<Map<String, dynamic>> supplementalAlbumsFuture = ApiService.getAlbums(
+        query: normalizedQuery,
+        preferredLanguages: _preferredLanguages,
+      ).catchError((_) => <String, dynamic>{});
+
+      // Await primary search first to deliver progressive results
+      final data = await primarySearchFuture;
       if (requestId != _activeRequestId) return;
 
       var networkSongs = _sanitizeSongs(
@@ -591,7 +649,7 @@ class SearchProvider extends ChangeNotifier {
       if (networkSongs.isEmpty) {
         final relaxedQuery = _buildRelaxedQuery(normalizedQuery);
         if (relaxedQuery.isNotEmpty && relaxedQuery != normalizedQuery) {
-          data = await ApiService.globalSearch(
+          final relaxedData = await ApiService.globalSearch(
             relaxedQuery,
             preferredLanguages: _preferredLanguages,
             limit: _maxSearchResults,
@@ -599,84 +657,22 @@ class SearchProvider extends ChangeNotifier {
           if (requestId != _activeRequestId) return;
 
           final relaxedSongs = _sanitizeSongs(
-            _parseList<Song>(data['songs'] ?? const [], Song.fromJson),
+            _parseList<Song>(relaxedData['songs'] ?? const [], Song.fromJson),
           );
           if (relaxedSongs.isNotEmpty) {
             networkSongs = relaxedSongs;
             networkAlbums = await _sanitizeAlbums(
-              _parseList<Album>(data['albums'] ?? const [], Album.fromJson),
+              _parseList<Album>(relaxedData['albums'] ?? const [], Album.fromJson),
             );
             networkArtists = _parseList<Artist>(
-              data['artists'] ?? const [],
+              relaxedData['artists'] ?? const [],
               Artist.fromJson,
             );
           }
         }
       }
 
-      if (networkSongs.length < _minSongsPerSearch) {
-        try {
-          final pageTwoSongsRaw = await ApiService.searchSongs(
-            normalizedQuery,
-            page: 2,
-            preferredLanguages: _preferredLanguages,
-            limit: _maxSearchResults,
-          );
-          final pageTwoSongs = _parseList<Song>(pageTwoSongsRaw, Song.fromJson);
-          networkSongs = _sanitizeSongs(
-            _mergeUniqueItems<Song>(
-              existing: networkSongs,
-              incoming: pageTwoSongs,
-              getId: (song) => song.id,
-            ),
-          );
-        } catch (e) {
-          debugPrint('Supplemental song fetch failed: $e');
-        }
-      }
-
-      if (networkAlbums.length < _minAlbumsPerSearch) {
-        try {
-          final albumPayload = await ApiService.getAlbums(
-            query: normalizedQuery,
-            preferredLanguages: _preferredLanguages,
-          );
-          final albumRaw = _extractAlbumItems(albumPayload);
-          final supplementalAlbums = _parseList<Album>(
-            albumRaw,
-            Album.fromJson,
-          );
-          networkAlbums = await _sanitizeAlbums(
-            _mergeUniqueItems<Album>(
-              existing: networkAlbums,
-              incoming: supplementalAlbums,
-              getId: (album) => album.id,
-            ),
-          );
-        } catch (e) {
-          debugPrint('Supplemental album fetch failed: $e');
-        }
-      }
-
-      if (networkAlbums.length < _minAlbumsPerSearch &&
-          networkSongs.isNotEmpty) {
-        final derivedAlbums = _deriveAlbumsFromSongs(networkSongs);
-        networkAlbums = await _sanitizeAlbums(
-          _mergeUniqueItems<Album>(
-            existing: networkAlbums,
-            incoming: derivedAlbums,
-            getId: (album) => album.id,
-          ),
-        );
-      }
-
-      _addToLocalIndex(
-        songs: networkSongs,
-        albums: networkAlbums,
-        artists: networkArtists,
-      );
-
-      // 3. Smart Ranking & Merging
+      // Show progressive results (Primary API)
       _songs = _rankAndMerge<Song>(
         local: localSongs,
         network: _sanitizeSongs(networkSongs),
@@ -714,27 +710,84 @@ class SearchProvider extends ChangeNotifier {
         merge: _mergeArtists,
       );
 
-      final localPlaylists = await PlaylistService.getPlaylists();
-      final matchingLocalPlaylists = localPlaylists.where((p) {
-        final nameMatch = p.name.toLowerCase().contains(normalizedQuery);
-        final descMatch = p.description?.toLowerCase().contains(normalizedQuery) ?? false;
-        return nameMatch || descMatch;
-      }).toList();
+      _loading = false;
+      notifyListeners();
 
-      _playlists = _rankAndMerge<UserPlaylist>(
-        local: matchingLocalPlaylists,
-        network: const <UserPlaylist>[],
-        query: normalizedQuery,
-        getName: (p) => p.name,
-        getArtist: (p) => p.description ?? '',
-        getLanguage: (p) => '',
-        getQualityScore: (p) => p.songs.length.toDouble(),
-        getId: (p) => p.id,
+      // Await remaining APIs in parallel for supplementary results
+      final results = await Future.wait([pageTwoSongsFuture, supplementalAlbumsFuture]);
+      if (requestId != _activeRequestId) return;
+
+      final pageTwoSongsRaw = results[0] as List<dynamic>;
+      final Map<String, dynamic> albumPayload = results[1] as Map<String, dynamic>;
+
+      if (pageTwoSongsRaw.isNotEmpty) {
+        final pageTwoSongs = _parseList<Song>(pageTwoSongsRaw, Song.fromJson);
+        networkSongs = _sanitizeSongs(
+          _mergeUniqueItems<Song>(
+            existing: networkSongs,
+            incoming: pageTwoSongs,
+            getId: (song) => song.id,
+          ),
+        );
+      }
+
+      if (albumPayload.isNotEmpty) {
+        final albumRaw = _extractAlbumItems(albumPayload);
+        final supplementalAlbums = _parseList<Album>(
+          albumRaw,
+          Album.fromJson,
+        );
+        networkAlbums = await _sanitizeAlbums(
+          _mergeUniqueItems<Album>(
+            existing: networkAlbums,
+            incoming: supplementalAlbums,
+            getId: (album) => album.id,
+          ),
+        );
+      }
+
+      if (networkAlbums.length < _minAlbumsPerSearch && networkSongs.isNotEmpty) {
+        final derivedAlbums = _deriveAlbumsFromSongs(networkSongs);
+        networkAlbums = await _sanitizeAlbums(
+          _mergeUniqueItems<Album>(
+            existing: networkAlbums,
+            incoming: derivedAlbums,
+            getId: (album) => album.id,
+          ),
+        );
+      }
+
+      _addToLocalIndex(
+        songs: networkSongs,
+        albums: networkAlbums,
+        artists: networkArtists,
       );
 
-      _searchRecommendations = _buildRecommendations(normalizedQuery);
+      // Final Progressive Merge & Rank
+      _songs = _rankAndMerge<Song>(
+        local: localSongs,
+        network: _sanitizeSongs(networkSongs),
+        query: normalizedQuery,
+        getName: (s) => s.name,
+        getArtist: (s) => s.artist ?? '',
+        getLanguage: (s) => s.language ?? '',
+        getQualityScore: (s) => _computeSongQuality(s),
+        getId: (s) => s.id,
+        minCount: _minSongsPerSearch,
+      );
 
-      if (_songs.length < 10) _hasMore = false;
+      _albums = _rankAndMerge<Album>(
+        local: localAlbums,
+        network: await _sanitizeAlbums(networkAlbums),
+        query: normalizedQuery,
+        getName: (a) => a.name,
+        getArtist: (a) => a.artist ?? '',
+        getLanguage: (a) => a.language ?? '',
+        getQualityScore: (a) => _computeAlbumQuality(a),
+        getId: (a) => a.id,
+        minCount: _minAlbumsPerSearch,
+      );
+
       _writeQueryCache(
         cacheKey,
         songs: _songs,

@@ -15,6 +15,7 @@ import '../services/lyrics_manager.dart';
 import '../services/player_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/offline_artwork.dart';
+import '../widgets/spotify_progress_bar.dart';
 
 class PlayerScreen extends StatefulWidget {
   const PlayerScreen({super.key});
@@ -693,66 +694,21 @@ class _PlayerScreenState extends State<PlayerScreen> {
                               ? Duration(milliseconds: (scrubValue * 1000).round())
                               : currentPosition;
 
-                          return SliderTheme(
-                            data: SliderThemeData(
-                              activeTrackColor: AppTheme.accentPurple,
-                              inactiveTrackColor: AppTheme.textMuted
-                                  .withValues(alpha: 0.3),
-                              thumbColor: AppTheme.accentPurple,
-                              thumbShape: const RoundSliderThumbShape(
-                                enabledThumbRadius: 6,
-                              ),
-                              trackHeight: 3,
-                              overlayShape:
-                                  const RoundSliderOverlayShape(
-                                overlayRadius: 14,
-                              ),
-                            ),
-                            child: Slider(
-                              value:
-                                  scrubValue ??
-                                  (player.duration.inSeconds > 0
-                                      ? visualPosition.inSeconds
-                                            .toDouble()
-                                            .clamp(
-                                              0,
-                                              player
-                                                  .duration
-                                                  .inSeconds
-                                                  .toDouble(),
-                                            )
-                                      : 0),
-                              max: player.duration.inSeconds > 0
-                                  ? player.duration.inSeconds
-                                        .toDouble()
-                                  : 1,
-                              onChangeStart: isLoadingNew
-                                  ? null
-                                  : (val) {
-                                      _scrubNotifier.value = val;
-                                      player.setSeeking(true);
-                                    },
-                              onChanged: (isLoadingNew ||
-                                      player.duration ==
-                                          Duration.zero)
-                                  ? null
-                                  : (val) {
-                                      _scrubNotifier.value = val;
-                                    },
-                              onChangeEnd: isLoadingNew
-                                  ? null
-                                  : (val) async {
-                                      await player.seek(
-                                        Duration(
-                                          milliseconds: (val * 1000)
-                                              .round(),
-                                        ),
-                                        immediate: true,
-                                      );
-                                      _scrubNotifier.value = null;
-                                      player.setSeeking(false);
-                                    },
-                            ),
+                          return SpotifyProgressBar(
+                            position: visualPosition,
+                            duration: player.duration,
+                            bufferedPosition: player.bufferedPosition,
+                            isLoading: player.isLoadingNewSong,
+                            isBuffering: player.isBuffering,
+                            onChanged: (dragPos) {
+                              _scrubNotifier.value = dragPos.inMilliseconds / 1000.0;
+                              player.setSeeking(true);
+                            },
+                            onChangeEnd: (seekPos) async {
+                              await player.seek(seekPos, immediate: true);
+                              _scrubNotifier.value = null;
+                              player.setSeeking(false);
+                            },
                           );
                         },
                       );
@@ -846,21 +802,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
                   ),
                   child: IconButton(
                     iconSize: 36,
-                    icon: (player.isBuffering || isLoadingNew)
-                        ? const SizedBox(
-                            width: 24,
-                            height: 24,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 3,
-                              color: Colors.white,
-                            ),
-                          )
-                        : Icon(
-                            player.isPlaying
-                                ? Icons.pause_rounded
-                                : Icons.play_arrow_rounded,
-                            color: Colors.white,
-                          ),
+                    icon: Icon(
+                      player.isPlaying
+                          ? Icons.pause_rounded
+                          : Icons.play_arrow_rounded,
+                      color: Colors.white,
+                    ),
                     onPressed: () => player.togglePlayPause(),
                   ),
                 ),
@@ -1343,53 +1290,15 @@ class _PlayerScreenState extends State<PlayerScreen> {
                       final isActive = index == activeIndex;
                       final isPast = index < activeIndex;
                       final distance = (index - activeIndex).abs();
-                      final opacity = isActive
-                          ? 1.0
-                          : isPast
-                          ? 0.38
-                          : distance == 1
-                          ? 0.88
-                          : distance == 2
-                          ? 0.74
-                          : 0.58;
 
-                      return GestureDetector(
+                      return LyricLineWidget(
+                        text: line.text,
+                        isActive: isActive,
+                        isPast: isPast,
+                        distance: distance,
                         onTap: () {
                           context.read<PlayerProvider>().seek(line.time);
                         },
-                        behavior: HitTestBehavior.opaque,
-                        child: AnimatedOpacity(
-                          duration: const Duration(milliseconds: 240),
-                          curve: Curves.easeOut,
-                          opacity: opacity,
-                          child: Center(
-                            child: Padding(
-                              padding: const EdgeInsets.symmetric(horizontal: 24),
-                              child: AnimatedDefaultTextStyle(
-                                duration: const Duration(milliseconds: 240),
-                                curve: Curves.easeOut,
-                                style: TextStyle(
-                                  color: isActive
-                                      ? AppTheme.textPrimary
-                                      : isPast
-                                      ? AppTheme.textMuted.withValues(alpha: 0.95)
-                                      : Colors.white.withValues(alpha: 0.82),
-                                  fontWeight: isActive
-                                      ? FontWeight.w800
-                                      : FontWeight.w500,
-                                  fontSize: isActive ? 19 : 15,
-                                  height: 1.2,
-                                ),
-                                textAlign: TextAlign.center,
-                                child: Text(
-                                  line.text,
-                                  maxLines: 2,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
                       );
                     },
                   );
@@ -1622,5 +1531,79 @@ class _OutputDeviceIcon extends StatelessWidget {
       case AudioOutputRouteType.unknown:
         return Icons.graphic_eq_rounded;
     }
+  }
+}
+
+class LyricLineWidget extends StatelessWidget {
+  final String text;
+  final bool isActive;
+  final bool isPast;
+  final int distance;
+  final VoidCallback onTap;
+
+  const LyricLineWidget({
+    super.key,
+    required this.text,
+    required this.isActive,
+    required this.isPast,
+    required this.distance,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final double targetOpacity = isActive
+        ? 1.0
+        : isPast
+            ? 0.38
+            : distance == 1
+                ? 0.88
+                : distance == 2
+                    ? 0.74
+                    : 0.58;
+
+    final double targetScale = isActive ? 1.12 : 1.0;
+    final Offset targetOffset = isActive ? const Offset(0, -0.05) : Offset.zero;
+
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: AnimatedSlide(
+        offset: targetOffset,
+        duration: const Duration(milliseconds: 150),
+        curve: Curves.easeOut,
+        child: AnimatedOpacity(
+          duration: const Duration(milliseconds: 150),
+          curve: Curves.easeOut,
+          opacity: targetOpacity,
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 24),
+              child: AnimatedScale(
+                scale: targetScale,
+                duration: const Duration(milliseconds: 150),
+                curve: Curves.easeOut,
+                child: Text(
+                  text,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: isActive
+                        ? AppTheme.textPrimary
+                        : isPast
+                            ? AppTheme.textMuted.withValues(alpha: 0.95)
+                            : Colors.white.withValues(alpha: 0.82),
+                    fontWeight: isActive ? FontWeight.w800 : FontWeight.w500,
+                    fontSize: isActive ? 18 : 15,
+                    height: 1.2,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }

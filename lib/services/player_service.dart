@@ -16,7 +16,7 @@ import 'package:just_audio_background/just_audio_background.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/song.dart';
-import '../models/playback_identity.dart';
+import '../models/playback_state.dart';
 import '../models/user_preferences.dart';
 import '../utils/content_filter.dart';
 import '../utils/language_utils.dart';
@@ -29,6 +29,7 @@ import 'preferences_service.dart';
 import 'session_state_service.dart';
 import 'verification_engine.dart';
 import 'background_learning_service.dart';
+import 'playback_coordinator.dart';
 
 enum PlaybackResumeResult {
   resumed,
@@ -198,11 +199,22 @@ class PlayerService {
 
   static final Map<String, _StreamUrlCacheEntry> _resolvedUrlCache = {};
   static final List<Song> _backupPlayableSongs = [];
-  static int _activePlaybackSessionId = 0;
-  static PlaybackIdentity? _activePlaybackIdentity;
   static http.Client? _activeHttpClient;
   static DateTime? _songPlayStartedAt;
   static String? _songPlayStartedId;
+
+  static PlaybackState _playbackState = PlaybackState.idle;
+  static final StreamController<PlaybackState> _playbackStateController =
+      StreamController<PlaybackState>.broadcast();
+  static Stream<PlaybackState> get playbackStateStream => _playbackStateController.stream;
+  static PlaybackState get playbackState => _playbackState;
+
+  static void _updatePlaybackState(PlaybackState state) {
+    if (_playbackState == state) return;
+    _playbackState = state;
+    _playbackStateController.add(state);
+    StabilityLogger.info('PlaybackState', 'Transitioned to: $state');
+  }
 
   static final StreamController<Song?> _resolvingSongController =
       StreamController<Song?>.broadcast();
@@ -911,8 +923,8 @@ class PlayerService {
       _positionStreamController.add(Duration.zero);
       _durationStreamController.add(nextSong.duration != null ? Duration(seconds: nextSong.duration!) : Duration.zero);
 
-      final newSessionId = ++_activePlaybackSessionId;
-      _activePlaybackIdentity = PlaybackIdentity.fromSong(nextSong, newSessionId);
+      PlaybackCoordinator.newRequest(nextSong);
+      final newSessionId = PlaybackCoordinator.currentIdentity!.sessionId;
       _activeLogger = _PlaybackSessionLogger(newSessionId, nextSong.name);
 
       _currentSong = nextSong;
@@ -932,6 +944,31 @@ class PlayerService {
       if (state.processingState == ProcessingState.completed) {
         StabilityLogger.info('Playback', 'Playback completed for song: ${_currentSong?.name}');
       }
+
+      if (_playbackState != PlaybackState.seeking) {
+        switch (state.processingState) {
+          case ProcessingState.idle:
+            _updatePlaybackState(PlaybackState.idle);
+            break;
+          case ProcessingState.loading:
+            _updatePlaybackState(PlaybackState.preparingDecoder);
+            break;
+          case ProcessingState.buffering:
+            _updatePlaybackState(PlaybackState.buffering);
+            break;
+          case ProcessingState.ready:
+            if (state.playing) {
+              _updatePlaybackState(PlaybackState.playing);
+            } else {
+              _updatePlaybackState(PlaybackState.paused);
+            }
+            break;
+          case ProcessingState.completed:
+            _updatePlaybackState(PlaybackState.idle);
+            break;
+        }
+      }
+
       final isPlaying = state.playing;
       if (isPlaying) {
         _userPausedOrStoppedPlayback = false;
@@ -1540,11 +1577,37 @@ class PlayerService {
         _pausedByNetworkLoss = false;
         _userPausedOrStoppedPlayback = false;
 
+        // ── Stale Recovery Guard ──
+        // If the user tapped a new song while offline, a new request is
+        // already resolving. Resuming the OLD song would cause the race
+        // condition: old request finishes → plays wrong song.
+        // Only resume the paused song if no new request is in flight.
+        if (_resolvingSong != null || _isLoadingNewSong) {
+          StabilityLogger.info('Playback',
+              'Network restored but a new playback request is active. '
+              'Skipping stale recovery for previous song.');
+          return;
+        }
+
         final current = _currentSong;
         if (current != null && !_isSongUsingLocalSource(current)) {
           final lastPosition = _player.position;
-          final resolved = await _resolveSongForPlayback(current, forceRefresh: true);
+          final String? currentRequestId = PlaybackCoordinator.currentRequestId;
+          final resolved = await _resolveSongForPlayback(current, forceRefresh: true, requestId: currentRequestId);
+
+          // Re-check after the async gap: another tap may have occurred
+          // while we were resolving the old song's stream.
+          if (_resolvingSong != null || _isLoadingNewSong) {
+            StabilityLogger.info('Playback',
+                'New playback request appeared during recovery resolve. '
+                'Aborting stale recovery.');
+            return;
+          }
+
           if (resolved != null) {
+            if (currentRequestId != null && !PlaybackCoordinator.isValid(currentRequestId)) {
+              return;
+            }
             _currentSong = resolved;
             if (_queue.isNotEmpty && _currentIndex >= 0 && _currentIndex < _queue.length) {
               _queue[_currentIndex] = resolved;
@@ -1860,18 +1923,19 @@ class PlayerService {
     _sourceSwitchingController.add(switching);
   }
 
-  static bool _isSessionStale(int? sessionId, String songId) {
-    if (sessionId != null && sessionId != _activePlaybackSessionId) {
+  static bool _isSessionStale(String? requestId, String songId) {
+    if (requestId != null && !PlaybackCoordinator.isValid(requestId)) {
       return true;
     }
-    if (_activePlaybackIdentity != null && songId != _activePlaybackIdentity!.songId) {
+    final identity = PlaybackCoordinator.currentIdentity;
+    if (identity != null && songId != identity.songId) {
       return true;
     }
     return false;
   }
 
-  static void _checkSession(int sessionId) {
-    if (sessionId != _activePlaybackSessionId) {
+  static void _checkSession(String requestId) {
+    if (!PlaybackCoordinator.isValid(requestId)) {
       throw PlayerException(
         0,
         'interrupted by another call',
@@ -1911,8 +1975,9 @@ class PlayerService {
     _activeHttpClient?.close();
     _activeHttpClient = ApiService.createSecureHttpClient(pinCertificates: false);
 
-    final sessionId = ++_activePlaybackSessionId;
-    _activePlaybackIdentity = PlaybackIdentity.fromSong(song, sessionId);
+    _updatePlaybackState(PlaybackState.resolvingSong);
+    final String requestId = PlaybackCoordinator.newRequest(song);
+    final sessionId = PlaybackCoordinator.currentIdentity!.sessionId;
     _activeLogger = _PlaybackSessionLogger(sessionId, song.name);
     _resolvingSong = song;
     _resolvingSongController.add(song);
@@ -1927,12 +1992,13 @@ class PlayerService {
     // "Loading..." in the UI.
     _playLoadingTimeoutTimer?.cancel();
     _playLoadingTimeoutTimer = Timer(const Duration(seconds: 15), () {
-      if (sessionId != _activePlaybackSessionId) return;
+      if (!PlaybackCoordinator.isValid(requestId)) return;
       if (_resolvingSong == null && !_isLoadingNewSong) return;
       StabilityLogger.warning('Playback', 'Global loading timeout (15s) triggered for: ${song.name}. Force-clearing loading state.');
       _resolvingSong = null;
       _resolvingSongController.add(null);
       _isLoadingNewSong = false;
+      _updatePlaybackState(PlaybackState.idle);
       // Try to play if a source was loaded but focus acquisition hung
       if (_player.processingState == ProcessingState.ready && !_player.playing) {
         unawaited(_player.play());
@@ -1944,18 +2010,19 @@ class PlayerService {
         await _player.stop();
       } catch (_) {}
 
-      _checkSession(sessionId);
+      _checkSession(requestId);
       _fallbackSongResolved = false;
-      final playableSong = await _resolveSongForPlayback(song, sessionId: sessionId, client: _activeHttpClient);
+      _updatePlaybackState(PlaybackState.verifyingIdentity);
+      final playableSong = await _resolveSongForPlayback(song, requestId: requestId, client: _activeHttpClient);
 
-      _checkSession(sessionId);
+      _checkSession(requestId);
 
       // Cancel remaining requests / tasks from this session
       _activeHttpClient?.close();
       _activeHttpClient = null;
 
       if (playableSong == null) {
-        if (sessionId == _activePlaybackSessionId) {
+        if (PlaybackCoordinator.isValid(requestId)) {
           _resolvingSong = null;
           _resolvingSongController.add(null);
           _isLoadingNewSong = false;
@@ -1969,7 +2036,7 @@ class PlayerService {
         return;
       }
 
-      _checkSession(sessionId);
+      _checkSession(requestId);
 
       StabilityLogger.info('Playback', 'Source resolved for: ${playableSong.name}. Location: ${_isLocalFilePath(playableSong.streamUrl ?? "") ? "Local file" : "Remote stream URL"}.');
       _activeLogger?.logStep('Source resolved', true, detail: playableSong.streamUrl);
@@ -1991,7 +2058,7 @@ class PlayerService {
               : <String>[_albumKey(playableSong.album)],
         );
 
-      _checkSession(sessionId);
+      _checkSession(requestId);
 
       final initialPos = null; // Always start fresh songs at 0:00
       StabilityLogger.info('Playback', 'Preparing player for: ${playableSong.name}');
@@ -2006,8 +2073,9 @@ class PlayerService {
           activeIndex = 0;
         }
 
-        _checkSession(sessionId);
+        _checkSession(requestId);
 
+        _updatePlaybackState(PlaybackState.loadingStream);
         await _setQueueSource(
           playableSong,
           playlist: activePlaylist,
@@ -2019,8 +2087,9 @@ class PlayerService {
       } else {
         _originalQueue = [playableSong];
 
-        _checkSession(sessionId);
+        _checkSession(requestId);
 
+        _updatePlaybackState(PlaybackState.loadingStream);
         await _setSingleSource(
           playableSong,
           initialPosition: initialPos,
@@ -2029,12 +2098,12 @@ class PlayerService {
         );
       }
 
-      _checkSession(sessionId);
+      _checkSession(requestId);
 
       // Clear the resolving state NOW — the audio source is loaded and ready.
       // This unblocks the UI (position stream, play/pause button) immediately
       // so the user isn't stuck in "Loading..." during audio focus acquisition.
-      if (sessionId == _activePlaybackSessionId) {
+      if (PlaybackCoordinator.isValid(requestId)) {
         _resolvingSong = null;
         _resolvingSongController.add(null);
         _isLoadingNewSong = false;
@@ -2045,18 +2114,18 @@ class PlayerService {
       StabilityLogger.info('Playback', 'Player preparation completed. Starting playback.');
       final started = await _playEnsuringAudioFocus();
       
-      _checkSession(sessionId);
+      _checkSession(requestId);
 
       if (!started) {
         StabilityLogger.warning('Playback', 'Playback failed to start for song: ${playableSong.name} (audio focus denied).');
-        if (sessionId == _activePlaybackSessionId) {
+        if (PlaybackCoordinator.isValid(requestId)) {
           _userPausedOrStoppedPlayback = true;
           _savePlaybackState(wasPlayingOverride: false);
         }
         return;
       }
 
-      if (sessionId == _activePlaybackSessionId) {
+      if (PlaybackCoordinator.isValid(requestId)) {
         StabilityLogger.info('Playback', 'Playback started successfully. Final status: PLAYING.');
         _songPlayStartedAt = DateTime.now();
         _songPlayStartedId = playableSong.id;
@@ -2092,12 +2161,13 @@ class PlayerService {
         });
       } catch (_) {}
     } catch (e) {
-      if (sessionId == _activePlaybackSessionId) {
+      if (PlaybackCoordinator.isValid(requestId)) {
         _resolvingSong = null;
         _resolvingSongController.add(null);
         _isLoadingNewSong = false;
         _playLoadingTimeoutTimer?.cancel();
         _playLoadingTimeoutTimer = null;
+        _updatePlaybackState(PlaybackState.idle);
       }
       if (_isLoadingInterruptedError(e)) return;
       debugPrint('Playback error: $e');
@@ -2736,8 +2806,8 @@ class PlayerService {
     return bitrate;
   }
 
-  static Future<Song?> _resolveSongForPlayback(Song song, {bool forceRefresh = false, int? sessionId, http.Client? client}) async {
-    if (_isSessionStale(sessionId, song.id)) return null;
+  static Future<Song?> _resolveSongForPlayback(Song song, {bool forceRefresh = false, String? requestId, http.Client? client}) async {
+    if (_isSessionStale(requestId, song.id)) return null;
 
     final songId = song.id.trim();
     if (songId.isNotEmpty) {
@@ -2779,7 +2849,7 @@ class PlayerService {
       final existingStreamUrl = (candidateSong.streamUrl ?? '').trim();
       final hasNetwork = await _isNetworkConnected();
 
-      if (_isSessionStale(sessionId, song.id)) return null;
+      if (_isSessionStale(requestId, song.id)) return null;
 
       final explicitLocalPath = _isLocalFilePath(existingStreamUrl)
           ? existingStreamUrl
@@ -2788,7 +2858,7 @@ class PlayerService {
       final localPath = explicitLocalPath;
 
       final hasLocalCopy = localPath != null && localPath.isNotEmpty;
-      if (sessionId == _activePlaybackSessionId) {
+      if (PlaybackCoordinator.isValid(requestId)) {
         _activeLogger?.logStep('Offline cache', hasLocalCopy, detail: hasLocalCopy ? 'HIT: $localPath' : 'MISS');
       }
 
@@ -2802,7 +2872,7 @@ class PlayerService {
         }
 
         final targetBitrate = await _resolvePreferredStreamingKbps();
-        if (_isSessionStale(sessionId, song.id)) return null;
+        if (_isSessionStale(requestId, song.id)) return null;
 
         final cachedBitrate =
             _resolveCachedOfflineBitrateKbps(songId) ??
@@ -2814,7 +2884,7 @@ class PlayerService {
 
         try {
           final resolvedSong = await _fetchSongDetailsForPlaybackWithClient(candidateSong, localClient, forceRefresh: forceRefresh);
-          if (_isSessionStale(sessionId, song.id)) return null;
+          if (_isSessionStale(requestId, song.id)) return null;
 
           if (resolvedSong != null && _hasStreamUrl(resolvedSong)) {
             return _mergeSongWithResolvedStream(
@@ -2833,16 +2903,16 @@ class PlayerService {
       if (!forceRefresh && songId.isNotEmpty) {
         final cachedSong = _getCachedSongUrl(songId);
         final hasCache = cachedSong != null && _hasStreamUrl(cachedSong);
-        if (sessionId == _activePlaybackSessionId) {
+        if (PlaybackCoordinator.isValid(requestId)) {
           _activeLogger?.logStep('Memory URL cache', hasCache, detail: hasCache ? 'HIT' : 'MISS');
         }
         if (cachedSong != null && _hasStreamUrl(cachedSong)) {
-          if (_isSessionStale(sessionId, song.id)) return null;
+          if (_isSessionStale(requestId, song.id)) return null;
           // Validate it fast
           final isValid = await _validateStreamUrl(cachedSong.streamUrl!, localClient);
-          if (_isSessionStale(sessionId, song.id)) return null;
+          if (_isSessionStale(requestId, song.id)) return null;
 
-          if (sessionId == _activePlaybackSessionId) {
+          if (PlaybackCoordinator.isValid(requestId)) {
             _activeLogger?.logStep('Memory URL validation', isValid, detail: isValid ? 'SUCCESS' : 'FAILED');
           }
 
@@ -2862,11 +2932,11 @@ class PlayerService {
       if (!forceRefresh &&
           _hasStreamUrl(candidateSong) &&
           !_shouldUpgradeStreamQuality(candidateSong)) {
-        if (_isSessionStale(sessionId, song.id)) return null;
+        if (_isSessionStale(requestId, song.id)) return null;
         final isValid = await _validateStreamUrl(candidateSong.streamUrl!, localClient);
-        if (_isSessionStale(sessionId, song.id)) return null;
+        if (_isSessionStale(requestId, song.id)) return null;
 
-        if (sessionId == _activePlaybackSessionId) {
+        if (PlaybackCoordinator.isValid(requestId)) {
           _activeLogger?.logStep('Existing URL validation', isValid, detail: isValid ? 'SUCCESS' : 'FAILED');
         }
 
@@ -2878,7 +2948,7 @@ class PlayerService {
       // Skip resolution if offline; we can't upgrade or fetch details anyway.
       if (!hasNetwork) {
         if (_hasStreamUrl(candidateSong)) return candidateSong;
-        final fallback = await _searchFallbackForSong(candidateSong, sessionId: sessionId, client: localClient);
+        final fallback = await _searchFallbackForSong(candidateSong, requestId: requestId, client: localClient);
         if (fallback != null) return fallback;
         return null;
       }
@@ -2890,16 +2960,16 @@ class PlayerService {
         debugPrint('Error fetching song details for playback: $e.');
       }
 
-      if (sessionId == _activePlaybackSessionId) {
+      if (PlaybackCoordinator.isValid(requestId)) {
         _activeLogger?.logStep('Main API resolve', resolvedSong != null, detail: resolvedSong != null ? 'SUCCESS' : 'FAILED');
       }
 
-      if (_isSessionStale(sessionId, song.id)) return null;
+      if (_isSessionStale(requestId, song.id)) return null;
 
       if (resolvedSong == null || !_hasStreamUrl(resolvedSong)) {
         debugPrint('Song URL failed to fetch. Retrying 1 time immediately with 10 microseconds delay...');
         await Future.delayed(const Duration(microseconds: 10));
-        if (_isSessionStale(sessionId, song.id)) return null;
+        if (_isSessionStale(requestId, song.id)) return null;
 
         try {
           resolvedSong = await _fetchSongDetailsForPlaybackWithClient(candidateSong, localClient, forceRefresh: forceRefresh);
@@ -2908,29 +2978,29 @@ class PlayerService {
         }
       }
 
-      if (_isSessionStale(sessionId, song.id)) return null;
+      if (_isSessionStale(requestId, song.id)) return null;
 
       if (resolvedSong != null && _hasStreamUrl(resolvedSong)) {
         final confidence = VerificationEngine.calculateConfidence(resolvedSong, song);
         final isVerified = confidence >= VerificationEngine.threshold;
 
-        if (sessionId == _activePlaybackSessionId) {
+        if (PlaybackCoordinator.isValid(requestId)) {
           _activeLogger?.logStep('Verification Engine', isVerified, detail: 'Score: $confidence%');
         }
 
         if (isVerified) {
           final newUrl = (resolvedSong.streamUrl ?? '').trim();
           final isValid = await _validateStreamUrl(newUrl, localClient);
-          if (_isSessionStale(sessionId, song.id)) return null;
+          if (_isSessionStale(requestId, song.id)) return null;
 
-          if (sessionId == _activePlaybackSessionId) {
+          if (PlaybackCoordinator.isValid(requestId)) {
             _activeLogger?.logStep('URL validation', isValid, detail: isValid ? 'SUCCESS' : 'FAILED');
           }
 
           if (isValid) {
             if (forceRefresh && newUrl.isNotEmpty && newUrl == existingStreamUrl) {
               debugPrint('Resolved stream URL is identical to failed URL. Triggering search fallback...');
-              final fallback = await _searchFallbackForSong(candidateSong, sessionId: sessionId, client: localClient);
+              final fallback = await _searchFallbackForSong(candidateSong, requestId: requestId, client: localClient);
               if (fallback != null) return fallback;
             }
 
@@ -2950,11 +3020,11 @@ class PlayerService {
         final confidence = VerificationEngine.calculateConfidence(candidateSong, song);
         if (confidence >= VerificationEngine.threshold) {
           final isValid = await _validateStreamUrl(candidateSong.streamUrl!, localClient);
-          if (_isSessionStale(sessionId, song.id)) return null;
+          if (_isSessionStale(requestId, song.id)) return null;
 
           if (isValid) {
             if (forceRefresh) {
-              final fallback = await _searchFallbackForSong(candidateSong, sessionId: sessionId, client: localClient);
+              final fallback = await _searchFallbackForSong(candidateSong, requestId: requestId, client: localClient);
               if (fallback != null) return fallback;
             }
             return candidateSong;
@@ -2962,7 +3032,7 @@ class PlayerService {
         }
       }
 
-      final fallback = await _searchFallbackForSong(candidateSong, sessionId: sessionId, client: localClient);
+      final fallback = await _searchFallbackForSong(candidateSong, requestId: requestId, client: localClient);
       if (fallback != null) return fallback;
       return null;
     } finally {
@@ -2976,7 +3046,7 @@ class PlayerService {
   static Future<Song?> searchFallbackForSong(Song song, {http.Client? client}) =>
       _searchFallbackForSong(song, client: client);
 
-  static Future<Song?> _searchFallbackForSong(Song song, {int? sessionId, http.Client? client}) async {
+  static Future<Song?> _searchFallbackForSong(Song song, {String? requestId, http.Client? client}) async {
     // 1. Get first artist name if multiple exist
     String artistQuery = '';
     final artist = song.artist ?? '';
@@ -3035,7 +3105,7 @@ class PlayerService {
 
     if (queries.isEmpty) return null;
 
-    if (_isSessionStale(sessionId, song.id)) return null;
+    if (_isSessionStale(requestId, song.id)) return null;
 
     final localClient = client ?? ApiService.createSecureHttpClient(pinCertificates: false);
     try {
@@ -3043,7 +3113,7 @@ class PlayerService {
       final searchFutures = queries.map((query) => _searchSongsWithClient(query, localClient));
       final allResults = await Future.wait(searchFutures);
       
-      if (_isSessionStale(sessionId, song.id)) return null;
+      if (_isSessionStale(requestId, song.id)) return null;
 
       // Flatten all results and remove duplicates
       final Map<String, Song> uniqueCandidates = {};
@@ -3087,7 +3157,7 @@ class PlayerService {
       }).toList();
 
       final resolvedCandidates = await Future.wait(resolvedFutures);
-      if (_isSessionStale(sessionId, song.id)) return null;
+      if (_isSessionStale(requestId, song.id)) return null;
 
       final playCandidates = resolvedCandidates.where((c) => _hasStreamUrl(c)).toList();
 
@@ -3100,7 +3170,7 @@ class PlayerService {
       }).toList();
 
       final validationResults = await Future.wait(validationFutures);
-      if (_isSessionStale(sessionId, song.id)) return null;
+      if (_isSessionStale(requestId, song.id)) return null;
 
       final validatedSongs = validationResults
           .where((e) => e.value)
@@ -3108,7 +3178,7 @@ class PlayerService {
           .toList();
 
       final hasMatch = validatedSongs.isNotEmpty;
-      if (sessionId == _activePlaybackSessionId) {
+      if (PlaybackCoordinator.isValid(requestId)) {
         _activeLogger?.logStep('Parallel search', hasMatch, detail: hasMatch ? 'SUCCESS' : 'NO MATCH');
       }
 
@@ -3399,6 +3469,7 @@ class PlayerService {
     _pendingSeekTimer?.cancel();
     _externalSeeking = true;
     _wasPlayingBeforeSeek = _player.playing;
+    _updatePlaybackState(PlaybackState.seeking);
   }
 
   /// Mark end of a user seek gesture and preserve pre-seek play state.
@@ -3415,6 +3486,30 @@ class PlayerService {
       await _playEnsuringAudioFocus();
     }
     _wasPlayingBeforeSeek = false;
+
+    // Restore state based on processingState
+    final state = _player.playerState;
+    switch (state.processingState) {
+      case ProcessingState.idle:
+        _updatePlaybackState(PlaybackState.idle);
+        break;
+      case ProcessingState.loading:
+        _updatePlaybackState(PlaybackState.preparingDecoder);
+        break;
+      case ProcessingState.buffering:
+        _updatePlaybackState(PlaybackState.buffering);
+        break;
+      case ProcessingState.ready:
+        if (state.playing) {
+          _updatePlaybackState(PlaybackState.playing);
+        } else {
+          _updatePlaybackState(PlaybackState.paused);
+        }
+        break;
+      case ProcessingState.completed:
+        _updatePlaybackState(PlaybackState.idle);
+        break;
+    }
     _savePlaybackState();
   }
 
@@ -3460,7 +3555,7 @@ class PlayerService {
     if (_isLoadingNewSong) {
       StabilityLogger.info('Playback', 'Play/Pause toggled while loading. Cancelling loading.');
       _userPausedOrStoppedPlayback = true;
-      _activePlaybackSessionId++;
+      PlaybackCoordinator.reset();
       _activeHttpClient?.close();
       _activeHttpClient = null;
       _resolvingSong = null;

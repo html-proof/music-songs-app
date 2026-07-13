@@ -10,18 +10,17 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'stability_logger.dart';
+import 'package:just_audio/just_audio.dart';
 
 import '../models/song.dart';
 import '../models/user_preferences.dart';
 import 'preferences_service.dart';
 import 'session_state_service.dart';
 import 'offline_service.dart';
-import 'player_service.dart';
 import 'lyrics_service.dart';
 import 'lyrics_cache.dart';
 import '../utils/album_filter.dart';
 import 'artwork_service.dart';
-import 'playlist_service.dart';
 
 class PlaylistDownloadProgress {
   final String playlistId;
@@ -90,6 +89,322 @@ class DownloadService {
   static Stream<String> get downloadCompletedStream =>
       _downloadCompletedController.stream;
 
+  // New streams and status trackers for professional states
+  static final Map<String, String> _statuses = {};
+  static final StreamController<Map<String, dynamic>> _downloadStatusController =
+      StreamController<Map<String, dynamic>>.broadcast();
+  static Stream<Map<String, dynamic>> get downloadStatusStream =>
+      _downloadStatusController.stream;
+
+  static bool _initialized = false;
+  static bool _workerRunning = false;
+
+  static final Dio _dio = Dio();
+  static final Map<String, double> _progress = {};
+  static final Map<String, bool> _downloading = {};
+  static final Map<String, CancelToken> _cancelTokens = {};
+  static final Map<String, String> _downloadOwnerBySong = {};
+  static final Map<String, DateTime> _lastStatePersistBySong = {};
+
+  static const Duration _statePersistThrottle = Duration(milliseconds: 700);
+  static const int _minValidDownloadedBytes = 1024;
+
+  static String? _resolvedDownloadsDirPath;
+  static String? get resolvedDownloadsDirPath => _resolvedDownloadsDirPath;
+
+  static void init() {
+    if (_initialized) return;
+    _initialized = true;
+    
+    // Listen to network status changes to automatically resume queue
+    ConnectivityManager.eventStream.listen((event) {
+      if (event == ConnectivityEvent.restored) {
+        _startQueueWorkerIfNeeded();
+      }
+    });
+
+    _startQueueWorkerIfNeeded();
+  }
+
+  static String getDownloadStatus(String songId) {
+    return _statuses[songId] ?? 'completed';
+  }
+
+  static Map<String, String> get allStatuses => _statuses;
+
+  static void _startQueueWorkerIfNeeded() {
+    if (_workerRunning) return;
+    final uid = _currentUserUid();
+    if (uid == null || uid.isEmpty) return;
+    
+    _workerRunning = true;
+    unawaited(_runQueueWorker());
+  }
+
+  static Future<void> _runQueueWorker() async {
+    final uid = _currentUserUid();
+    if (uid == null || uid.isEmpty) {
+      _workerRunning = false;
+      return;
+    }
+
+    StabilityLogger.info('Download', 'Download queue worker started.');
+
+    while (_workerRunning) {
+      final uid = _currentUserUid();
+      if (uid == null || uid.isEmpty) {
+        _workerRunning = false;
+        break;
+      }
+
+      // Read all active download states
+      final pending = await SessionStateService.readAllDownloadStatesForUser(uid);
+      if (pending.isEmpty) {
+        // Queue is completely empty! Sleep a bit and check again or wait for new tasks.
+        await Future.delayed(const Duration(seconds: 2));
+        continue;
+      }
+
+      // Sort pending: those that are queued/scheduled first, based on nextRetryTime and updatedAt
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final candidates = pending.where((state) {
+        final status = (state['status'] ?? '').toString();
+        if (status == 'completed' || status == 'failedPermanently' || status == 'pausedByUser') {
+          return false;
+        }
+        // If scheduled for retry, check if nextRetryTime has passed
+        if (status == 'retryScheduled') {
+          final nextRetry = _toInt(state['nextRetryTime']);
+          if (nextRetry > now) return false;
+        }
+        return true;
+      }).toList();
+
+      if (candidates.isEmpty) {
+        // There are items in queue, but they are either paused, permanently failed, or waiting for retry time.
+        await Future.delayed(const Duration(seconds: 1));
+        continue;
+      }
+
+      // Sort by priority/updatedAt
+      candidates.sort((a, b) {
+        final aTs = _toInt(a['updatedAt']);
+        final bTs = _toInt(b['updatedAt']);
+        return aTs.compareTo(bTs);
+      });
+
+      // Find how many slots are open for concurrent downloads
+      final activeDownloads = _downloading.entries.where((e) => e.value).length;
+      final maxConcurrent = 3;
+      final slotsOpen = maxConcurrent - activeDownloads;
+
+      if (slotsOpen <= 0) {
+        await Future.delayed(const Duration(milliseconds: 500));
+        continue;
+      }
+
+      // Start downloading top candidates up to slotsOpen
+      final toStart = candidates.take(slotsOpen).toList();
+      for (final state in toStart) {
+        final song = _songFromStateMap(state);
+        if (song == null) continue;
+
+        // Start download in background
+        unawaited(_processDownloadTask(song, state, uid));
+      }
+
+      await Future.delayed(const Duration(milliseconds: 300));
+    }
+  }
+
+  static Future<void> _processDownloadTask(Song song, Map<String, dynamic> state, String uid) async {
+    final songId = song.id.trim();
+    if (_downloading[songId] == true) return; // Already running
+
+    _downloading[songId] = true;
+    _statuses[songId] = 'preparing';
+    _downloadStatusController.add({'songId': songId, 'status': 'preparing', 'progress': _progress[songId] ?? 0.0});
+
+    // Check if background download settings permit download
+    while (await _shouldPauseForDownloadSettings(uid)) {
+      final isConnected = await _isNetworkConnected();
+      if (!isConnected) {
+        _statuses[songId] = 'waitingForNetwork';
+        _downloadStatusController.add({'songId': songId, 'status': 'waitingForNetwork', 'progress': _progress[songId] ?? 0.0});
+        await _persistDownloadState(
+          uid: uid,
+          song: song,
+          sourceUrl: state['url'] ?? '',
+          status: 'waitingForNetwork',
+          progress: _progress[songId] ?? 0.0,
+          receivedBytes: _toInt(state['receivedBytes']),
+          totalBytes: _toInt(state['totalBytes']),
+        );
+      } else {
+        _statuses[songId] = 'pausedByUser';
+        _downloadStatusController.add({'songId': songId, 'status': 'pausedByUser', 'progress': _progress[songId] ?? 0.0});
+      }
+      await Future.delayed(const Duration(seconds: 2));
+      // Re-read queue state in case it got cancelled or paused by user
+      final freshState = await SessionStateService.readDownloadState(uid: uid, songId: songId);
+      if (freshState == null || freshState['status'] == 'pausedByUser') {
+        _downloading.remove(songId);
+        return;
+      }
+    }
+
+    _statuses[songId] = 'downloading';
+    _downloadStatusController.add({'songId': songId, 'status': 'downloading', 'progress': _progress[songId] ?? 0.0});
+
+    final playlistId = state['playlistId']?.toString();
+    final playlistName = state['playlistName']?.toString();
+
+    // Call individual download process with verification
+    bool success = await _downloadSongInternalWithRetry(
+      song,
+      uid: uid,
+      resumeState: state,
+      playlistId: playlistId,
+      playlistName: playlistName,
+    );
+
+    _downloading.remove(songId);
+    
+    // Notify playlist progress if it's part of a playlist download
+    if (playlistId != null && playlistId.isNotEmpty) {
+      final activeSession = _activePlaylistSession;
+      if (activeSession != null && activeSession.playlistId == playlistId) {
+        if (success) {
+          activeSession.downloadedCount++;
+        } else {
+          final freshState = await SessionStateService.readDownloadState(uid: uid, songId: songId);
+          if (freshState != null && freshState['status'] == 'failedPermanently') {
+            activeSession.failedCount++;
+            activeSession.failedSongs.add(song);
+          }
+        }
+        _notifyPlaylistProgress(activeSession);
+      }
+    }
+  }
+
+  static Future<bool> _downloadSongInternalWithRetry(
+    Song song, {
+    required String uid,
+    required Map<String, dynamic> resumeState,
+    String? playlistId,
+    String? playlistName,
+  }) async {
+    final songId = song.id.trim();
+    int retryCount = _toInt(resumeState['retryCount']);
+    final maxRetries = 4;
+
+    while (retryCount < maxRetries) {
+      final hasNetwork = await _isNetworkConnected();
+      if (!hasNetwork) {
+        _statuses[songId] = 'waitingForNetwork';
+        _downloadStatusController.add({'songId': songId, 'status': 'waitingForNetwork', 'progress': _progress[songId] ?? 0.0});
+        await _persistDownloadState(
+          uid: uid,
+          song: song,
+          sourceUrl: resumeState['url'] ?? '',
+          status: 'waitingForNetwork',
+          progress: _progress[songId] ?? 0.0,
+          receivedBytes: await _currentPartialBytes(songId),
+          totalBytes: _toInt(resumeState['totalBytes']),
+          retryCount: retryCount,
+          playlistId: playlistId,
+          playlistName: playlistName,
+        );
+        // Sleep until network is back
+        while (!await _isNetworkConnected()) {
+          await Future.delayed(const Duration(seconds: 1));
+        }
+        _statuses[songId] = 'downloading';
+        _downloadStatusController.add({'songId': songId, 'status': 'downloading', 'progress': _progress[songId] ?? 0.0});
+      }
+
+      final cancelToken = CancelToken();
+      _cancelTokens[songId] = cancelToken;
+
+      final success = await _downloadSongInternal(
+        song,
+        uid: uid,
+        onProgress: (p) {
+          _progress[songId] = p;
+          _downloadStatusController.add({'songId': songId, 'status': 'downloading', 'progress': p});
+        },
+        resumeState: resumeState,
+        externalCancelToken: cancelToken,
+      );
+
+      if (success) {
+        _statuses[songId] = 'completed';
+        _downloadStatusController.add({'songId': songId, 'status': 'completed', 'progress': 1.0});
+        return true;
+      }
+
+      // Check if cancelled by user
+      if (cancelToken.isCancelled) {
+        _statuses[songId] = 'pausedByUser';
+        _downloadStatusController.add({'songId': songId, 'status': 'pausedByUser', 'progress': _progress[songId] ?? 0.0});
+        return false;
+      }
+
+      retryCount++;
+      if (retryCount >= maxRetries) {
+        break;
+      }
+
+      final backoffSecs = retryCount == 1
+          ? 2
+          : retryCount == 2
+              ? 5
+              : retryCount == 3
+                  ? 15
+                  : 30;
+
+      StabilityLogger.warning('Download', 'Download failed for ${song.name}. Retry $retryCount/$maxRetries scheduled in ${backoffSecs}s.');
+
+      _statuses[songId] = 'retryScheduled';
+      _downloadStatusController.add({'songId': songId, 'status': 'retryScheduled', 'progress': _progress[songId] ?? 0.0});
+      
+      final nextRetryTime = DateTime.now().millisecondsSinceEpoch + (backoffSecs * 1000);
+      await _persistDownloadState(
+        uid: uid,
+        song: song,
+        sourceUrl: resumeState['url'] ?? '',
+        status: 'retryScheduled',
+        progress: _progress[songId] ?? 0.0,
+        receivedBytes: await _currentPartialBytes(songId),
+        totalBytes: _toInt(resumeState['totalBytes']),
+        retryCount: retryCount,
+        nextRetryTime: nextRetryTime,
+        playlistId: playlistId,
+        playlistName: playlistName,
+      );
+
+      await Future.delayed(Duration(seconds: backoffSecs));
+    }
+
+    _statuses[songId] = 'failedPermanently';
+    _downloadStatusController.add({'songId': songId, 'status': 'failedPermanently', 'progress': _progress[songId] ?? 0.0});
+    await _persistDownloadState(
+      uid: uid,
+      song: song,
+      sourceUrl: resumeState['url'] ?? '',
+      status: 'failedPermanently',
+      progress: _progress[songId] ?? 0.0,
+      receivedBytes: await _currentPartialBytes(songId),
+      totalBytes: _toInt(resumeState['totalBytes']),
+      retryCount: retryCount,
+      playlistId: playlistId,
+      playlistName: playlistName,
+    );
+
+    return false;
+  }
+
   static Future<void> startPlaylistDownload(
     String playlistId,
     String playlistName,
@@ -98,11 +413,32 @@ class DownloadService {
     final uid = _currentUserUid();
     if (uid == null || uid.isEmpty) return;
 
-    if (_activePlaylistSession != null) {
-      if (_activePlaylistSession!.playlistId == playlistId) {
-        return;
-      }
-      _activePlaylistSession!.cancelToken.cancel('new_session_started');
+    if (_activePlaylistSession != null && _activePlaylistSession!.playlistId == playlistId) {
+      return;
+    }
+
+    // Add all songs to persistent queue
+    for (final song in songs) {
+      final songId = song.id.trim();
+      final isDown = await isDownloaded(songId);
+      if (isDown) continue;
+
+      final existingState = await SessionStateService.readDownloadState(uid: uid, songId: songId);
+      if (existingState != null && existingState['status'] == 'completed') continue;
+
+      final sourceUrl = _resolveSourceUrl(song, AudioQuality.high);
+      await _persistDownloadState(
+        uid: uid,
+        song: song,
+        sourceUrl: sourceUrl,
+        status: 'queued',
+        progress: 0.0,
+        receivedBytes: 0,
+        totalBytes: 0,
+        playlistId: playlistId,
+        playlistName: playlistName,
+      );
+      _statuses[songId] = 'queued';
     }
 
     final session = PlaylistDownloadSession(
@@ -111,119 +447,29 @@ class DownloadService {
       songs: List<Song>.from(songs),
       uid: uid,
     );
-    _activePlaylistSession = session;
-    session.totalSongs = songs.length;
-
-    // Try to find the playlist cover and download it, fallback to album cover
-    try {
-      final playlists = await PlaylistService.getPlaylists();
-      final matchingPlaylist = playlists.firstWhere((p) => p.id == playlistId);
-      final coverUrl = matchingPlaylist.coverImageUrl?.trim();
-      if (coverUrl != null && coverUrl.isNotEmpty) {
-        final dir = await _downloadsDir;
-        final playlistDir = Directory('${dir.path}/playlists');
-        if (!await playlistDir.exists()) await playlistDir.create(recursive: true);
-        final coverFile = File('${playlistDir.path}/$playlistId.jpg');
-        await _dio.download(
-          coverUrl,
-          coverFile.path,
-          cancelToken: session.cancelToken,
-        );
-        debugPrint('[DownloadService] Downloaded playlist cover for $playlistId');
-      }
-    } catch (_) {
-      try {
-        if (songs.isNotEmpty) {
-          final firstSong = songs.first;
-          final albumId = firstSong.albumId;
-          if (albumId != null && albumId.isNotEmpty) {
-            final albumCoverUrl = ArtworkService.resolveArtworkUrl(firstSong);
-            if (albumCoverUrl.isNotEmpty) {
-              final dir = await _downloadsDir;
-              final albumDir = Directory('${dir.path}/albums');
-              if (!await albumDir.exists()) await albumDir.create(recursive: true);
-              final coverFile = File('${albumDir.path}/$albumId.jpg');
-              await _dio.download(
-                albumCoverUrl,
-                coverFile.path,
-                cancelToken: session.cancelToken,
-              );
-              debugPrint('[DownloadService] Downloaded album cover for $albumId');
-            }
-          }
-        }
-      } catch (err) {
-        debugPrint('[DownloadService] Failed to download album cover fallback: $err');
+    
+    int alreadyDownloaded = 0;
+    for (final song in songs) {
+      if (await isDownloaded(song.id)) {
+        alreadyDownloaded++;
       }
     }
+    session.totalSongs = songs.length;
+    session.alreadyDownloadedCount = alreadyDownloaded;
+    _activePlaylistSession = session;
 
     _notifyPlaylistProgress(session);
-
-    final int workerCount = 3.clamp(1, 5);
-    int nextSongIndex = 0;
-    final List<Future<void>> workers = [];
-
-    Future<void> runWorker() async {
-      while (true) {
-        if (session.cancelToken.isCancelled) break;
-
-        Song? song;
-        if (nextSongIndex < session.songs.length) {
-          song = session.songs[nextSongIndex];
-          nextSongIndex++;
-        }
-
-        if (song == null) break;
-
-        await _downloadPlaylistSong(session, song);
-      }
-    }
-
-    for (int i = 0; i < workerCount; i++) {
-      workers.add(runWorker());
-    }
-
-    await Future.wait(workers);
-
-    if (session.cancelToken.isCancelled) {
-      _playlistProgressController.add(PlaylistDownloadProgress(
-        playlistId: session.playlistId,
-        playlistName: session.playlistName,
-        totalSongs: session.totalSongs,
-        completedSongs: session.downloadedCount +
-            session.recoveredCount +
-            session.alreadyDownloadedCount +
-            session.failedCount,
-        downloadedCount: session.downloadedCount,
-        recoveredCount: session.recoveredCount,
-        alreadyDownloadedCount: session.alreadyDownloadedCount,
-        failedCount: session.failedCount,
-        isCancelled: true,
-        failedSongs: session.failedSongs,
-      ));
-    } else {
-      _playlistProgressController.add(PlaylistDownloadProgress(
-        playlistId: session.playlistId,
-        playlistName: session.playlistName,
-        totalSongs: session.totalSongs,
-        completedSongs: session.totalSongs,
-        downloadedCount: session.downloadedCount,
-        recoveredCount: session.recoveredCount,
-        alreadyDownloadedCount: session.alreadyDownloadedCount,
-        failedCount: session.failedCount,
-        isCompleted: true,
-        failedSongs: session.failedSongs,
-      ));
-    }
-
-    if (_activePlaylistSession == session) {
-      _activePlaylistSession = null;
-    }
+    _startQueueWorkerIfNeeded();
   }
 
   static void cancelPlaylistDownload() {
-    _activePlaylistSession?.cancelToken.cancel('user_cancelled');
-    _activePlaylistSession = null;
+    final session = _activePlaylistSession;
+    if (session != null) {
+      for (final song in session.songs) {
+        cancelDownload(song.id);
+      }
+      _activePlaylistSession = null;
+    }
   }
 
   static void _notifyPlaylistProgress(PlaylistDownloadSession session) {
@@ -240,13 +486,73 @@ class DownloadService {
       alreadyDownloadedCount: session.alreadyDownloadedCount,
       failedCount: session.failedCount,
       failedSongs: session.failedSongs,
+      isCompleted: (session.downloadedCount + session.recoveredCount + session.alreadyDownloadedCount + session.failedCount) >= session.totalSongs,
     ));
+  }
+
+  static Future<void> pauseDownload(String songId) async {
+    final uid = _currentUserUid();
+    if (uid == null || uid.isEmpty) return;
+
+    final state = await SessionStateService.readDownloadState(uid: uid, songId: songId);
+    if (state != null) {
+      _cancelTokens[songId]?.cancel('user_paused');
+      
+      _statuses[songId] = 'pausedByUser';
+      _downloadStatusController.add({'songId': songId, 'status': 'pausedByUser', 'progress': _progress[songId] ?? 0.0});
+      
+      await _persistDownloadState(
+        uid: uid,
+        song: _songFromStateMap(state)!,
+        sourceUrl: state['url'] ?? '',
+        status: 'pausedByUser',
+        progress: _progress[songId] ?? 0.0,
+        receivedBytes: await _currentPartialBytes(songId),
+        totalBytes: _toInt(state['totalBytes']),
+        playlistId: state['playlistId']?.toString(),
+        playlistName: state['playlistName']?.toString(),
+      );
+    }
+  }
+
+  static Future<void> resumeDownload(String songId) async {
+    final uid = _currentUserUid();
+    if (uid == null || uid.isEmpty) return;
+
+    final state = await SessionStateService.readDownloadState(uid: uid, songId: songId);
+    if (state != null) {
+      _statuses[songId] = 'queued';
+      _downloadStatusController.add({'songId': songId, 'status': 'queued', 'progress': _progress[songId] ?? 0.0});
+      
+      await _persistDownloadState(
+        uid: uid,
+        song: _songFromStateMap(state)!,
+        sourceUrl: state['url'] ?? '',
+        status: 'queued',
+        progress: _progress[songId] ?? 0.0,
+        receivedBytes: await _currentPartialBytes(songId),
+        totalBytes: _toInt(state['totalBytes']),
+        retryCount: 0, // Reset retries on manual resume
+        playlistId: state['playlistId']?.toString(),
+        playlistName: state['playlistName']?.toString(),
+      );
+      _startQueueWorkerIfNeeded();
+    }
+  }
+
+  static Future<void> cancelDownload(String songId) async {
+    final uid = _currentUserUid();
+    if (uid == null || uid.isEmpty) return;
+
+    _cancelTokens[songId]?.cancel('user_cancelled');
+    await _cleanupFailedDownload(songId, uid: uid);
+    _statuses.remove(songId);
+    _downloadStatusController.add({'songId': songId, 'status': 'cancelled', 'progress': 0.0});
   }
 
   static Future<bool> _shouldPauseForDownloadSettings(String uid) async {
     final prefs = await PreferencesService.getPreferences(uid);
 
-    // Data Saver blocks all background downloads.
     if (prefs?.dataSaverEnabled ?? false) return true;
 
     final mode = prefs?.backgroundDownloadMode ?? BackgroundDownloadMode.wifiOnly;
@@ -263,9 +569,6 @@ class DownloadService {
         return !onWifi;
 
       case BackgroundDownloadMode.onlyWhileCharging:
-        // Check battery state — pause if not charging.
-        // For now, conservatively allow downloads (actual battery check
-        // would require the battery_plus package).
         return false;
     }
   }
@@ -273,84 +576,6 @@ class DownloadService {
   static Future<bool> _isNetworkConnected() async {
     return ConnectivityManager.isConnected;
   }
-
-  static Future<void> _downloadPlaylistSong(
-    PlaylistDownloadSession session,
-    Song song,
-  ) async {
-    final songId = song.id.trim();
-
-    while (await _shouldPauseForDownloadSettings(session.uid)) {
-      if (session.cancelToken.isCancelled) return;
-      await Future.delayed(const Duration(seconds: 1));
-    }
-
-    final isDownloaded = await DownloadService.isDownloaded(songId);
-    if (isDownloaded) {
-      session.alreadyDownloadedCount++;
-      _notifyPlaylistProgress(session);
-      return;
-    }
-
-    if (_downloading[songId] == true) {
-      _cancelTokens[songId]?.cancel('duplicate_playlist_download');
-    }
-
-    bool success = await _downloadSongInternal(
-      song,
-      uid: session.uid,
-      externalCancelToken: session.cancelToken,
-    );
-
-    if (success) {
-      session.downloadedCount++;
-      _notifyPlaylistProgress(session);
-      return;
-    }
-
-    if (session.cancelToken.isCancelled) return;
-
-    final hasNetwork = await _isNetworkConnected();
-    if (hasNetwork) {
-      debugPrint('Original URL failed for playlist song ${song.name}. Attempting search recovery...');
-      final fallbackSong = await PlayerService.searchFallbackForSong(song);
-
-      if (fallbackSong != null && fallbackSong.streamUrl != null) {
-        debugPrint('Found fallback search match for ${song.name}: ${fallbackSong.streamUrl}');
-        final updatedSong = song.copyWith(streamUrl: fallbackSong.streamUrl);
-
-        bool fallbackSuccess = await _downloadSongInternal(
-          updatedSong,
-          uid: session.uid,
-          externalCancelToken: session.cancelToken,
-        );
-
-        if (fallbackSuccess) {
-          session.recoveredCount++;
-          _notifyPlaylistProgress(session);
-          return;
-        }
-      }
-    }
-
-    session.failedCount++;
-    session.failedSongs.add(song);
-    _notifyPlaylistProgress(session);
-  }
-
-  static final Dio _dio = Dio();
-  static final Map<String, double> _progress = {};
-  static final Map<String, bool> _downloading = {};
-  static final Map<String, CancelToken> _cancelTokens = {};
-  static final Map<String, String> _downloadOwnerBySong = {};
-  static final Map<String, DateTime> _lastStatePersistBySong = {};
-
-  static const Duration _statePersistThrottle = Duration(milliseconds: 700);
-  static const int _minValidDownloadedBytes = 1024;
-
-  static String? _resolvedDownloadsDirPath;
-
-  static String? get resolvedDownloadsDirPath => _resolvedDownloadsDirPath;
 
   static Future<String> getDownloadsDirPath() async {
     if (_resolvedDownloadsDirPath != null) return _resolvedDownloadsDirPath!;
@@ -409,14 +634,33 @@ class DownloadService {
     _showToast(msg);
   }
 
-  /// Download a song (resumable when partial file exists).
+  /// Enqueue a song in the background download service.
   static Future<bool> downloadSong(
     Song song, {
     Function(double)? onProgress,
   }) async {
     final uid = _currentUserUid();
     if (uid == null || uid.isEmpty) return false;
-    return _downloadSongInternal(song, uid: uid, onProgress: onProgress);
+
+    final songId = song.id.trim();
+    final isDown = await isDownloaded(songId);
+    if (isDown) return true;
+
+    final sourceUrl = _resolveSourceUrl(song, AudioQuality.high);
+    await _persistDownloadState(
+      uid: uid,
+      song: song,
+      sourceUrl: sourceUrl,
+      status: 'queued',
+      progress: 0.0,
+      receivedBytes: 0,
+      totalBytes: 0,
+    );
+    _statuses[songId] = 'queued';
+    _downloadStatusController.add({'songId': songId, 'status': 'queued', 'progress': 0.0});
+
+    _startQueueWorkerIfNeeded();
+    return true;
   }
 
   /// Cancel session downloads safely on logout and persist partial progress.
@@ -424,15 +668,10 @@ class DownloadService {
     final ownerUid = uid ?? _currentUserUid();
     if (ownerUid == null || ownerUid.isEmpty) return;
 
-    final songIds = _downloadOwnerBySong.entries
-        .where((entry) => entry.value == ownerUid)
-        .map((entry) => entry.key)
-        .toList(growable: false);
-    if (songIds.isEmpty) return;
-
-    for (final songId in songIds) {
+    for (final songId in _cancelTokens.keys.toList()) {
       _cancelTokens[songId]?.cancel('logout');
     }
+    _workerRunning = false;
   }
 
   static Future<Map<String, double>> getPendingProgressForCurrentUser() async {
@@ -456,50 +695,11 @@ class DownloadService {
     return map;
   }
 
-  /// Resume paused downloads for current user.
+  /// Resume paused downloads for current user by waking up the worker.
   static Future<void> resumePendingDownloadsForCurrentUser({
     void Function(String songId, double progress)? onSongProgress,
   }) async {
-    final uid = _currentUserUid();
-    if (uid == null || uid.isEmpty) return;
-
-    final hasConnectivity = ConnectivityManager.isConnected;
-    if (!hasConnectivity) {
-      return;
-    }
-
-    final pending = await SessionStateService.readAllDownloadStatesForUser(uid);
-    if (pending.isEmpty) return;
-
-    pending.sort((a, b) {
-      final aTs = _toInt(a['updatedAt']);
-      final bTs = _toInt(b['updatedAt']);
-      return aTs.compareTo(bTs);
-    });
-
-    for (final state in pending) {
-      final status = (state['status'] ?? '').toString().toLowerCase();
-      if (status == 'completed') {
-        final songId = (state['songId'] ?? '').toString().trim();
-        if (songId.isNotEmpty) {
-          await SessionStateService.clearDownloadState(
-            uid: uid,
-            songId: songId,
-          );
-        }
-        continue;
-      }
-
-      final song = _songFromStateMap(state);
-      if (song == null || song.id.trim().isEmpty) continue;
-
-      await _downloadSongInternal(
-        song,
-        uid: uid,
-        onProgress: (progress) => onSongProgress?.call(song.id, progress),
-        resumeState: state,
-      );
-    }
+    _startQueueWorkerIfNeeded();
   }
 
   /// Delete a downloaded song for current user.
@@ -879,11 +1079,42 @@ class DownloadService {
         return false;
       }
 
-      if (await partFile.length() < 1000) {
+      // ──────────────── Verification Phase ────────────────
+      _statuses[songId] = 'verifying';
+      _downloadStatusController.add({'songId': songId, 'status': 'verifying', 'progress': 1.0});
+
+      final fileSize = await partFile.length();
+      if (fileSize < 100000) { // Enforce minimum size of 100KB for verified audio files
         await _cleanupFailedDownload(songId, uid: uid, onProgress: onProgress);
         _showToast("Failed to save. File is incomplete.");
         return false;
       }
+
+      final testPlayer = AudioPlayer();
+      try {
+        final duration = await testPlayer.setFilePath(partPath);
+        if (duration == null || duration == Duration.zero) {
+          throw Exception('Audio duration is zero or unreadable.');
+        }
+
+        if (song.duration != null && song.duration! > 0) {
+          final expectedDuration = Duration(seconds: song.duration!);
+          final diff = (duration.inSeconds - expectedDuration.inSeconds).abs();
+          if (diff > 10) {
+            StabilityLogger.warning('Download', 'Duration drift for $songId: expected ${expectedDuration.inSeconds}s, got ${duration.inSeconds}s');
+          }
+        }
+      } catch (e) {
+        StabilityLogger.error('Download', 'Playback verification failed for ${song.name}: $e', e);
+        await testPlayer.dispose();
+        await _cleanupFailedDownload(songId, uid: uid, onProgress: onProgress);
+        _showToast("Download verification failed: corrupted audio file.");
+        return false;
+      } finally {
+        await testPlayer.dispose();
+      }
+      // ──────────────── End Verification Phase ────────────────
+
       if (await finalFile.exists()) {
         await finalFile.delete();
       }
@@ -1015,6 +1246,10 @@ class DownloadService {
     required double progress,
     required int receivedBytes,
     required int totalBytes,
+    int retryCount = 0,
+    int? nextRetryTime,
+    String? playlistId,
+    String? playlistName,
   }) async {
     await SessionStateService.saveDownloadState(
       uid: uid,
@@ -1042,6 +1277,10 @@ class DownloadService {
         'progress': progress,
         'receivedBytes': receivedBytes,
         'totalBytes': totalBytes,
+        'retryCount': retryCount,
+        'nextRetryTime': nextRetryTime,
+        'playlistId': playlistId,
+        'playlistName': playlistName,
         'updatedAt': DateTime.now().millisecondsSinceEpoch,
       },
     );

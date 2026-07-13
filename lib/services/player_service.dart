@@ -858,6 +858,7 @@ class PlayerService {
       final now = DateTime.now();
       if (now.difference(_lastPersistedAt) >= _persistInterval) {
         _lastPersistedAt = now;
+        StabilityLogger.debug('Playback', 'Position update: ${_player.position}');
         unawaited(
           OfflineService.recordPlaybackProgress(
             _currentSong!,
@@ -890,6 +891,10 @@ class PlayerService {
     });
 
     _playerStateSubscription ??= _player.playerStateStream.listen((state) {
+      StabilityLogger.info('Playback', 'PlayerState transition: playing=${state.playing}, processingState=${state.processingState}');
+      if (state.processingState == ProcessingState.completed) {
+        StabilityLogger.info('Playback', 'Playback completed for song: ${_currentSong?.name}');
+      }
       final isPlaying = state.playing;
       if (isPlaying) {
         _userPausedOrStoppedPlayback = false;

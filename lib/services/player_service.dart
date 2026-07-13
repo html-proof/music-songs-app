@@ -207,6 +207,11 @@ class PlayerService {
   static final StreamController<Song?> _resolvingSongController =
       StreamController<Song?>.broadcast();
   static Stream<Song?> get resolvingSongStream => _resolvingSongController.stream;
+
+  static final StreamController<Duration> _positionStreamController =
+      StreamController<Duration>.broadcast();
+  static final StreamController<Duration?> _durationStreamController =
+      StreamController<Duration?>.broadcast();
   static Song? _resolvingSong;
   static Song? get resolvingSong => _resolvingSong;
 
@@ -296,8 +301,8 @@ class PlayerService {
   static bool get hasAudioFocus => _hasAudioFocus;
   static bool get conversationModeActive => _conversationModeActive;
 
-  static Stream<Duration> get positionStream => _player.positionStream;
-  static Stream<Duration?> get durationStream => _player.durationStream;
+  static Stream<Duration> get positionStream => _positionStreamController.stream;
+  static Stream<Duration?> get durationStream => _durationStreamController.stream;
   static Stream<bool> get playingStream => _player.playingStream;
   static Stream<PlayerState> get playerStateStream => _player.playerStateStream;
   static Stream<bool> get qualitySwitchingStream =>
@@ -855,6 +860,26 @@ class PlayerService {
       }
     }
 
+    _player.positionStream.listen((pos) {
+      if (_isSessionStale(null, _currentSong?.id ?? '') ||
+          _isSwitchingSource ||
+          _isLoadingNewSong ||
+          _resolvingSong != null) {
+        return;
+      }
+      _positionStreamController.add(pos);
+    });
+
+    _player.durationStream.listen((dur) {
+      if (_isSessionStale(null, _currentSong?.id ?? '') ||
+          _isSwitchingSource ||
+          _isLoadingNewSong ||
+          _resolvingSong != null) {
+        return;
+      }
+      _durationStreamController.add(dur);
+    });
+
     _positionSubscription ??= _player.positionStream.listen((_) {
       if (!_player.playing || _currentSong == null) return;
       final now = DateTime.now();
@@ -880,7 +905,17 @@ class PlayerService {
         return;
       }
       _currentIndex = index;
-      _currentSong = _queue[index];
+      final nextSong = _queue[index];
+
+      // Reset playback state immediately on index change to prevent previous song's state from leaking
+      _positionStreamController.add(Duration.zero);
+      _durationStreamController.add(nextSong.duration != null ? Duration(seconds: nextSong.duration!) : Duration.zero);
+
+      final newSessionId = ++_activePlaybackSessionId;
+      _activePlaybackIdentity = PlaybackIdentity.fromSong(nextSong, newSessionId);
+      _activeLogger = _PlaybackSessionLogger(newSessionId, nextSong.name);
+
+      _currentSong = nextSong;
 
       _resetRateLimitStateForSong(_currentSong?.id);
       if (!_isSourceMutationInProgress) {
@@ -1882,6 +1917,10 @@ class PlayerService {
     _resolvingSong = song;
     _resolvingSongController.add(song);
     _isLoadingNewSong = true;
+
+    // Reset playback state immediately on play request to prevent previous song's state from leaking
+    _positionStreamController.add(Duration.zero);
+    _durationStreamController.add(song.duration != null ? Duration(seconds: song.duration!) : Duration.zero);
 
     // Global loading timeout: if the entire play() pipeline doesn't complete
     // within 15 seconds, force-cancel the loading state to prevent infinite

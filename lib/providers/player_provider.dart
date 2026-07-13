@@ -133,18 +133,18 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
           return;
         }
       }
-      if (!_isSeeking && !_isSwitchingSource && !_isQualitySwitching) {
+      if (!_isSeeking && (!_isSwitchingSource || pos == Duration.zero) && !_isQualitySwitching) {
         // Allow position updates to flow through even during loading,
         // as long as the audio engine is actually playing. This prevents
         // the timestamp from being frozen at 00:00.
         if (_resolvingSong != null || _isBuffering) {
           // Only accept position updates if the player is actually playing
           final playerPlaying = PlayerService.player.playing;
-          if (!playerPlaying) return;
+          if (!playerPlaying && pos != Duration.zero) return;
         }
         _position = pos;
         final currentMs = pos.inMilliseconds;
-        if ((currentMs - lastNotifiedMs).abs() >= 240 || currentMs < 1000) {
+        if ((currentMs - lastNotifiedMs).abs() >= 240 || currentMs < 1000 || pos == Duration.zero) {
           lastNotifiedMs = currentMs;
           notifyListeners();
         }
@@ -152,7 +152,7 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
     }));
 
     _subscriptions.add(PlayerService.durationStream.listen((dur) {
-      if (_isSwitchingSource || _isQualitySwitching) return;
+      if (_isQualitySwitching) return;
       if (dur != null && dur > Duration.zero) {
         _duration = dur;
       } else {
@@ -167,7 +167,7 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
     }));
 
     _subscriptions.add(PlayerService.player.currentIndexStream.listen((index) {
-      if (_isSwitchingSource || _isQualitySwitching) return;
+      if (_isQualitySwitching) return;
       final song = PlayerService.currentSong;
       if (song != null) {
         _position = Duration.zero;

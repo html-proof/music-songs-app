@@ -77,10 +77,14 @@ class LyricsManager extends ChangeNotifier {
   }
 
   void _listenToPlayerService() {
-    // When a new song starts resolving (user tapped play), clear lyrics immediately
+    // When a new song starts resolving (user tapped play), start search immediately
     _resolvingSongSub = PlayerService.resolvingSongStream.listen((song) {
       if (song != null) {
+        if (_currentSong?.id == song.id) {
+          return;
+        }
         _onSongChanging(song);
+        _scheduleFetch(song);
       }
     });
 
@@ -88,9 +92,7 @@ class LyricsManager extends ChangeNotifier {
     _currentIndexSub = PlayerService.player.currentIndexStream.listen((_) {
       final song = PlayerService.currentSong;
       if (song != null) {
-        if (_currentSong?.id == song.id &&
-            _state != LyricsLoadState.searching &&
-            _state != LyricsLoadState.idle) {
+        if (_currentSong?.id == song.id) {
           return;
         }
         _onSongChanging(song);
@@ -103,6 +105,7 @@ class LyricsManager extends ChangeNotifier {
   void _onSongChanging(Song song) {
     _generation++; // Invalidate all in-flight requests
     _cancelTimers();
+    LyricsService.cancelActiveSearches();
 
     _currentSong = song;
     _state = LyricsLoadState.searching;

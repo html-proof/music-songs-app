@@ -132,7 +132,7 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
           return;
         }
       }
-      if (!_isSeeking && _resolvingSong == null && !_isSwitchingSource && !_isQualitySwitching) {
+      if (!_isSeeking && _resolvingSong == null && !_isBuffering && !_isSwitchingSource && !_isQualitySwitching) {
         _position = pos;
         final currentMs = pos.inMilliseconds;
         if ((currentMs - lastNotifiedMs).abs() >= 240 || currentMs < 1000) {

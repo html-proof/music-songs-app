@@ -151,6 +151,33 @@ class LyricsService {
     multiLine: true,
   );
 
+  static http.Client? _activeClient;
+
+  static void cancelActiveSearches() {
+    try {
+      _activeClient?.close();
+      _activeClient = null;
+    } catch (_) {}
+  }
+
+  static String normalizeQuery(String text) {
+    var cleaned = text.toLowerCase();
+    
+    // Remove specific terms as per requirement
+    final patterns = [
+      RegExp(r'\b(official video|official audio|official music video|full video|official|audio|video|lyrics|full lyrics|song lyrics|hd|4k|remastered|live|karaoke)\b', caseSensitive: false),
+      RegExp(r'[^\w\s]', unicode: true), // Special characters
+    ];
+    
+    for (final pattern in patterns) {
+      cleaned = cleaned.replaceAll(pattern, '');
+    }
+    
+    // Extra spaces
+    cleaned = cleaned.replaceAll(RegExp(r'\s+'), ' ').trim();
+    return cleaned;
+  }
+
   static Future<File?> _localLrcFile(String songId) async {
     try {
       final appDir = await getApplicationDocumentsDirectory();
@@ -238,7 +265,6 @@ class LyricsService {
     return null;
   }
 
-  /// Progressively search for lyrics using richer metadata combinations and fallback sources.
   static Future<LyricsPayload?> progressiveLyricsSearch(Song song) async {
     final songId = song.id.trim();
     final title = song.name.trim();
@@ -249,150 +275,155 @@ class LyricsService {
 
     StabilityLogger.info('Lyrics', 'Starting progressive background search for: $title (ID: $songId)');
 
-    // 1. Try our own Saavn Backend first (if available)
-    if (songId.isNotEmpty) {
-      try {
-        final saavnCand = await _fetchSaavnCandidate(songId, artist: artist);
-        if (saavnCand != null && saavnCand.plainLyrics != null && saavnCand.plainLyrics!.trim().isNotEmpty) {
-          StabilityLogger.info('Lyrics', 'Provider SUCCESS: Saavn Backend for $songId');
-          return LyricsPayload(
-            plainLyrics: saavnCand.plainLyrics,
-            syncedLyrics: saavnCand.syncedLyrics,
-            provider: 'saavn',
-          );
+    cancelActiveSearches();
+    final client = http.Client();
+    _activeClient = client;
+
+    try {
+      final cleanTitle = _cleanTitle(title);
+      final cleanArtist = _cleanArtist(artist);
+      final cleanAlbum = _cleanTitle(album);
+
+      // Generate normalized queries
+      final queryTitle = normalizeQuery(title);
+      final queryArtist = normalizeQuery(artist);
+      final queryAlbum = normalizeQuery(album);
+
+      final Set<String> queryStrings = {};
+      if (queryTitle.isNotEmpty) {
+        queryStrings.add(queryTitle);
+        if (queryArtist.isNotEmpty) {
+          queryStrings.add('$queryTitle $queryArtist');
         }
-      } catch (e) {
-        StabilityLogger.warning('Lyrics', 'Saavn Backend lookup failed: $e');
-      }
-    }
-
-    final cleanTitle = _cleanTitle(title);
-    final cleanArtist = _cleanArtist(artist);
-    final cleanAlbum = _cleanTitle(album);
-
-    // List of query strategies to try on LRCLIB
-    final strategies = <({String label, Future<Map<String, dynamic>?> Function() execute})>[
-      // Strategy 7: ISRC or MusicBrainz ID lookup (if available)
-      if (isrc.isNotEmpty)
-        (
-          label: 'ISRC ($isrc)',
-          execute: () => _lrclibGetEntry(artist: '', title: '', isrc: isrc),
-        ),
-      // Strategy 6: Song Title + Artist + Album + Duration (Full exact match)
-      if (cleanTitle.isNotEmpty && cleanArtist.isNotEmpty && cleanAlbum.isNotEmpty && duration > 0)
-        (
-          label: 'Title+Artist+Album+Duration',
-          execute: () => _lrclibGetEntry(
-            artist: cleanArtist,
-            title: cleanTitle,
-            album: cleanAlbum,
-            durationSeconds: duration,
-          ),
-        ),
-      // Strategy 5: Song Title + Artist + Album/Movie
-      if (cleanTitle.isNotEmpty && cleanArtist.isNotEmpty && cleanAlbum.isNotEmpty)
-        (
-          label: 'Title+Artist+Album',
-          execute: () => _lrclibGetEntry(
-            artist: cleanArtist,
-            title: cleanTitle,
-            album: cleanAlbum,
-          ),
-        ),
-      // Strategy 2: Song Title + Artist
-      if (cleanTitle.isNotEmpty && cleanArtist.isNotEmpty)
-        (
-          label: 'Title+Artist',
-          execute: () => _lrclibGetEntry(
-            artist: cleanArtist,
-            title: cleanTitle,
-          ),
-        ),
-      // Strategy 3: Song Title + Album (or Movie)
-      if (cleanTitle.isNotEmpty && cleanAlbum.isNotEmpty)
-        (
-          label: 'Title+Album',
-          execute: () => _lrclibGetEntry(
-            artist: '',
-            title: cleanTitle,
-            album: cleanAlbum,
-          ),
-        ),
-      // Strategy 1: Song Title
-      if (cleanTitle.isNotEmpty)
-        (
-          label: 'Title only',
-          execute: () => _lrclibGetEntry(
-            artist: '',
-            title: cleanTitle,
-          ),
-        ),
-    ];
-
-    final lookup = _LyricsLookup.fromSong(song);
-
-    // Try strategies sequentially as fallbacks
-    for (final strategy in strategies) {
-      try {
-        debugPrint('[LyricsService] Trying strategy: ${strategy.label}');
-        final result = await strategy.execute().timeout(
-          const Duration(seconds: 3),
-        );
-        if (result != null) {
-          final candidate = _candidateFromJson(result);
-          if (candidate != null && candidate.plainLyrics != null && candidate.plainLyrics!.trim().isNotEmpty) {
-            StabilityLogger.info('Lyrics', 'Provider SUCCESS: LRCLIB ${strategy.label} for $songId');
-            return LyricsPayload(
-              plainLyrics: candidate.plainLyrics,
-              syncedLyrics: candidate.syncedLyrics,
-              provider: 'lrclib',
-            );
+        if (queryAlbum.isNotEmpty) {
+          queryStrings.add('$queryTitle $queryAlbum');
+          if (queryArtist.isNotEmpty) {
+            queryStrings.add('$queryTitle $queryArtist $queryAlbum');
           }
         }
-      } catch (e) {
-        debugPrint('[LyricsService] Strategy ${strategy.label} failed/timed out: $e');
+        queryStrings.add('$queryTitle full');
+        queryStrings.add('$queryTitle song');
       }
-    }
 
-    // 8. Try LRCLIB search fallback
-    try {
-      final query = '$cleanTitle $cleanArtist'.trim();
-      debugPrint('[LyricsService] Trying LRCLIB search query: $query');
-      final entries = await _lrclibSearchEntries(query).timeout(const Duration(seconds: 4));
-      if (entries.isNotEmpty) {
-        final candidates = entries
-            .map((json) => _candidateFromJson(json))
-            .whereType<_LyricsCandidate>()
-            .toList();
-        final bestPayload = _selectBestPayload(lookup, candidates);
-        if (bestPayload != null && bestPayload.hasAny) {
-          StabilityLogger.info('Lyrics', 'Provider SUCCESS: LRCLIB Search fallback for $songId');
-          return bestPayload;
-        }
+      final List<Future<List<_LyricsCandidate>>> tasks = [];
+
+      // 1. Saavn Backend
+      if (songId.isNotEmpty) {
+        tasks.add(() async {
+          try {
+            final cand = await _fetchSaavnCandidate(songId, artist: artist, client: client);
+            if (cand != null) return [cand];
+          } catch (_) {}
+          return const <_LyricsCandidate>[];
+        }());
+      }
+
+      // 2. JioSaavn Web Scraper
+      if (song.songUrl != null && song.songUrl!.isNotEmpty) {
+        tasks.add(() async {
+          try {
+            final scraped = await _scrapeJioSaavnLyrics(song.songUrl!, client: client);
+            if (scraped != null) {
+              return [_LyricsCandidate(
+                plainLyrics: scraped.plainLyrics,
+                syncedLyrics: scraped.syncedLyrics,
+                trackName: title,
+                artistName: artist,
+                albumName: album,
+                durationSeconds: duration,
+                language: song.language,
+              )];
+            }
+          } catch (_) {}
+          return const <_LyricsCandidate>[];
+        }());
+      }
+
+      // 3. LRCLIB Get API Tasks
+      if (isrc.isNotEmpty) {
+        tasks.add(() async {
+          try {
+            final res = await _lrclibGetEntry(
+              artist: '',
+              title: '',
+              isrc: isrc,
+              client: client,
+            );
+            if (res != null) {
+              final cand = _candidateFromJson(res);
+              if (cand != null) return [cand];
+            }
+          } catch (_) {}
+          return const <_LyricsCandidate>[];
+        }());
+      }
+
+      if (cleanTitle.isNotEmpty && cleanArtist.isNotEmpty) {
+        tasks.add(() async {
+          try {
+            final res = await _lrclibGetEntry(
+              artist: cleanArtist,
+              title: cleanTitle,
+              album: cleanAlbum.isNotEmpty ? cleanAlbum : null,
+              durationSeconds: duration > 0 ? duration : null,
+              client: client,
+            );
+            if (res != null) {
+              final cand = _candidateFromJson(res);
+              if (cand != null) return [cand];
+            }
+          } catch (_) {}
+          return const <_LyricsCandidate>[];
+        }());
+      }
+
+      // Parallel search queries on LRCLIB
+      for (final q in queryStrings) {
+        if (q.isEmpty) continue;
+        tasks.add(() async {
+          try {
+            final entries = await _lrclibSearchEntries(q, client: client);
+            return entries
+                .map((json) => _candidateFromJson(json))
+                .whereType<_LyricsCandidate>()
+                .toList();
+          } catch (_) {}
+          return const <_LyricsCandidate>[];
+        }());
+      }
+
+      // Wait for all parallel searches to complete (with a timeout of 8 seconds)
+      final allResults = await Future.wait(tasks)
+          .timeout(const Duration(seconds: 8));
+
+      // Flatten the candidates list
+      final candidates = allResults.expand((x) => x).toList();
+
+      if (candidates.isEmpty) {
+        StabilityLogger.warning('Lyrics', 'All parallel lyrics searches returned empty for: $title (ID: $songId)');
+        return null;
+      }
+
+      final lookup = _LyricsLookup.fromSong(song);
+      final bestPayload = _selectBestPayload(lookup, candidates);
+
+      if (bestPayload != null && bestPayload.hasAny) {
+        return bestPayload;
       }
     } catch (e) {
-      debugPrint('[LyricsService] LRCLIB search fallback failed: $e');
-    }
-
-    // 9. JioSaavn Web Scraper Fallback (if songUrl is available)
-    if (song.songUrl != null && song.songUrl!.isNotEmpty) {
-      try {
-        StabilityLogger.info('Lyrics', 'Falling back to JioSaavn scrape for: ${song.name}');
-        final scraped = await _scrapeJioSaavnLyrics(song.songUrl!).timeout(const Duration(seconds: 4));
-        if (scraped != null && scraped.hasAny) {
-          StabilityLogger.info('Lyrics', 'Provider SUCCESS: JioSaavn scrape for $songId');
-          return scraped;
-        }
-      } catch (e) {
-        StabilityLogger.warning('Lyrics', 'JioSaavn scrape fallback failed: $e');
+      debugPrint('[LyricsService] Parallel progressive search failed or timed out: $e');
+    } finally {
+      if (_activeClient == client) {
+        _activeClient = null;
       }
+      client.close();
     }
 
-    StabilityLogger.warning('Lyrics', 'All progressive lyrics searches failed for: $title (ID: $songId)');
     return null;
   }
 
-  static Future<LyricsPayload?> _scrapeJioSaavnLyrics(String songUrl) async {
+  static Future<LyricsPayload?> _scrapeJioSaavnLyrics(String songUrl, {http.Client? client}) async {
+    final clientToUse = client ?? http.Client();
     try {
       final uri = Uri.parse(songUrl);
       final segments = uri.pathSegments;
@@ -403,7 +434,7 @@ class LyricsService {
       final id = segments[2];
       final lyricsUrl = 'https://www.jiosaavn.com/lyrics/$slug-lyrics/$id';
 
-      final res = await http.get(
+      final res = await clientToUse.get(
         Uri.parse(lyricsUrl),
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -450,6 +481,10 @@ class LyricsService {
     } catch (e) {
       debugPrint('[LyricsService] JioSaavn scrape failed: $e');
       return null;
+    } finally {
+      if (client == null) {
+        clientToUse.close();
+      }
     }
   }
 
@@ -621,7 +656,9 @@ class LyricsService {
     String? album,
     int? durationSeconds,
     String? isrc,
+    http.Client? client,
   }) async {
+    final clientToUse = client ?? http.Client();
     try {
       final query = <String, String>{
         if (isrc != null && isrc.trim().isNotEmpty) 'isrc': isrc.trim(),
@@ -635,7 +672,7 @@ class LyricsService {
         '$_lrclibBaseUrl/get',
       ).replace(queryParameters: query);
 
-      final res = await http
+      final res = await clientToUse
           .get(
             uri,
             headers: {'User-Agent': 'MusicHub/2.0 (https://github.com)'},
@@ -649,18 +686,24 @@ class LyricsService {
     } catch (e) {
       debugPrint('[LyricsService] LRCLIB get failed: $e');
       return null;
+    } finally {
+      if (client == null) {
+        clientToUse.close();
+      }
     }
   }
 
   static Future<List<Map<String, dynamic>>> _lrclibSearchEntries(
-    String query,
-  ) async {
+    String query, {
+    http.Client? client,
+  }) async {
+    final clientToUse = client ?? http.Client();
     try {
       final uri = Uri.parse(
         '$_lrclibBaseUrl/search',
       ).replace(queryParameters: {'q': query});
 
-      final res = await http
+      final res = await clientToUse
           .get(
             uri,
             headers: {'User-Agent': 'MusicHub/2.0 (https://github.com)'},
@@ -680,16 +723,22 @@ class LyricsService {
     } catch (e) {
       debugPrint('[LyricsService] LRCLIB search failed: $e');
       return const <Map<String, dynamic>>[];
+    } finally {
+      if (client == null) {
+        clientToUse.close();
+      }
     }
   }
 
   static Future<_LyricsCandidate?> _fetchSaavnCandidate(
     String trackId, {
     String? artist,
+    http.Client? client,
   }) async {
+    final clientToUse = client ?? http.Client();
     try {
       final uri = Uri.parse('${ApiService.baseUrl}/api/songs/$trackId/lyrics');
-      final res = await http.get(
+      final res = await clientToUse.get(
         uri,
         headers: {'User-Agent': 'MusicHub/2.0'},
       ).timeout(_requestTimeout);
@@ -718,6 +767,10 @@ class LyricsService {
     } catch (e) {
       debugPrint('[LyricsService] Saavn candidate fetch failed: $e');
       return null;
+    } finally {
+      if (client == null) {
+        clientToUse.close();
+      }
     }
   }
 

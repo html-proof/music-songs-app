@@ -510,19 +510,17 @@ class Song {
   }) {
     final effectiveMb = maxMegabytes < 0 ? _streamingTargetMaxMb : maxMegabytes;
     final effectiveMax = maxKbps.clamp(1, streamingMaxKbps).toInt();
-    if (effectiveMb <= 0) return effectiveMax;
-    if (durationSeconds == null || durationSeconds <= 0) return effectiveMax;
-
-    final kbpsForCap = ((effectiveMb * 1024 * 8) / durationSeconds).floor();
-    final cappedKbps = kbpsForCap.clamp(1, effectiveMax).toInt();
+    
+    final targetLimit = (effectiveMb <= 0 || durationSeconds == null || durationSeconds <= 0)
+        ? effectiveMax
+        : ((effectiveMb * 1024 * 8) / durationSeconds).floor().clamp(1, effectiveMax).toInt();
 
     int selected = _knownStreamBitratesKbps.first;
     for (final step in _knownStreamBitratesKbps) {
-      if (step > effectiveMax) break;
-      if (step <= cappedKbps) {
+      if (step <= targetLimit) {
         selected = step;
       }
     }
-    return selected.clamp(1, effectiveMax).toInt();
+    return selected;
   }
 }

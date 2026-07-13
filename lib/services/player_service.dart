@@ -1817,12 +1817,22 @@ class PlayerService {
     _sourceSwitchingController.add(switching);
   }
 
+  static void _checkSession(int sessionId) {
+    if (sessionId != _activePlaybackSessionId) {
+      throw PlayerException(
+        0,
+        'interrupted by another call',
+        _currentIndex,
+      );
+    }
+  }
+
   static Future<void> play(
     Song song, {
     List<Song>? playlist,
     int? index,
   }) async {
-    StabilityLogger.info('Playback', 'Play requested for song: ${song.name} (ID: ${song.id})');
+    StabilityLogger.info('Playback', 'Play requested for song: ${song.name} (ID: ${song.id}). Playback initialization started.');
 
     // If the same song is actively resolving, ignore the duplicate request
     if (_resolvingSong?.id == song.id) {
@@ -1855,61 +1865,62 @@ class PlayerService {
     _isLoadingNewSong = true;
 
     try {
-      await _player.stop();
-    } catch (_) {}
+      try {
+        await _player.stop();
+      } catch (_) {}
 
-    _fallbackSongResolved = false;
-    final playableSong = await _resolveSongForPlayback(song, sessionId: sessionId, client: _activeHttpClient);
+      _checkSession(sessionId);
+      _fallbackSongResolved = false;
+      final playableSong = await _resolveSongForPlayback(song, sessionId: sessionId, client: _activeHttpClient);
 
-    // Cancel remaining requests / tasks from this session
-    _activeHttpClient?.close();
-    _activeHttpClient = null;
+      _checkSession(sessionId);
 
-    _resolvingSong = null;
-    _resolvingSongController.add(null);
-    _isLoadingNewSong = false;
+      // Cancel remaining requests / tasks from this session
+      _activeHttpClient?.close();
+      _activeHttpClient = null;
 
-    if (playableSong == null) {
-      if (sessionId == _activePlaybackSessionId) {
-        _activeLogger?.logStep('Playback started', false, detail: 'Resolution failed');
-        _activeLogger?.printReport('FAILED: Toast displayed, queue unchanged');
-        _showThrottledToast(
-          "Sorry, this song couldn't be found or played. Please try another version or search for the song manually.",
-          toastLength: Toast.LENGTH_LONG,
-        );
+      if (playableSong == null) {
+        if (sessionId == _activePlaybackSessionId) {
+          _resolvingSong = null;
+          _resolvingSongController.add(null);
+          _isLoadingNewSong = false;
+          _activeLogger?.logStep('Playback started', false, detail: 'Resolution failed');
+          _activeLogger?.printReport('FAILED: Toast displayed, queue unchanged');
+          _showThrottledToast(
+            "Sorry, this song couldn't be found or played. Please try another version or search for the song manually.",
+            toastLength: Toast.LENGTH_LONG,
+          );
+        }
+        return;
       }
-      return;
-    }
 
-    if (sessionId != _activePlaybackSessionId) {
-      _activeLogger?.logStep('Playback started', false, detail: 'SUPERSEDED by newer request');
-      _activeLogger?.printReport('SUPERSEDED: Ignored');
-      StabilityLogger.info('Playback', 'Playback request for ${song.name} superseded by a newer request. Ignoring.');
-      return;
-    }
+      _checkSession(sessionId);
 
-    _activeLogger?.logStep('Source resolved', true, detail: playableSong.streamUrl);
-    StabilityLogger.info('Playback', 'Source resolved for: ${playableSong.name} - ${playableSong.streamUrl}');
-    _activeLogger?.logStep('Playback started', true);
-    _activeLogger?.printReport('SUCCESS');
+      StabilityLogger.info('Playback', 'Source resolved for: ${playableSong.name}. Location: ${_isLocalFilePath(playableSong.streamUrl ?? "") ? "Local file" : "Remote stream URL"}.');
+      _activeLogger?.logStep('Source resolved', true, detail: playableSong.streamUrl);
+      _activeLogger?.logStep('Playback started', true);
+      _activeLogger?.printReport('SUCCESS');
 
-    _resetRateLimitStateForSong(playableSong.id);
-    _userPausedOrStoppedPlayback = false;
-    _pausedByAudioInterruption = false;
-    _pausedByOutputDisconnect = false;
-    _interruptionResumeInProgress = false;
-    await _resetDuckState(restoreVolume: true);
-    _setInterruptionActive(false);
-    _recentAutoplayAlbumKeys
-      ..clear()
-      ..addAll(
-        _albumKey(playableSong.album).isEmpty
-            ? const []
-            : <String>[_albumKey(playableSong.album)],
-      );
+      _resetRateLimitStateForSong(playableSong.id);
+      _userPausedOrStoppedPlayback = false;
+      _pausedByAudioInterruption = false;
+      _pausedByOutputDisconnect = false;
+      _interruptionResumeInProgress = false;
+      await _resetDuckState(restoreVolume: true);
+      _setInterruptionActive(false);
+      _recentAutoplayAlbumKeys
+        ..clear()
+        ..addAll(
+          _albumKey(playableSong.album).isEmpty
+              ? const []
+              : <String>[_albumKey(playableSong.album)],
+        );
 
-    try {
+      _checkSession(sessionId);
+
       final initialPos = null; // Always start fresh songs at 0:00
+      StabilityLogger.info('Playback', 'Preparing player for: ${playableSong.name}');
+
       if (playlist != null && playlist.isNotEmpty) {
         _originalQueue = List<Song>.from(playlist);
         List<Song> activePlaylist = List<Song>.from(playlist);
@@ -1919,6 +1930,8 @@ class PlayerService {
           activePlaylist = _smartShuffle(activePlaylist, playableSong);
           activeIndex = 0;
         }
+
+        _checkSession(sessionId);
 
         await _setQueueSource(
           playableSong,
@@ -1930,6 +1943,9 @@ class PlayerService {
         );
       } else {
         _originalQueue = [playableSong];
+
+        _checkSession(sessionId);
+
         await _setSingleSource(
           playableSong,
           initialPosition: initialPos,
@@ -1938,17 +1954,35 @@ class PlayerService {
         );
       }
 
+      _checkSession(sessionId);
+
+      StabilityLogger.info('Playback', 'Player preparation completed. Starting playback.');
       final started = await _playEnsuringAudioFocus();
+      
+      _checkSession(sessionId);
+
       if (!started) {
         StabilityLogger.warning('Playback', 'Playback failed to start for song: ${playableSong.name} (audio focus denied).');
-        _userPausedOrStoppedPlayback = true;
-        _savePlaybackState(wasPlayingOverride: false);
+        if (sessionId == _activePlaybackSessionId) {
+          _resolvingSong = null;
+          _resolvingSongController.add(null);
+          _isLoadingNewSong = false;
+          _userPausedOrStoppedPlayback = true;
+          _savePlaybackState(wasPlayingOverride: false);
+        }
         return;
       }
-      StabilityLogger.info('Playback', 'Playback started successfully for: ${playableSong.name}');
-      _songPlayStartedAt = DateTime.now();
-      _songPlayStartedId = playableSong.id;
-      _savePlaybackState();
+
+      if (sessionId == _activePlaybackSessionId) {
+        _resolvingSong = null;
+        _resolvingSongController.add(null);
+        _isLoadingNewSong = false;
+        StabilityLogger.info('Playback', 'Playback started successfully. Final status: PLAYING.');
+        _songPlayStartedAt = DateTime.now();
+        _songPlayStartedId = playableSong.id;
+        _savePlaybackState();
+      }
+
       unawaited(_triggerAutoplayIfNeeded());
 
       // Trigger Smart Offline Caching
@@ -1978,8 +2012,15 @@ class PlayerService {
         });
       } catch (_) {}
     } catch (e) {
+      if (sessionId == _activePlaybackSessionId) {
+        _resolvingSong = null;
+        _resolvingSongController.add(null);
+        _isLoadingNewSong = false;
+      }
       if (_isLoadingInterruptedError(e)) return;
       debugPrint('Playback error: $e');
+      StabilityLogger.error('Playback', 'Playback failed for: ${song.name}. Initiating recovery flow.', e);
+
       if (e is PlayerException) {
         unawaited(
           _handlePlayerError(e).catchError((Object err, StackTrace st) {
@@ -2019,6 +2060,16 @@ class PlayerService {
 
     _activeLogger?.logStep('Playback error triggered', false, detail: error.message);
 
+    // Try recovering from offline cache first (if local downloaded file exists)
+    try {
+      if (await _tryRecoverFromOfflineCache(activeSong)) {
+        StabilityLogger.info('Playback', 'Successfully recovered playback from offline cache/download for ${activeSong.name}');
+        return;
+      }
+    } catch (e) {
+      debugPrint('Error during early offline cache recovery: $e');
+    }
+
     if (message.contains('429')) {
       if (_rateLimitRetryInProgress) return;
 
@@ -2027,9 +2078,10 @@ class PlayerService {
         _activeLogger?.logStep('Rate limit retry count exceeded', false);
         _activeLogger?.printReport('FAILED: Toast displayed, queue unchanged');
         _showThrottledToast(
-          "Sorry, this song couldn't be found or played. Please try another version or search for the song manually.",
+          "Sorry, this song couldn't be found or played. Skipping to next song...",
           toastLength: Toast.LENGTH_LONG,
         );
+        unawaited(skipNext());
         return;
       }
 
@@ -2053,9 +2105,10 @@ class PlayerService {
           _activeLogger?.logStep('Recovery search', false, detail: 'Resolution failed');
           _activeLogger?.printReport('FAILED: Toast displayed, queue unchanged');
           _showThrottledToast(
-            "Sorry, this song couldn't be found or played. Please try another version or search for the song manually.",
+            "Sorry, this song couldn't be found or played. Skipping to next song...",
             toastLength: Toast.LENGTH_LONG,
           );
+          unawaited(skipNext());
           return;
         }
 
@@ -2086,22 +2139,25 @@ class PlayerService {
         _activeLogger?.logStep('Recovery search', false, detail: 'Error: $e');
         _activeLogger?.printReport('FAILED: Toast displayed, queue unchanged');
         _showThrottledToast(
-          "Sorry, this song couldn't be found or played. Please try another version or search for the song manually.",
+          "Sorry, this song couldn't be found or played. Skipping to next song...",
           toastLength: Toast.LENGTH_LONG,
         );
+        unawaited(skipNext());
       } finally {
         _rateLimitRetryInProgress = false;
       }
       return;
     }
 
-    // Handle expired/forbidden URLs (e.g. paused for a long time)
+    // Handle expired/forbidden URLs or timeouts
+    final isTimeout = message.contains('timeout') || message.contains('time out') || error.message?.toLowerCase().contains('timeout') == true;
     if (message.contains('403') ||
         message.contains('404') ||
         message.contains('410') ||
         message.contains('forbidden') ||
         message.contains('unauthorized') ||
         message.contains('expire') ||
+        isTimeout ||
         (message.contains('source error') && await _isNetworkConnected())) {
       if (_rateLimitRetryInProgress) return;
 
@@ -2110,9 +2166,10 @@ class PlayerService {
         _activeLogger?.logStep('Recovery attempt count exceeded', false);
         _activeLogger?.printReport('FAILED: Toast displayed, queue unchanged');
         _showThrottledToast(
-          "Sorry, this song couldn't be found or played. Please try another version or search for the song manually.",
+          "Sorry, this song couldn't be found or played. Skipping to next song...",
           toastLength: Toast.LENGTH_LONG,
         );
+        unawaited(skipNext());
         return;
       }
 
@@ -2120,7 +2177,7 @@ class PlayerService {
       _rateLimitRetryCount += 1;
 
       debugPrint(
-        'Stream URL expired or forbidden. Re-resolving ${activeSong.id}...',
+        'Stream URL expired, forbidden, or timed out. Re-resolving ${activeSong.id}...',
       );
 
       try {
@@ -2143,9 +2200,10 @@ class PlayerService {
           _activeLogger?.logStep('Recovery search', false, detail: 'Resolution failed');
           _activeLogger?.printReport('FAILED: Toast displayed, queue unchanged');
           _showThrottledToast(
-            "Sorry, this song couldn't be found or played. Please try another version or search for the song manually.",
+            "Sorry, this song couldn't be found or played. Skipping to next song...",
             toastLength: Toast.LENGTH_LONG,
           );
+          unawaited(skipNext());
           return;
         }
 
@@ -2176,9 +2234,10 @@ class PlayerService {
         _activeLogger?.logStep('Recovery search', false, detail: 'Error: $e');
         _activeLogger?.printReport('FAILED: Toast displayed, queue unchanged');
         _showThrottledToast(
-          "Sorry, this song couldn't be found or played. Please try another version or search for the song manually.",
+          "Sorry, this song couldn't be found or played. Skipping to next song...",
           toastLength: Toast.LENGTH_LONG,
         );
+        unawaited(skipNext());
       } finally {
         _rateLimitRetryInProgress = false;
       }
@@ -2197,11 +2256,6 @@ class PlayerService {
 
       await _temporarilyDowngradeAutoQuality();
       await _handleNetworkDropDuringPlayback();
-      return;
-    }
-
-    if (await _tryRecoverFromOfflineCache(activeSong)) {
-      debugPrint('Recovered playback from offline cache for ${activeSong.id}.');
       return;
     }
   }
@@ -2356,7 +2410,9 @@ class PlayerService {
         sources,
         initialIndex: _currentIndex,
         initialPosition: initialPosition ?? Duration.zero,
-      );
+      ).timeout(const Duration(seconds: 12), onTimeout: () {
+        throw TimeoutException('Player preparation timed out after 12 seconds');
+      });
     });
     // Guarantee start at 0:00 for fresh plays.
     if (initialPosition == null) {
@@ -2420,7 +2476,9 @@ class PlayerService {
       await _player.setAudioSource(
         resolvedTarget.audioSource,
         initialPosition: initialPosition ?? Duration.zero,
-      );
+      ).timeout(const Duration(seconds: 12), onTimeout: () {
+        throw TimeoutException('Player preparation timed out after 12 seconds');
+      });
     });
     // Guarantee start at 0:00 — belt-and-suspenders guard against
     // just_audio carrying over a residual buffer position.
@@ -3317,7 +3375,20 @@ class PlayerService {
   }
 
   static Future<void> togglePlayPause() async {
-    if (_isLoadingNewSong) return;
+    if (_isLoadingNewSong) {
+      StabilityLogger.info('Playback', 'Play/Pause toggled while loading. Cancelling loading.');
+      _userPausedOrStoppedPlayback = true;
+      _activePlaybackSessionId++;
+      _activeHttpClient?.close();
+      _activeHttpClient = null;
+      _resolvingSong = null;
+      _resolvingSongController.add(null);
+      _isLoadingNewSong = false;
+      try {
+        await _player.stop();
+      } catch (_) {}
+      return;
+    }
     if (_player.playing) {
       await pause();
     } else {

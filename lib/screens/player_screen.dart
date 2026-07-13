@@ -12,6 +12,7 @@ import '../screens/album_detail_screen.dart';
 import '../services/api_service.dart';
 import '../services/listening_safety_service.dart';
 import '../services/lyrics_manager.dart';
+import '../services/player_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/offline_artwork.dart';
 
@@ -458,9 +459,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
         return ValueListenableBuilder<double?>(
           valueListenable: _scrubNotifier,
           builder: (context, scrubValue, _) {
-            final visualPosition = scrubValue != null
-                ? Duration(milliseconds: (scrubValue * 1000).round())
-                : player.position;
+            return StreamBuilder<Duration>(
+              stream: PlayerService.positionStream,
+              initialData: player.position,
+              builder: (context, snapshot) {
+                final currentPosition = snapshot.data ?? player.position;
+                final visualPosition = scrubValue != null
+                    ? Duration(milliseconds: (scrubValue * 1000).round())
+                    : currentPosition;
 
             Widget mainPlayerView = Column(
               children: [
@@ -863,6 +869,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
                   ),
                 ),
               ),
+            );
+              },
             );
           },
         );

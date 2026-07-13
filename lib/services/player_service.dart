@@ -1721,7 +1721,7 @@ class PlayerService {
       return fallback;
     }
 
-    final client = http.Client();
+    final client = ApiService.createSecureHttpClient(pinCertificates: false);
     final stopwatch = Stopwatch()..start();
     var receivedBytes = 0;
 
@@ -1862,7 +1862,7 @@ class PlayerService {
     await init();
 
     _activeHttpClient?.close();
-    _activeHttpClient = http.Client();
+    _activeHttpClient = ApiService.createSecureHttpClient(pinCertificates: false);
 
     final sessionId = ++_activePlaybackSessionId;
     _activeLogger = _PlaybackSessionLogger(sessionId, song.name);
@@ -2721,7 +2721,7 @@ class PlayerService {
       }
     }
 
-    final localClient = client ?? http.Client();
+    final localClient = client ?? ApiService.createSecureHttpClient(pinCertificates: false);
     try {
       var candidateSong = _optimizeRemoteStreamForCurrentQuality(song);
       final existingStreamUrl = (candidateSong.streamUrl ?? '').trim();
@@ -2985,7 +2985,7 @@ class PlayerService {
 
     if (sessionId != null && sessionId != _activePlaybackSessionId) return null;
 
-    final localClient = client ?? http.Client();
+    final localClient = client ?? ApiService.createSecureHttpClient(pinCertificates: false);
     try {
       debugPrint('Parallel searches initiated for variants: $queries');
       final searchFutures = queries.map((query) => _searchSongsWithClient(query, localClient));

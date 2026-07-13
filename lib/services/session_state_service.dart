@@ -43,9 +43,10 @@ class SessionStateService {
     final existing = prefs.getString(_encryptionKeyPref);
     if (existing != null && existing.isNotEmpty) {
       try {
-        final decoded = base64Decode(existing);
-        if (decoded.length == 32) {
-          return Uint8List.fromList(decoded);
+        final obfuscatedBytes = base64Decode(existing);
+        final deobfuscatedBytes = _deobfuscateKey(obfuscatedBytes);
+        if (deobfuscatedBytes.length == 32) {
+          return deobfuscatedBytes;
         }
       } catch (_) {}
     }
@@ -53,8 +54,23 @@ class SessionStateService {
     final random = Random.secure();
     final bytes = List<int>.generate(32, (_) => random.nextInt(256));
     final key = Uint8List.fromList(bytes);
-    await prefs.setString(_encryptionKeyPref, base64Encode(key));
+    final obfuscatedBytes = _obfuscateKey(key);
+    await prefs.setString(_encryptionKeyPref, base64Encode(obfuscatedBytes));
     return key;
+  }
+
+  static final List<int> _xorKey = [0x5A, 0xA5, 0x1F, 0xF1, 0x3C, 0xC3, 0x4B, 0xB4];
+
+  static Uint8List _obfuscateKey(Uint8List key) {
+    final result = Uint8List(key.length);
+    for (int i = 0; i < key.length; i++) {
+      result[i] = key[i] ^ _xorKey[i % _xorKey.length];
+    }
+    return result;
+  }
+
+  static Uint8List _deobfuscateKey(Uint8List obfuscatedKey) {
+    return _obfuscateKey(obfuscatedKey);
   }
 
   static Box<dynamic> get _secureBox {

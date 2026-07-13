@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'package:connectivity_plus/connectivity_plus.dart';
-import 'package:http/http.dart' as http;
+import 'api_service.dart';
 import 'stability_logger.dart';
 
 enum ConnectionStatus {
@@ -112,7 +112,7 @@ class ConnectivityManager {
 
   static Future<bool> _checkLatency() async {
     try {
-      final client = http.Client();
+      final client = ApiService.createSecureHttpClient(pinCertificates: false);
       final stopwatch = Stopwatch()..start();
       final response = await client
           .head(Uri.parse(_probeUrl))

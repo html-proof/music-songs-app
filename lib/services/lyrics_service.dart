@@ -276,7 +276,7 @@ class LyricsService {
     StabilityLogger.info('Lyrics', 'Starting progressive background search for: $title (ID: $songId)');
 
     cancelActiveSearches();
-    final client = http.Client();
+    final client = ApiService.createSecureHttpClient(pinCertificates: false);
     _activeClient = client;
 
     try {
@@ -596,7 +596,7 @@ class LyricsService {
   }
 
   static Future<LyricsPayload?> _scrapeJioSaavnLyrics(String songUrl, {http.Client? client}) async {
-    final clientToUse = client ?? http.Client();
+    final clientToUse = client ?? ApiService.createSecureHttpClient(pinCertificates: false);
     try {
       final uri = Uri.parse(songUrl);
       final segments = uri.pathSegments;
@@ -831,7 +831,7 @@ class LyricsService {
     String? isrc,
     http.Client? client,
   }) async {
-    final clientToUse = client ?? http.Client();
+    final clientToUse = client ?? ApiService.createSecureHttpClient(pinCertificates: false);
     try {
       final query = <String, String>{
         if (isrc != null && isrc.trim().isNotEmpty) 'isrc': isrc.trim(),
@@ -870,7 +870,7 @@ class LyricsService {
     String query, {
     http.Client? client,
   }) async {
-    final clientToUse = client ?? http.Client();
+    final clientToUse = client ?? ApiService.createSecureHttpClient(pinCertificates: false);
     try {
       final uri = Uri.parse(
         '$_lrclibBaseUrl/search',
@@ -908,7 +908,7 @@ class LyricsService {
     String? artist,
     http.Client? client,
   }) async {
-    final clientToUse = client ?? http.Client();
+    final clientToUse = client ?? ApiService.createSecureHttpClient(pinCertificates: false);
     try {
       final uri = Uri.parse('${ApiService.baseUrl}/api/songs/$trackId/lyrics');
       final res = await clientToUse.get(

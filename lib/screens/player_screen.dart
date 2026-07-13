@@ -441,6 +441,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
         // Only fire once per song to avoid rebuild loops
         if (_lastRequestedLyricsSongId != song.id) {
           _lastRequestedLyricsSongId = song.id;
+          _activeLyricIndexCache = -1;
+          _lastScrolledLyricIndex = -1;
+          _lyricsAutoScrollPausedByUser = false;
           WidgetsBinding.instance.addPostFrameCallback((_) {
             if (mounted) {
               context.read<LyricsManager>().requestLyrics(song);

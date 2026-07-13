@@ -43,5 +43,21 @@ void main() {
       final targetUrl = uddgMatch!.group(1)!;
       expect(targetUrl, 'https://www.azlyrics.com/lyrics/bollywood/kesariya.html');
     });
+
+    test('generateScraperQueries generates the correct combinations', () {
+      final queries = LyricsService.generateScraperQueries(
+        'Vaathi Raid (From "Master")',
+        'Anirudh Ravichander',
+        'Master',
+        'Tamil',
+      );
+      expect(queries, contains('vaathi raid lyrics'));
+      expect(queries, contains('vaathi raid master lyrics'));
+      expect(queries, contains('vaathi raid anirudh ravichander lyrics'));
+      expect(queries, contains('vaathi raid master anirudh lyrics'));
+      expect(queries, contains('master vaathi raid lyrics'));
+      expect(queries, contains('vaathi raid tamil lyrics'));
+      expect(queries, contains('vaathi raid full lyrics'));
+    });
   });
 }

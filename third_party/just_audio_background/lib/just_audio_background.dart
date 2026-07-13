@@ -633,6 +633,10 @@ class _PlayerAudioHandler extends BaseAudioHandler
 
   @override
   Future<void> skipToPrevious() async {
+    if (currentPosition > const Duration(seconds: 10)) {
+      await seek(Duration.zero);
+      return;
+    }
     if (hasPrevious) {
       await skipToQueueItem(previousIndex!);
       return;

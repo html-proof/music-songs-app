@@ -434,37 +434,17 @@ class LyricsManager extends ChangeNotifier {
     final millis = position.inMilliseconds;
     if (millis < lines.first.time.inMilliseconds) return -1;
 
-    int binarySearch() {
-      var left = 0;
-      var right = lines.length - 1;
-      while (left <= right) {
-        final mid = (left + right) >> 1;
-        if (lines[mid].time.inMilliseconds <= millis) {
-          left = mid + 1;
-        } else {
-          right = mid - 1;
-        }
+    var left = 0;
+    var right = lines.length - 1;
+    while (left <= right) {
+      final mid = (left + right) >> 1;
+      if (lines[mid].time.inMilliseconds <= millis) {
+        left = mid + 1;
+      } else {
+        right = mid - 1;
       }
-      return right.clamp(0, lines.length - 1);
     }
-
-    if (cachedIndex < 0 || cachedIndex >= lines.length) {
-      return binarySearch();
-    }
-
-    // Large seek: use binary search
-    if ((millis - lines[cachedIndex].time.inMilliseconds).abs() > 10000) {
-      return binarySearch();
-    }
-
-    var index = cachedIndex;
-    while (index + 1 < lines.length && millis >= lines[index + 1].time.inMilliseconds) {
-      index++;
-    }
-    while (index > 0 && millis < lines[index].time.inMilliseconds) {
-      index--;
-    }
-    return index.clamp(0, lines.length - 1);
+    return right.clamp(0, lines.length - 1);
   }
 
   // ─────────────────────────────────────────────────────────

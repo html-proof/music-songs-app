@@ -1628,35 +1628,39 @@ class PlayerService {
   }
 
   static Future<int> _resolvePreferredStreamingKbps() async {
+    int resolvedKbps;
+    
     // Manual override: lock to selected bitrate, no auto-switching.
     if (_selectedAudioQuality != AudioQuality.auto) {
-      return _selectedAudioQuality.kbps.clamp(1, Song.streamingMaxKbps).toInt();
+      resolvedKbps = _selectedAudioQuality.kbps.clamp(1, Song.streamingMaxKbps).toInt();
+    } else if (_temporaryAutoKbps != null) {
+      resolvedKbps = _temporaryAutoKbps!.clamp(1, Song.streamingMaxKbps).toInt();
+    } else {
+      final connectivity = await Connectivity().checkConnectivity();
+      final hasConn = connectivity.any((r) => r != ConnectivityResult.none);
+      if (!hasConn) {
+        resolvedKbps = _adaptiveLowKbps;
+      } else {
+        final currentProbeUrl = (_currentSong?.streamUrl ?? '').trim();
+        final probeUrl =
+            currentProbeUrl.isNotEmpty && !_isLocalFilePath(currentProbeUrl)
+            ? currentProbeUrl
+            : _defaultSpeedProbeUrl;
+        final speedMbps = await _measureNetworkSpeedMbps(
+          connectivity: connectivity,
+          probeUrl: probeUrl,
+        );
+        resolvedKbps = _adaptiveBitrateFromSpeed(speedMbps);
+        if (_dataSaverEnabled &&
+            connectivity.contains(ConnectivityResult.mobile)) {
+          resolvedKbps = _adaptiveLowKbps;
+        }
+      }
     }
 
-    // Temporary downgrade (e.g. after a stream error) takes priority.
-    if (_temporaryAutoKbps != null) {
-      return _temporaryAutoKbps!.clamp(1, Song.streamingMaxKbps).toInt();
-    }
-
-    final connectivity = await Connectivity().checkConnectivity();
-    final hasConn = connectivity.any((r) => r != ConnectivityResult.none);
-    if (!hasConn) {
-      return _adaptiveLowKbps;
-    }
-
-    final currentProbeUrl = (_currentSong?.streamUrl ?? '').trim();
-    final probeUrl =
-        currentProbeUrl.isNotEmpty && !_isLocalFilePath(currentProbeUrl)
-        ? currentProbeUrl
-        : _defaultSpeedProbeUrl;
-    final speedMbps = await _measureNetworkSpeedMbps(
-      connectivity: connectivity,
-      probeUrl: probeUrl,
-    );
-    var resolvedKbps = _adaptiveBitrateFromSpeed(speedMbps);
-    if (_dataSaverEnabled &&
-        connectivity.contains(ConnectivityResult.mobile)) {
-      resolvedKbps = _adaptiveLowKbps;
+    // Apply strict cap if Data Saver is enabled (Normal/96 kbps or lower)
+    if (_dataSaverEnabled && resolvedKbps > AudioQuality.normal.kbps) {
+      resolvedKbps = AudioQuality.normal.kbps;
     }
 
     return resolvedKbps.clamp(1, Song.streamingMaxKbps).toInt();
@@ -5747,6 +5751,15 @@ class _PlaybackSessionLogger {
 
 class CustomAudioPlayer extends AudioPlayer {
   bool _isInternal = false;
+
+  CustomAudioPlayer() : super(
+    audioLoadConfiguration: const AudioLoadConfiguration(
+      androidLoadControl: AndroidLoadControl(
+        maxBufferDuration: Duration(seconds: 20),
+        backBufferDuration: Duration(seconds: 10),
+      ),
+    ),
+  );
 
   @override
   Future<void> seekToPrevious() async {

@@ -142,6 +142,11 @@ class PreferencesScreen extends StatelessWidget {
                       offlinePlaybackEnabled: preferences.offlinePlaybackEnabled,
                       skipUnavailableOffline: preferences.skipUnavailableOffline,
                       allowStreamingFallback: preferences.allowStreamingFallback,
+                      autoRefreshEnabled: preferences.autoRefreshEnabled,
+                      refreshOnWifiOnly: preferences.refreshOnWifiOnly,
+                      autoDownloadOnWifiOnly: preferences.autoDownloadOnWifiOnly,
+                      lyricsAutoFetch: preferences.lyricsAutoFetch,
+                      artworkHighQuality: preferences.artworkHighQuality,
                       onAutoplayChanged: (enabled) async {
                         await preferences.setAutoplayEnabled(enabled);
                       },
@@ -181,6 +186,21 @@ class PreferencesScreen extends StatelessWidget {
                       },
                       onStreamingFallbackChanged: (enabled) async {
                         await preferences.setStreamingFallbackEnabled(enabled);
+                      },
+                      onAutoRefreshChanged: (enabled) async {
+                        await preferences.setAutoRefreshEnabled(enabled);
+                      },
+                      onRefreshOnWifiOnlyChanged: (enabled) async {
+                        await preferences.setRefreshOnWifiOnly(enabled);
+                      },
+                      onAutoDownloadOnWifiOnlyChanged: (enabled) async {
+                        await preferences.setAutoDownloadOnWifiOnly(enabled);
+                      },
+                      onLyricsAutoFetchChanged: (enabled) async {
+                        await preferences.setLyricsAutoFetch(enabled);
+                      },
+                      onArtworkHighQualityChanged: (enabled) async {
+                        await preferences.setArtworkHighQuality(enabled);
                       },
                     ),
                     const SizedBox(height: 16),
@@ -235,6 +255,11 @@ class _PlaybackSettingsCard extends StatelessWidget {
   final bool offlinePlaybackEnabled;
   final bool skipUnavailableOffline;
   final bool allowStreamingFallback;
+  final bool autoRefreshEnabled;
+  final bool refreshOnWifiOnly;
+  final bool autoDownloadOnWifiOnly;
+  final bool lyricsAutoFetch;
+  final bool artworkHighQuality;
   final ValueChanged<bool> onAutoplayChanged;
   final ValueChanged<AudioQuality> onAudioQualityChanged;
   final ValueChanged<AudioQuality> onDownloadQualityChanged;
@@ -247,6 +272,11 @@ class _PlaybackSettingsCard extends StatelessWidget {
   final ValueChanged<bool> onOfflinePlaybackChanged;
   final ValueChanged<bool> onSkipUnavailableOfflineChanged;
   final ValueChanged<bool> onStreamingFallbackChanged;
+  final ValueChanged<bool> onAutoRefreshChanged;
+  final ValueChanged<bool> onRefreshOnWifiOnlyChanged;
+  final ValueChanged<bool> onAutoDownloadOnWifiOnlyChanged;
+  final ValueChanged<bool> onLyricsAutoFetchChanged;
+  final ValueChanged<bool> onArtworkHighQualityChanged;
 
   const _PlaybackSettingsCard({
     required this.autoplayEnabled,
@@ -260,6 +290,11 @@ class _PlaybackSettingsCard extends StatelessWidget {
     required this.offlinePlaybackEnabled,
     required this.skipUnavailableOffline,
     required this.allowStreamingFallback,
+    required this.autoRefreshEnabled,
+    required this.refreshOnWifiOnly,
+    required this.autoDownloadOnWifiOnly,
+    required this.lyricsAutoFetch,
+    required this.artworkHighQuality,
     required this.onAutoplayChanged,
     required this.onAudioQualityChanged,
     required this.onDownloadQualityChanged,
@@ -271,6 +306,11 @@ class _PlaybackSettingsCard extends StatelessWidget {
     required this.onOfflinePlaybackChanged,
     required this.onSkipUnavailableOfflineChanged,
     required this.onStreamingFallbackChanged,
+    required this.onAutoRefreshChanged,
+    required this.onRefreshOnWifiOnlyChanged,
+    required this.onAutoDownloadOnWifiOnlyChanged,
+    required this.onLyricsAutoFetchChanged,
+    required this.onArtworkHighQualityChanged,
   });
 
   @override
@@ -355,6 +395,81 @@ class _PlaybackSettingsCard extends StatelessWidget {
               style: TextStyle(color: AppTheme.textSecondary, fontSize: 12),
             ),
             onChanged: onStreamingFallbackChanged,
+          ),
+          const Divider(height: 1, color: AppTheme.cardDark),
+          SwitchListTile.adaptive(
+            contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+            value: autoRefreshEnabled,
+            activeThumbColor: AppTheme.accentPurple,
+            title: const Text(
+              'Auto Refresh Content',
+              style: TextStyle(color: AppTheme.textPrimary, fontSize: 14),
+            ),
+            subtitle: const Text(
+              'Automatically refresh feeds and recommendations in the background.',
+              style: TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+            ),
+            onChanged: onAutoRefreshChanged,
+          ),
+          const Divider(height: 1, color: AppTheme.cardDark),
+          SwitchListTile.adaptive(
+            contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+            value: refreshOnWifiOnly,
+            activeThumbColor: AppTheme.accentPurple,
+            title: const Text(
+              'Refresh on Wi-Fi Only',
+              style: TextStyle(color: AppTheme.textPrimary, fontSize: 14),
+            ),
+            subtitle: const Text(
+              'Restrict automatic background updates to Wi-Fi connections.',
+              style: TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+            ),
+            onChanged: onRefreshOnWifiOnlyChanged,
+          ),
+          const Divider(height: 1, color: AppTheme.cardDark),
+          SwitchListTile.adaptive(
+            contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+            value: autoDownloadOnWifiOnly,
+            activeThumbColor: AppTheme.accentPurple,
+            title: const Text(
+              'Auto Download on Wi-Fi Only',
+              style: TextStyle(color: AppTheme.textPrimary, fontSize: 14),
+            ),
+            subtitle: const Text(
+              'Restrict smart/playlist downloads to Wi-Fi connections.',
+              style: TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+            ),
+            onChanged: onAutoDownloadOnWifiOnlyChanged,
+          ),
+          const Divider(height: 1, color: AppTheme.cardDark),
+          SwitchListTile.adaptive(
+            contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+            value: lyricsAutoFetch,
+            activeThumbColor: AppTheme.accentPurple,
+            title: const Text(
+              'Lyrics Auto Fetch',
+              style: TextStyle(color: AppTheme.textPrimary, fontSize: 14),
+            ),
+            subtitle: const Text(
+              'Automatically search and load lyrics when a song starts.',
+              style: TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+            ),
+            onChanged: onLyricsAutoFetchChanged,
+          ),
+          const Divider(height: 1, color: AppTheme.cardDark),
+          SwitchListTile.adaptive(
+            contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+            value: artworkHighQuality,
+            activeThumbColor: AppTheme.accentPurple,
+            title: const Text(
+              'High Quality Artwork',
+              style: TextStyle(color: AppTheme.textPrimary, fontSize: 14),
+            ),
+            subtitle: const Text(
+              'Always load full-resolution cover art (consumes more data).',
+              style: TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+            ),
+            onChanged: onArtworkHighQualityChanged,
           ),
           const Divider(height: 1, color: AppTheme.cardDark),
 

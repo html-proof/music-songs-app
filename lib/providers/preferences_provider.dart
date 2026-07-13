@@ -59,6 +59,11 @@ class PreferencesProvider extends ChangeNotifier {
   bool get offlinePlaybackEnabled => _preferences?.offlinePlaybackEnabled ?? true;
   bool get skipUnavailableOffline => _preferences?.skipUnavailableOffline ?? true;
   bool get allowStreamingFallback => _preferences?.allowStreamingFallback ?? true;
+  bool get autoRefreshEnabled => _preferences?.autoRefreshEnabled ?? true;
+  bool get refreshOnWifiOnly => _preferences?.refreshOnWifiOnly ?? false;
+  bool get autoDownloadOnWifiOnly => _preferences?.autoDownloadOnWifiOnly ?? true;
+  bool get lyricsAutoFetch => _preferences?.lyricsAutoFetch ?? true;
+  bool get artworkHighQuality => _preferences?.artworkHighQuality ?? true;
 
   void syncWithAuth(User? user) {
     final nextUid = user?.uid;
@@ -171,6 +176,11 @@ class PreferencesProvider extends ChangeNotifier {
     bool? offlinePlaybackEnabled,
     bool? skipUnavailableOffline,
     bool? allowStreamingFallback,
+    bool? autoRefreshEnabled,
+    bool? refreshOnWifiOnly,
+    bool? autoDownloadOnWifiOnly,
+    bool? lyricsAutoFetch,
+    bool? artworkHighQuality,
   }) async {
     final user = _currentUser;
     if (user == null) return;
@@ -255,6 +265,16 @@ class PreferencesProvider extends ChangeNotifier {
           skipUnavailableOffline ?? _preferences?.skipUnavailableOffline ?? true,
       allowStreamingFallback:
           allowStreamingFallback ?? _preferences?.allowStreamingFallback ?? true,
+      autoRefreshEnabled:
+          autoRefreshEnabled ?? _preferences?.autoRefreshEnabled ?? true,
+      refreshOnWifiOnly:
+          refreshOnWifiOnly ?? _preferences?.refreshOnWifiOnly ?? false,
+      autoDownloadOnWifiOnly:
+          autoDownloadOnWifiOnly ?? _preferences?.autoDownloadOnWifiOnly ?? true,
+      lyricsAutoFetch:
+          lyricsAutoFetch ?? _preferences?.lyricsAutoFetch ?? true,
+      artworkHighQuality:
+          artworkHighQuality ?? _preferences?.artworkHighQuality ?? true,
     );
 
     await PreferencesService.savePreferences(updated);
@@ -640,6 +660,56 @@ class PreferencesProvider extends ChangeNotifier {
       favoriteArtists: current.favoriteArtists,
       onboardingComplete: true,
       conversationAssistIgnoreSingleEarbud: ignore,
+    );
+  }
+
+  Future<void> setAutoRefreshEnabled(bool value) async {
+    final current = _preferences;
+    if (current == null) return;
+    await savePreferences(
+      languages: current.languages,
+      favoriteArtists: current.favoriteArtists,
+      autoRefreshEnabled: value,
+    );
+  }
+
+  Future<void> setRefreshOnWifiOnly(bool value) async {
+    final current = _preferences;
+    if (current == null) return;
+    await savePreferences(
+      languages: current.languages,
+      favoriteArtists: current.favoriteArtists,
+      refreshOnWifiOnly: value,
+    );
+  }
+
+  Future<void> setAutoDownloadOnWifiOnly(bool value) async {
+    final current = _preferences;
+    if (current == null) return;
+    await savePreferences(
+      languages: current.languages,
+      favoriteArtists: current.favoriteArtists,
+      autoDownloadOnWifiOnly: value,
+    );
+  }
+
+  Future<void> setLyricsAutoFetch(bool value) async {
+    final current = _preferences;
+    if (current == null) return;
+    await savePreferences(
+      languages: current.languages,
+      favoriteArtists: current.favoriteArtists,
+      lyricsAutoFetch: value,
+    );
+  }
+
+  Future<void> setArtworkHighQuality(bool value) async {
+    final current = _preferences;
+    if (current == null) return;
+    await savePreferences(
+      languages: current.languages,
+      favoriteArtists: current.favoriteArtists,
+      artworkHighQuality: value,
     );
   }
 }

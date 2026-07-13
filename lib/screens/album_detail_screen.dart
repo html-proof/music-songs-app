@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import '../services/connectivity_manager.dart';
 
 import '../models/album.dart';
 import '../models/song.dart';
@@ -56,11 +55,6 @@ class _AlbumDetailScreenState extends State<AlbumDetailScreen> {
     super.initState();
     _moreAlbumsScrollController.addListener(_onMoreAlbumsScroll);
     _fetchAlbumDetails();
-    _connectivitySubscription = ConnectivityManager.eventStream.listen((event) {
-      if (event == ConnectivityEvent.restored) {
-        _fetchAlbumDetails();
-      }
-    });
   }
 
   @override

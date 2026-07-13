@@ -1,8 +1,8 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-
 import '../services/connectivity_manager.dart';
+
 import '../models/artist.dart';
 import '../models/song.dart';
 import '../models/album.dart';
@@ -44,11 +44,6 @@ class _ArtistDetailScreenState extends State<ArtistDetailScreen> {
     super.initState();
     _detailedArtist = widget.artist;
     _fetchArtistDetails();
-    _connectivitySubscription = ConnectivityManager.eventStream.listen((event) {
-      if (event == ConnectivityEvent.restored) {
-        _fetchArtistDetails();
-      }
-    });
   }
 
   @override

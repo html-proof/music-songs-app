@@ -56,12 +56,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   PreferencesProvider? _preferencesProvider;
   int _lastSeenPreferencesVersion = -1;
   bool? _lastOfflineState;
-  bool _reconnectRefreshInProgress = false;
   bool _handledReconnectMessageOnStart = false;
   String? _resumeHandledUid;
   bool _resumeCheckInProgress = false;
   bool _isLibraryDrawerOpen = false;
-  DateTime _lastRefreshedAt = DateTime.fromMillisecondsSinceEpoch(0);
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
 
   @override
@@ -74,19 +72,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      final now = DateTime.now();
-      if (now.difference(_lastRefreshedAt) < const Duration(minutes: 5)) {
-        debugPrint(
-          '[HomeScreen] Skipping auto-refresh: last refresh was less than 5 minutes ago.',
-        );
-        return;
-      }
-      _lastRefreshedAt = now;
-      debugPrint(
-        '[HomeScreen] App resumed, rotating session and refreshing data',
-      );
+      // Rotate seed but do not reload data automatically to prevent unnecessary network requests.
       ApiService.rotateSessionSeed();
-      _loadData();
     }
   }
 
@@ -130,22 +117,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     if (!mounted) return;
 
     if (!isOffline && wasOffline) {
-      _refreshAfterReconnect();
+      // Reconnected! Playback coordinator will handle resuming media stream. Do not reload content automatically.
     }
-  }
-
-  Future<void> _refreshAfterReconnect() async {
-    if (_reconnectRefreshInProgress) return;
-    _reconnectRefreshInProgress = true;
-
-    var loaded = false;
-    for (var attempt = 0; attempt < 3; attempt++) {
-      loaded = await _loadDataInternal(showErrorSnackBar: attempt == 2);
-      if (loaded) break;
-      await Future.delayed(Duration(seconds: 2 + attempt));
-    }
-
-    _reconnectRefreshInProgress = false;
   }
 
   void _maybeHandlePlaybackResume(AuthProvider auth) {
@@ -200,21 +173,23 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     super.dispose();
   }
 
-  Future<void> _loadData() async {
+  Future<void> _loadData({bool forceRefresh = false}) async {
     final player = context.read<PlayerProvider>();
     final isOffline = player.isOffline;
 
-    var loaded = await _loadDataInternal(showErrorSnackBar: false);
+    var loaded = await _loadDataInternal(showErrorSnackBar: false, forceRefresh: forceRefresh);
     if (loaded || isOffline) return;
 
     for (var attempt = 0; attempt < 2; attempt++) {
       await Future.delayed(Duration(seconds: 2 + attempt));
-      loaded = await _loadDataInternal(showErrorSnackBar: attempt == 1);
+      loaded = await _loadDataInternal(showErrorSnackBar: attempt == 1, forceRefresh: forceRefresh);
       if (loaded) break;
     }
   }
 
-  Future<bool> _loadDataInternal({required bool showErrorSnackBar}) async {
+  Future<void> _handlePullToRefresh() => _loadData(forceRefresh: true);
+
+  Future<bool> _loadDataInternal({required bool showErrorSnackBar, bool forceRefresh = false}) async {
     final preferences = context.read<PreferencesProvider>();
     final player = context.read<PlayerProvider>();
     if (preferences.loading) return false;
@@ -282,7 +257,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         _recentlyPlayed = history;
         _loading = false; // Instant pivot to content
       });
-      // Continue to fetch fresh data in background
+
+      if (!forceRefresh) {
+        // Cached content is available and user didn't request force-refresh: STOP HERE!
+        // This prevents executing any background network calls, saving mobile data.
+        return true;
+      }
     } else if (mounted) {
       setState(() => _loading = true);
     }
@@ -1429,7 +1409,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       _handledReconnectMessageOnStart = true;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
-        _refreshAfterReconnect();
+        _loadData(forceRefresh: true);
       });
     }
 
@@ -1582,7 +1562,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   child: _loading
                       ? _buildSkeletonLoader()
                       : RefreshIndicator(
-                          onRefresh: _loadData,
+                          onRefresh: _handlePullToRefresh,
                           color: AppTheme.accentPurple,
                           child: ListView(
                             controller: _scrollController,

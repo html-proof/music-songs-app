@@ -62,4 +62,32 @@ class ArtworkService {
     // but we return empty here to indicate no specific image is found.
     return '';
   }
+
+  /// Rewrite the artwork URL to optimize/reduce resolution if Data Saver is enabled.
+  static String optimizeArtworkUrl(String url, {required bool dataSaverEnabled, required bool isHighQuality}) {
+    final trimmed = url.trim();
+    if (trimmed.isEmpty) return trimmed;
+
+    // High quality explicitly requested: upgrade to 500x500
+    if (isHighQuality && !dataSaverEnabled) {
+      return trimmed
+          .replaceAll('150x150', '500x500')
+          .replaceAll('50x50', '500x500')
+          .replaceAll('80x80', '500x500');
+    }
+
+    // Data Saver is active: downgrade to 50x50 (or 150x150)
+    if (dataSaverEnabled) {
+      return trimmed
+          .replaceAll('500x500', '50x50')
+          .replaceAll('150x150', '50x50')
+          .replaceAll('80x80', '50x50');
+    }
+
+    // Default: use medium/normal quality (150x150)
+    return trimmed
+        .replaceAll('500x500', '150x150')
+        .replaceAll('50x50', '150x150')
+        .replaceAll('80x80', '150x150');
+  }
 }

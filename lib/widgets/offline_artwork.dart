@@ -2,6 +2,9 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import '../services/download_service.dart';
+import '../services/artwork_service.dart';
+import '../providers/preferences_provider.dart';
+import 'package:provider/provider.dart';
 import '../theme/app_theme.dart';
 
 class OfflineArtwork extends StatefulWidget {
@@ -134,6 +137,10 @@ class _OfflineArtworkState extends State<OfflineArtwork> {
 
   @override
   Widget build(BuildContext context) {
+    final prefs = context.watch<PreferencesProvider>();
+    final dataSaver = prefs.dataSaverEnabled;
+    final isHighQuality = prefs.artworkHighQuality;
+
     Widget imageWidget;
 
     if (_localFile != null) {
@@ -142,7 +149,10 @@ class _OfflineArtworkState extends State<OfflineArtwork> {
         width: widget.width,
         height: widget.height,
         fit: widget.fit,
-        errorBuilder: (context, error, stackTrace) => _buildFallbackOrError(),
+        errorBuilder: (context, error, stackTrace) => _buildFallbackOrError(
+          dataSaver: dataSaver,
+          isHighQuality: isHighQuality,
+        ),
       );
     } else if (!_checked) {
       imageWidget = widget.placeholder ?? _buildDefaultPlaceholder();
@@ -151,8 +161,13 @@ class _OfflineArtworkState extends State<OfflineArtwork> {
       if (url.isEmpty) {
         imageWidget = widget.errorWidget ?? _buildDefaultPlaceholder();
       } else {
+        final optimizedUrl = ArtworkService.optimizeArtworkUrl(
+          url,
+          dataSaverEnabled: dataSaver,
+          isHighQuality: isHighQuality,
+        );
         imageWidget = CachedNetworkImage(
-          imageUrl: url,
+          imageUrl: optimizedUrl,
           width: widget.width,
           height: widget.height,
           fit: widget.fit,
@@ -183,11 +198,16 @@ class _OfflineArtworkState extends State<OfflineArtwork> {
     );
   }
 
-  Widget _buildFallbackOrError() {
+  Widget _buildFallbackOrError({required bool dataSaver, required bool isHighQuality}) {
     final url = (widget.imageUrl ?? '').trim();
     if (url.isNotEmpty) {
+      final optimizedUrl = ArtworkService.optimizeArtworkUrl(
+        url,
+        dataSaverEnabled: dataSaver,
+        isHighQuality: isHighQuality,
+      );
       return CachedNetworkImage(
-        imageUrl: url,
+        imageUrl: optimizedUrl,
         width: widget.width,
         height: widget.height,
         fit: widget.fit,

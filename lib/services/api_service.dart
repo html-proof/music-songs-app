@@ -31,6 +31,21 @@ class ApiService {
   static final Map<String, List<Map<String, dynamic>>>
   _artistAlbumSessionCache = {};
   static final Set<String> _artistAlbumSessionExhausted = {};
+  static const Duration _searchCacheTtl = Duration(minutes: 5);
+  static final Map<String, Future<dynamic>> _inFlightRequests = {};
+
+  static Future<T> _deduplicateRequest<T>(String key, Future<T> Function() fetch) {
+    final active = _inFlightRequests[key];
+    if (active != null) {
+      StabilityLogger.info('Network', 'DEDUPLICATED: Reusing in-flight request for: $key');
+      return active as Future<T>;
+    }
+    final future = fetch().whenComplete(() {
+      _inFlightRequests.remove(key);
+    });
+    _inFlightRequests[key] = future;
+    return future;
+  }
 
   static String _sessionSeed = (DateTime.now().millisecondsSinceEpoch ^ 42)
       .toRadixString(16);
@@ -522,6 +537,41 @@ class ApiService {
     final normalizedLanguages = _normalizeList(preferredLanguages);
     final safeLimit = limit.clamp(10, 20);
 
+    final cacheKey = _cacheKey('global_search', {
+      'query': normalizedQuery,
+      'languages': normalizedLanguages,
+      'limit': safeLimit,
+    });
+
+    final cached = await _readCache(cacheKey, _searchCacheTtl);
+    if (cached is Map) {
+      final cachedMap = Map<String, dynamic>.from(cached);
+      return {
+        'songs': cachedMap['songs'] ?? const [],
+        'albums': cachedMap['albums'] ?? const [],
+        'artists': cachedMap['artists'] ?? const [],
+      };
+    }
+
+    final requestKey = 'global_search_${normalizedQuery}_${normalizedLanguages.join(",")}';
+    return _deduplicateRequest<Map<String, List<dynamic>>>(requestKey, () async {
+      final result = await _globalSearchInternal(
+        normalizedQuery,
+        normalizedLanguages: normalizedLanguages,
+        safeLimit: safeLimit,
+      );
+      if (result['songs']!.isNotEmpty || result['albums']!.isNotEmpty || result['artists']!.isNotEmpty) {
+        await _writeCache(cacheKey, result);
+      }
+      return result;
+    });
+  }
+
+  static Future<Map<String, List<dynamic>>> _globalSearchInternal(
+    String normalizedQuery, {
+    required List<String> normalizedLanguages,
+    required int safeLimit,
+  }) async {
     final queryParams = <String, String>{
       'query': normalizedQuery,
       'limit': safeLimit.toString(),
@@ -863,67 +913,70 @@ class ApiService {
       queryParams['languages'] = normalizedLanguages.join(',');
     }
 
-    try {
-      final res = await http
-          .get(
-            Uri.parse(
-              '$baseUrl/api/albums',
-            ).replace(queryParameters: queryParams),
-          )
-          .timeout(_albumRequestTimeout);
+    final requestKey = 'get_albums_${normalizedId}_${normalizedQuery}_${normalizedLanguages.join(",")}';
+    return _deduplicateRequest<Map<String, dynamic>>(requestKey, () async {
+      try {
+        final res = await http
+            .get(
+              Uri.parse(
+                '$baseUrl/api/albums',
+              ).replace(queryParameters: queryParams),
+            )
+            .timeout(_albumRequestTimeout);
 
-      if (res.statusCode == 200) {
-        final parsed = jsonDecode(res.body);
-        if (parsed is Map<String, dynamic>) {
-          final sanitized = _sanitizeAlbumPayload(parsed);
-          if (albumCacheKey != null) {
-            await _writeCache(albumCacheKey, sanitized);
+        if (res.statusCode == 200) {
+          final parsed = jsonDecode(res.body);
+          if (parsed is Map<String, dynamic>) {
+            final sanitized = _sanitizeAlbumPayload(parsed);
+            if (albumCacheKey != null) {
+              await _writeCache(albumCacheKey, sanitized);
+            }
+            return sanitized;
           }
-          return sanitized;
+        } else {
+          debugPrint('Album fetch failed: ${res.statusCode} ($queryParams)');
         }
-      } else {
-        debugPrint('Album fetch failed: ${res.statusCode} ($queryParams)');
+      } catch (e) {
+        debugPrint('Album request error ($queryParams): $e');
       }
-    } catch (e) {
-      debugPrint('Album request error ($queryParams): $e');
-    }
 
-    // Fallback: recover album lists from search payload.
-    try {
-      final seed = hasQuery ? normalizedQuery : normalizedId;
-      if (seed.isNotEmpty) {
-        final fallback = await globalSearch(
-          seed,
-          preferredLanguages: normalizedLanguages,
-          limit: 20,
-        );
-        var albums = _asMapList(fallback['albums']);
-        if (hasId) {
-          albums = albums
-              .where((album) => (album['id'] ?? '').toString() == normalizedId)
-              .toList(growable: false);
-        }
+      // Fallback: recover album lists from search payload.
+      try {
+        final seed = hasQuery ? normalizedQuery : normalizedId;
+        if (seed.isNotEmpty) {
+          final fallback = await globalSearch(
+            seed,
+            preferredLanguages: normalizedLanguages,
+            limit: 20,
+          );
+          var albums = _asMapList(fallback['albums']);
+          if (hasId) {
+            albums = albums
+                .where((album) => (album['id'] ?? '').toString() == normalizedId)
+                .toList(growable: false);
+          }
 
-        if (albums.isEmpty && hasQuery) {
-          albums = _deriveAlbumsFromSongs(fallback['songs'] ?? const [])
-              .whereType<Map>()
-              .map((entry) => Map<String, dynamic>.from(entry))
-              .toList(growable: false);
-        }
+          if (albums.isEmpty && hasQuery) {
+            albums = _deriveAlbumsFromSongs(fallback['songs'] ?? const [])
+                .whereType<Map>()
+                .map((entry) => Map<String, dynamic>.from(entry))
+                .toList(growable: false);
+          }
 
-        if (albums.isNotEmpty) {
-          final fallbackPayload = <String, dynamic>{
-            'success': true,
-            'data': {'results': albums, 'songs': const []},
-          };
-          return _sanitizeAlbumPayload(fallbackPayload);
+          if (albums.isNotEmpty) {
+            final fallbackPayload = <String, dynamic>{
+              'success': true,
+              'data': {'results': albums, 'songs': const []},
+            };
+            return _sanitizeAlbumPayload(fallbackPayload);
+          }
         }
+      } catch (e) {
+        debugPrint('Album fallback failed: $e');
       }
-    } catch (e) {
-      debugPrint('Album fallback failed: $e');
-    }
 
-    return _emptyAlbumResult();
+      return _emptyAlbumResult();
+    });
   }
 
   static Future<List<dynamic>> getArtistsByLanguage(String language) async {

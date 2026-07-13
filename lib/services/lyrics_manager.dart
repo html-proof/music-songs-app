@@ -1,10 +1,12 @@
 import 'dart:async';
-import 'package:flutter/foundation.dart';
 import '../models/song.dart';
 import 'lyrics_cache.dart';
 import 'lyrics_service.dart';
 import 'player_service.dart';
 import 'connectivity_manager.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/widgets.dart';
+import 'preferences_service.dart';
 
 // ─────────────────────────────────────────────────────────────
 // State enum — replaces 10+ booleans in _PlayerScreenState
@@ -72,19 +74,6 @@ class LyricsManager extends ChangeNotifier {
 
   LyricsManager() {
     _listenToPlayerService();
-    _listenToConnectivity();
-  }
-
-  void _listenToConnectivity() {
-    _connectivitySub = ConnectivityManager.eventStream.listen((event) {
-      if (event == ConnectivityEvent.restored) {
-        final song = _currentSong;
-        if (song != null && (_payload == null || _state == LyricsLoadState.unavailable)) {
-          _onSongChanging(song);
-          _scheduleFetch(song);
-        }
-      }
-    });
   }
 
   void _listenToPlayerService() {
@@ -124,10 +113,60 @@ class LyricsManager extends ChangeNotifier {
   }
 
   /// Called after a new song is confirmed playing — triggers fetch.
-  void _scheduleFetch(Song song) {
+  void _scheduleFetch(Song song, {bool isManual = false}) {
     // Use a post-frame delay so we don't block the song-change UI update.
-    Future.microtask(() {
+    Future.microtask(() async {
       if (_currentSong?.id == song.id) {
+        final uid = FirebaseAuth.instance.currentUser?.uid;
+        bool dataSaverEnabled = false;
+        bool lyricsAutoFetch = true;
+        if (uid != null) {
+          final prefs = await PreferencesService.getPreferences(uid);
+          if (prefs != null) {
+            dataSaverEnabled = prefs.dataSaverEnabled;
+            lyricsAutoFetch = prefs.lyricsAutoFetch;
+          }
+        }
+
+        final lifecycle = WidgetsBinding.instance.lifecycleState;
+        final isBackground =
+            lifecycle == AppLifecycleState.paused ||
+            lifecycle == AppLifecycleState.inactive;
+
+        // If automatic fetch (not manual): check background state, data saver mode, or disabled auto fetch
+        if (!isManual && (isBackground || dataSaverEnabled || !lyricsAutoFetch)) {
+          // Attempt a zero-data local cache read first. If it's cached, we can load it safely!
+          final cached = await LyricsCache.get(
+            songId: song.id,
+            title: song.name,
+            artist: song.artist ?? '',
+            album: song.sourceAlbumName ?? song.album ?? '',
+            duration: song.duration ?? 0,
+          );
+          if (cached != null && !cached.isUnavailable) {
+            final hasPlain = cached.plainLyrics != null && cached.plainLyrics!.trim().isNotEmpty;
+            final hasSynced = cached.syncedLyrics != null && cached.syncedLyrics!.trim().isNotEmpty;
+            if (hasPlain || hasSynced) {
+              if (_currentSong?.id == song.id) {
+                final payload = LyricsPayload(
+                  plainLyrics: cached.plainLyrics,
+                  syncedLyrics: cached.syncedLyrics,
+                  provider: cached.providerSource,
+                );
+                _applyPayload(payload, _generation);
+              }
+              return;
+            }
+          }
+
+          // Otherwise, do not query any network. Immediately mark as unavailable.
+          if (_currentSong?.id == song.id) {
+            _state = LyricsLoadState.unavailable;
+            notifyListeners();
+          }
+          return;
+        }
+
         _fetchLyrics(song);
       }
     });
@@ -161,13 +200,27 @@ class LyricsManager extends ChangeNotifier {
       notifyListeners();
     }
 
-    _fetchLyrics(song);
+    _scheduleFetch(song, isManual: true);
   }
 
   /// Prefetch lyrics for a song without displaying them (e.g., next in queue).
-  void prefetchLyrics(Song song) {
+  void prefetchLyrics(Song song) async {
     final isSameSong = _currentSong?.id == song.id;
     if (isSameSong) return; // Don't prefetch the current song
+
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    bool dataSaverEnabled = false;
+    bool lyricsAutoFetch = true;
+    if (uid != null) {
+      final prefs = await PreferencesService.getPreferences(uid);
+      if (prefs != null) {
+        dataSaverEnabled = prefs.dataSaverEnabled;
+        lyricsAutoFetch = prefs.lyricsAutoFetch;
+      }
+    }
+    // Skip network queries for prefetch in data saver mode or when disabled
+    if (dataSaverEnabled || !lyricsAutoFetch) return;
+
     // Fire-and-forget into LyricsService cache without affecting LyricsManager state
     LyricsService.prefetchLyricsForSong(song);
   }

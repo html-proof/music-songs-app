@@ -180,6 +180,11 @@ class UserPreferences {
   final bool offlinePlaybackEnabled;
   final bool skipUnavailableOffline;
   final bool allowStreamingFallback;
+  final bool autoRefreshEnabled;
+  final bool refreshOnWifiOnly;
+  final bool autoDownloadOnWifiOnly;
+  final bool lyricsAutoFetch;
+  final bool artworkHighQuality;
 
   UserPreferences({
     required this.uid,
@@ -212,6 +217,11 @@ class UserPreferences {
     this.offlinePlaybackEnabled = true,
     this.skipUnavailableOffline = true,
     this.allowStreamingFallback = true,
+    this.autoRefreshEnabled = true,
+    this.refreshOnWifiOnly = false,
+    this.autoDownloadOnWifiOnly = true,
+    this.lyricsAutoFetch = true,
+    this.artworkHighQuality = true,
   });
 
   factory UserPreferences.fromJson(Map<String, dynamic> json) {
@@ -310,6 +320,11 @@ class UserPreferences {
       offlinePlaybackEnabled: json['offlinePlaybackEnabled'] ?? true,
       skipUnavailableOffline: json['skipUnavailableOffline'] ?? true,
       allowStreamingFallback: json['allowStreamingFallback'] ?? true,
+      autoRefreshEnabled: json['autoRefreshEnabled'] != false,
+      refreshOnWifiOnly: json['refreshOnWifiOnly'] == true,
+      autoDownloadOnWifiOnly: json['autoDownloadOnWifiOnly'] != false,
+      lyricsAutoFetch: json['lyricsAutoFetch'] != false,
+      artworkHighQuality: json['artworkHighQuality'] != false,
     );
   }
 
@@ -347,6 +362,11 @@ class UserPreferences {
       'offlinePlaybackEnabled': offlinePlaybackEnabled,
       'skipUnavailableOffline': skipUnavailableOffline,
       'allowStreamingFallback': allowStreamingFallback,
+      'autoRefreshEnabled': autoRefreshEnabled,
+      'refreshOnWifiOnly': refreshOnWifiOnly,
+      'autoDownloadOnWifiOnly': autoDownloadOnWifiOnly,
+      'lyricsAutoFetch': lyricsAutoFetch,
+      'artworkHighQuality': artworkHighQuality,
     };
   }
 
@@ -380,6 +400,11 @@ class UserPreferences {
     bool? offlinePlaybackEnabled,
     bool? skipUnavailableOffline,
     bool? allowStreamingFallback,
+    bool? autoRefreshEnabled,
+    bool? refreshOnWifiOnly,
+    bool? autoDownloadOnWifiOnly,
+    bool? lyricsAutoFetch,
+    bool? artworkHighQuality,
   }) {
     return UserPreferences(
       uid: uid,
@@ -439,6 +464,11 @@ class UserPreferences {
           skipUnavailableOffline ?? this.skipUnavailableOffline,
       allowStreamingFallback:
           allowStreamingFallback ?? this.allowStreamingFallback,
+      autoRefreshEnabled: autoRefreshEnabled ?? this.autoRefreshEnabled,
+      refreshOnWifiOnly: refreshOnWifiOnly ?? this.refreshOnWifiOnly,
+      autoDownloadOnWifiOnly: autoDownloadOnWifiOnly ?? this.autoDownloadOnWifiOnly,
+      lyricsAutoFetch: lyricsAutoFetch ?? this.lyricsAutoFetch,
+      artworkHighQuality: artworkHighQuality ?? this.artworkHighQuality,
     );
   }
 

@@ -1,43 +1,47 @@
 import '../models/song.dart';
 
 class VerificationEngine {
-  static const double threshold = 70.0;
+  static const double threshold = 90.0; // Strict 90% threshold for Spotify-quality verification
 
   static double calculateConfidence(Song candidate, Song target) {
     // 1. ISRC Match (Highest Priority)
     if (candidate.isrc != null && target.isrc != null &&
         candidate.isrc!.isNotEmpty && target.isrc!.isNotEmpty) {
       if (candidate.isrc!.toLowerCase().trim() == target.isrc!.toLowerCase().trim()) {
-        return 100.0; // Perfect unique key match
+        return 100.0; // Perfect match
       } else {
-        return 0.0; // Explicit mismatch on standard identifier
+        return 0.0; // Hard reject on identifier mismatch
       }
     }
 
-    // 2. MusicBrainz ID Match (Very High Priority)
+    // 2. MusicBrainz ID Match
     if (candidate.musicbrainzId != null && target.musicbrainzId != null &&
         candidate.musicbrainzId!.isNotEmpty && target.musicbrainzId!.isNotEmpty) {
       if (candidate.musicbrainzId!.toLowerCase().trim() == target.musicbrainzId!.toLowerCase().trim()) {
         return 100.0; // Perfect match
       } else {
-        return 0.0; // Explicit mismatch on standard identifier
+        return 0.0; // Hard reject on identifier mismatch
       }
     }
 
-    double score = 0.0;
+    double titleScore = 0.0;
+    double artistScore = 0.0;
+    double albumScore = 0.0;
+    double durationScore = 0.0;
+    double languageScore = 0.0;
 
-    // 3. Title Match (Very High)
+    // 3. Title Check (35%)
     final cTitle = _cleanMetadataString(candidate.name);
     final tTitle = _cleanMetadataString(target.name);
     if (cTitle == tTitle) {
-      score += 40.0;
+      titleScore = 35.0;
     } else if (cTitle.contains(tTitle) || tTitle.contains(cTitle)) {
-      score += 20.0;
+      titleScore = 20.0;
     } else {
-      return 0.0; // Titles are completely different
+      return 0.0; // Hard reject: titles are completely different
     }
 
-    // 4. Artist Match (Very High)
+    // 4. Artist Check (35%)
     final cArtist = _cleanMetadataString(candidate.artist ?? '');
     final tArtist = _cleanMetadataString(target.artist ?? '');
     if (tArtist.isNotEmpty && cArtist.isNotEmpty) {
@@ -50,82 +54,70 @@ class VerificationEngine {
         }
       }
       if (matches > 0) {
-        score += 40.0 * (matches / tArtists.length);
+        artistScore = 35.0 * (matches / tArtists.length);
       } else {
-        score -= 30.0; // Penalty for complete artist mismatch
+        return 0.0; // Hard reject: complete artist mismatch
       }
     } else if (tArtist.isNotEmpty || cArtist.isNotEmpty) {
-      score -= 20.0;
+      return 0.0; // Hard reject: mismatch between empty and non-empty artists
+    } else {
+      artistScore = 35.0; // Both empty (fallback case)
     }
 
-    // 5. Album Match (High)
+    // 5. Album Check (15%)
     final cAlbum = _cleanMetadataString(candidate.album ?? '');
     final tAlbum = _cleanMetadataString(target.album ?? '');
     if (tAlbum.isNotEmpty && cAlbum.isNotEmpty) {
       if (cAlbum == tAlbum) {
-        score += 15.0;
+        albumScore = 15.0;
       } else if (cAlbum.contains(tAlbum) || tAlbum.contains(cAlbum)) {
-        score += 7.0;
+        albumScore = 7.5;
       }
+    } else {
+      albumScore = 0.0; // Allowed to mismatch but gets 0 points for the album weight
     }
 
-    // 6. Duration Match (High)
+    // 6. Duration Check (10%)
     if (candidate.duration != null && target.duration != null && candidate.duration! > 0 && target.duration! > 0) {
       final diff = (candidate.duration! - target.duration!).abs();
-      if (diff <= 5) {
-        score += 20.0;
-      } else if (diff <= 12) {
-        score += 10.0;
-      } else if (diff > 20) {
-        score -= 40.0; // Penalty for large duration difference (cover, live, preview, etc.)
+      if (diff <= 3) {
+        durationScore = 10.0;
+      } else {
+        return 0.0; // Hard reject: duration differs by more than 3 seconds
       }
+    } else {
+      durationScore = 10.0; // Accept if duration info is missing from source metadata
     }
 
-    // 7. Language Match (Medium)
+    // 7. Language Check (5%)
     final cLang = (candidate.language ?? '').toLowerCase().trim();
     final tLang = (target.language ?? '').toLowerCase().trim();
     if (tLang.isNotEmpty && cLang.isNotEmpty) {
       if (cLang == tLang) {
-        score += 10.0;
+        languageScore = 5.0;
       } else {
-        score -= 40.0; // Heavy penalty for language mismatch
+        return 0.0; // Hard reject: language mismatch
       }
+    } else {
+      languageScore = 5.0;
     }
 
-    // 8. Explicit/Non-Explicit Version Match (Medium)
+    double finalScore = titleScore + artistScore + albumScore + durationScore + languageScore;
+
+    // Explicit vs Clean Version Check (-20.0 penalty, dropping below the 90.0 threshold)
     if (candidate.isExplicit != target.isExplicit) {
-      score -= 15.0;
+      finalScore -= 20.0;
     }
 
-    // 9. Version Type Mismatch Checks (Remix, Live, Acoustic, Cover)
-    if (_isRemix(target.name) != _isRemix(candidate.name)) {
-      score -= 50.0; // Remix mismatch
-    }
-    if (_isLive(target.name) != _isLive(candidate.name)) {
-      score -= 50.0; // Live mismatch
-    }
-    if (_isAcoustic(target.name) != _isAcoustic(candidate.name)) {
-      score -= 50.0; // Acoustic mismatch
-    }
-    if (_isCover(target.name) != _isCover(candidate.name)) {
-      score -= 50.0; // Cover mismatch
+    // Version Type Mismatch Checks (Live, Remix, Acoustic, Cover)
+    if (_isRemix(target.name) != _isRemix(candidate.name) ||
+        _isLive(target.name) != _isLive(candidate.name) ||
+        _isAcoustic(target.name) != _isAcoustic(candidate.name) ||
+        _isCover(target.name) != _isCover(candidate.name)) {
+      return 0.0; // Hard reject on mismatched version types
     }
 
-    // 10. Release Year Match (Low)
-    final cYear = candidate.year?.trim();
-    final tYear = target.year?.trim();
-    if (cYear != null && tYear != null && cYear.isNotEmpty && tYear.isNotEmpty) {
-      if (cYear == tYear) {
-        score += 5.0;
-      }
-    }
-
-    // 11. Popularity (Low)
-    if (candidate.popularity != null) {
-      score += (candidate.popularity! / 100.0) * 5.0;
-    }
-
-    return score;
+    return finalScore.clamp(0.0, 100.0);
   }
 
   static String _cleanMetadataString(String str) {

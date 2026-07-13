@@ -16,6 +16,7 @@ import 'package:just_audio_background/just_audio_background.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/song.dart';
+import '../models/playback_identity.dart';
 import '../models/user_preferences.dart';
 import '../utils/content_filter.dart';
 import '../utils/language_utils.dart';
@@ -198,6 +199,7 @@ class PlayerService {
   static final Map<String, _StreamUrlCacheEntry> _resolvedUrlCache = {};
   static final List<Song> _backupPlayableSongs = [];
   static int _activePlaybackSessionId = 0;
+  static PlaybackIdentity? _activePlaybackIdentity;
   static http.Client? _activeHttpClient;
   static DateTime? _songPlayStartedAt;
   static String? _songPlayStartedId;
@@ -1823,6 +1825,16 @@ class PlayerService {
     _sourceSwitchingController.add(switching);
   }
 
+  static bool _isSessionStale(int? sessionId, String songId) {
+    if (sessionId != null && sessionId != _activePlaybackSessionId) {
+      return true;
+    }
+    if (_activePlaybackIdentity != null && songId != _activePlaybackIdentity!.songId) {
+      return true;
+    }
+    return false;
+  }
+
   static void _checkSession(int sessionId) {
     if (sessionId != _activePlaybackSessionId) {
       throw PlayerException(
@@ -1865,6 +1877,7 @@ class PlayerService {
     _activeHttpClient = ApiService.createSecureHttpClient(pinCertificates: false);
 
     final sessionId = ++_activePlaybackSessionId;
+    _activePlaybackIdentity = PlaybackIdentity.fromSong(song, sessionId);
     _activeLogger = _PlaybackSessionLogger(sessionId, song.name);
     _resolvingSong = song;
     _resolvingSongController.add(song);
@@ -1910,7 +1923,7 @@ class PlayerService {
           _activeLogger?.logStep('Playback started', false, detail: 'Resolution failed');
           _activeLogger?.printReport('FAILED: Toast displayed, queue unchanged');
           _showThrottledToast(
-            "Sorry, this song couldn't be found or played. Please try another version or search for the song manually.",
+            "Unable to verify the requested recording. Please try again later.",
             toastLength: Toast.LENGTH_LONG,
           );
         }
@@ -2685,7 +2698,7 @@ class PlayerService {
   }
 
   static Future<Song?> _resolveSongForPlayback(Song song, {bool forceRefresh = false, int? sessionId, http.Client? client}) async {
-    if (sessionId != null && sessionId != _activePlaybackSessionId) return null;
+    if (_isSessionStale(sessionId, song.id)) return null;
 
     final songId = song.id.trim();
     if (songId.isNotEmpty) {
@@ -2727,7 +2740,7 @@ class PlayerService {
       final existingStreamUrl = (candidateSong.streamUrl ?? '').trim();
       final hasNetwork = await _isNetworkConnected();
 
-      if (sessionId != null && sessionId != _activePlaybackSessionId) return null;
+      if (_isSessionStale(sessionId, song.id)) return null;
 
       final explicitLocalPath = _isLocalFilePath(existingStreamUrl)
           ? existingStreamUrl
@@ -2750,7 +2763,7 @@ class PlayerService {
         }
 
         final targetBitrate = await _resolvePreferredStreamingKbps();
-        if (sessionId != null && sessionId != _activePlaybackSessionId) return null;
+        if (_isSessionStale(sessionId, song.id)) return null;
 
         final cachedBitrate =
             _resolveCachedOfflineBitrateKbps(songId) ??
@@ -2762,7 +2775,7 @@ class PlayerService {
 
         try {
           final resolvedSong = await _fetchSongDetailsForPlaybackWithClient(candidateSong, localClient, forceRefresh: forceRefresh);
-          if (sessionId != null && sessionId != _activePlaybackSessionId) return null;
+          if (_isSessionStale(sessionId, song.id)) return null;
 
           if (resolvedSong != null && _hasStreamUrl(resolvedSong)) {
             return _mergeSongWithResolvedStream(
@@ -2785,10 +2798,10 @@ class PlayerService {
           _activeLogger?.logStep('Memory URL cache', hasCache, detail: hasCache ? 'HIT' : 'MISS');
         }
         if (cachedSong != null && _hasStreamUrl(cachedSong)) {
-          if (sessionId != null && sessionId != _activePlaybackSessionId) return null;
+          if (_isSessionStale(sessionId, song.id)) return null;
           // Validate it fast
           final isValid = await _validateStreamUrl(cachedSong.streamUrl!, localClient);
-          if (sessionId != null && sessionId != _activePlaybackSessionId) return null;
+          if (_isSessionStale(sessionId, song.id)) return null;
 
           if (sessionId == _activePlaybackSessionId) {
             _activeLogger?.logStep('Memory URL validation', isValid, detail: isValid ? 'SUCCESS' : 'FAILED');
@@ -2810,9 +2823,9 @@ class PlayerService {
       if (!forceRefresh &&
           _hasStreamUrl(candidateSong) &&
           !_shouldUpgradeStreamQuality(candidateSong)) {
-        if (sessionId != null && sessionId != _activePlaybackSessionId) return null;
+        if (_isSessionStale(sessionId, song.id)) return null;
         final isValid = await _validateStreamUrl(candidateSong.streamUrl!, localClient);
-        if (sessionId != null && sessionId != _activePlaybackSessionId) return null;
+        if (_isSessionStale(sessionId, song.id)) return null;
 
         if (sessionId == _activePlaybackSessionId) {
           _activeLogger?.logStep('Existing URL validation', isValid, detail: isValid ? 'SUCCESS' : 'FAILED');
@@ -2842,12 +2855,12 @@ class PlayerService {
         _activeLogger?.logStep('Main API resolve', resolvedSong != null, detail: resolvedSong != null ? 'SUCCESS' : 'FAILED');
       }
 
-      if (sessionId != null && sessionId != _activePlaybackSessionId) return null;
+      if (_isSessionStale(sessionId, song.id)) return null;
 
       if (resolvedSong == null || !_hasStreamUrl(resolvedSong)) {
         debugPrint('Song URL failed to fetch. Retrying 1 time immediately with 10 microseconds delay...');
         await Future.delayed(const Duration(microseconds: 10));
-        if (sessionId != null && sessionId != _activePlaybackSessionId) return null;
+        if (_isSessionStale(sessionId, song.id)) return null;
 
         try {
           resolvedSong = await _fetchSongDetailsForPlaybackWithClient(candidateSong, localClient, forceRefresh: forceRefresh);
@@ -2856,7 +2869,7 @@ class PlayerService {
         }
       }
 
-      if (sessionId != null && sessionId != _activePlaybackSessionId) return null;
+      if (_isSessionStale(sessionId, song.id)) return null;
 
       if (resolvedSong != null && _hasStreamUrl(resolvedSong)) {
         final confidence = VerificationEngine.calculateConfidence(resolvedSong, song);
@@ -2869,7 +2882,7 @@ class PlayerService {
         if (isVerified) {
           final newUrl = (resolvedSong.streamUrl ?? '').trim();
           final isValid = await _validateStreamUrl(newUrl, localClient);
-          if (sessionId != null && sessionId != _activePlaybackSessionId) return null;
+          if (_isSessionStale(sessionId, song.id)) return null;
 
           if (sessionId == _activePlaybackSessionId) {
             _activeLogger?.logStep('URL validation', isValid, detail: isValid ? 'SUCCESS' : 'FAILED');
@@ -2898,7 +2911,7 @@ class PlayerService {
         final confidence = VerificationEngine.calculateConfidence(candidateSong, song);
         if (confidence >= VerificationEngine.threshold) {
           final isValid = await _validateStreamUrl(candidateSong.streamUrl!, localClient);
-          if (sessionId != null && sessionId != _activePlaybackSessionId) return null;
+          if (_isSessionStale(sessionId, song.id)) return null;
 
           if (isValid) {
             if (forceRefresh) {
@@ -2983,7 +2996,7 @@ class PlayerService {
 
     if (queries.isEmpty) return null;
 
-    if (sessionId != null && sessionId != _activePlaybackSessionId) return null;
+    if (_isSessionStale(sessionId, song.id)) return null;
 
     final localClient = client ?? ApiService.createSecureHttpClient(pinCertificates: false);
     try {
@@ -2991,7 +3004,7 @@ class PlayerService {
       final searchFutures = queries.map((query) => _searchSongsWithClient(query, localClient));
       final allResults = await Future.wait(searchFutures);
       
-      if (sessionId != null && sessionId != _activePlaybackSessionId) return null;
+      if (_isSessionStale(sessionId, song.id)) return null;
 
       // Flatten all results and remove duplicates
       final Map<String, Song> uniqueCandidates = {};
@@ -3035,7 +3048,7 @@ class PlayerService {
       }).toList();
 
       final resolvedCandidates = await Future.wait(resolvedFutures);
-      if (sessionId != null && sessionId != _activePlaybackSessionId) return null;
+      if (_isSessionStale(sessionId, song.id)) return null;
 
       final playCandidates = resolvedCandidates.where((c) => _hasStreamUrl(c)).toList();
 
@@ -3048,7 +3061,7 @@ class PlayerService {
       }).toList();
 
       final validationResults = await Future.wait(validationFutures);
-      if (sessionId != null && sessionId != _activePlaybackSessionId) return null;
+      if (_isSessionStale(sessionId, song.id)) return null;
 
       final validatedSongs = validationResults
           .where((e) => e.value)

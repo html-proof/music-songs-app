@@ -8,6 +8,7 @@ import 'package:path_provider/path_provider.dart';
 
 import '../models/song.dart';
 import 'api_service.dart';
+import 'lyrics_alignment_engine.dart';
 import 'lyrics_cache.dart';
 import 'stability_logger.dart';
 
@@ -403,12 +404,18 @@ class LyricsService {
       final bestPayload = candidates.isNotEmpty ? _selectBestPayload(lookup, candidates) : null;
 
       if (bestPayload != null && bestPayload.hasAny) {
+        if (!bestPayload.hasSynced && bestPayload.hasPlain) {
+          return LyricsAlignmentEngine.align(song, bestPayload);
+        }
         return bestPayload;
       }
 
       // If standard APIs failed, run our fallback search engine scraper
       final scrapedPayload = await _scrapeLyricsFromSearchEngine(title, artist, album, song.language, client);
       if (scrapedPayload != null && scrapedPayload.hasAny) {
+        if (!scrapedPayload.hasSynced && scrapedPayload.hasPlain) {
+          return LyricsAlignmentEngine.align(song, scrapedPayload);
+        }
         return scrapedPayload;
       }
     } catch (e) {
@@ -703,14 +710,18 @@ class LyricsService {
 
         final payload = await getLyricsPayloadForSong(song);
         if (payload != null && payload.hasAny) {
+          var finalPayload = payload;
+          if (!payload.hasSynced && payload.hasPlain) {
+            finalPayload = LyricsAlignmentEngine.align(song, payload);
+          }
           await LyricsCache.put(
             songId: song.id,
             title: title,
             artist: artist,
             album: album,
             duration: duration,
-            payload: payload,
-            providerSource: 'lrclib',
+            payload: finalPayload,
+            providerSource: finalPayload.provider ?? 'lrclib',
           );
         }
       } catch (e) {

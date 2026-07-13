@@ -1,5 +1,6 @@
 import 'dart:async';
 import '../models/song.dart';
+import 'lyrics_alignment_engine.dart';
 import 'lyrics_cache.dart';
 import 'lyrics_service.dart';
 import 'player_service.dart';
@@ -151,11 +152,14 @@ class LyricsManager extends ChangeNotifier {
             final hasSynced = cached.syncedLyrics != null && cached.syncedLyrics!.trim().isNotEmpty;
             if (hasPlain || hasSynced) {
               if (_currentSong?.id == song.id) {
-                final payload = LyricsPayload(
+                var payload = LyricsPayload(
                   plainLyrics: cached.plainLyrics,
                   syncedLyrics: cached.syncedLyrics,
                   provider: cached.providerSource,
                 );
+                if (!payload.hasSynced && payload.hasPlain) {
+                  payload = LyricsAlignmentEngine.align(song, payload);
+                }
                 _applyPayload(payload, _generation);
               }
               return;
@@ -243,7 +247,11 @@ class LyricsManager extends ChangeNotifier {
     final localLrc = await LyricsService.loadLocalLrc(songId);
     if (!_isMyGeneration(myGeneration)) return;
     if (localLrc != null) {
-      _applyPayload(localLrc, myGeneration);
+      var finalLrc = localLrc;
+      if (!localLrc.hasSynced && localLrc.hasPlain) {
+        finalLrc = LyricsAlignmentEngine.align(song, localLrc);
+      }
+      _applyPayload(finalLrc, myGeneration);
       return;
     }
 
@@ -268,7 +276,11 @@ class LyricsManager extends ChangeNotifier {
         }
         // TTL expired — allow re-search
       } else {
-        _applyPayload(cached.toPayload(), myGeneration);
+        var payload = cached.toPayload();
+        if (!payload.hasSynced && payload.hasPlain) {
+          payload = LyricsAlignmentEngine.align(song, payload);
+        }
+        _applyPayload(payload, myGeneration);
         return;
       }
     }

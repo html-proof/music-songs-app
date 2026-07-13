@@ -12,8 +12,8 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
   Song? get currentSong => PlayerService.currentSong;
   List<Song> get queue => PlayerService.queue;
   int get currentIndex => PlayerService.currentIndex;
-  bool get canSkipPrevious => !isBuffering && !PlayerService.isLoadingNewSong && !isSwitchingSource && PlayerService.canSkipPrevious;
-  bool get canSkipNext => !isBuffering && !PlayerService.isLoadingNewSong && !isSwitchingSource && PlayerService.canSkipNext;
+  bool get canSkipPrevious => !PlayerService.isLoadingNewSong && !isSwitchingSource && PlayerService.canSkipPrevious;
+  bool get canSkipNext => !PlayerService.isLoadingNewSong && !isSwitchingSource && PlayerService.canSkipNext;
 
   /// The song the UI should display. During loading, this is the song the user
   /// just tapped (resolvingSong). Once loaded, it falls back to currentSong.
@@ -40,6 +40,7 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
   final List<StreamSubscription> _subscriptions = [];
   DateTime _lastPositionUpdate = DateTime.now();
   Timer? _watchdogTimer;
+  Timer? _loadingSafetyTimer;
 
   Song? get resolvingSong => _resolvingSong;
   bool get isPlaying => _isPlaying;
@@ -48,7 +49,7 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
   Duration get duration => _duration;
   bool get isOffline => _isOffline;
   bool get isWeakConnection => ConnectivityManager.isWeak;
-  bool get isBuffering => _isBuffering || _resolvingSong != null;
+  bool get isBuffering => _isBuffering;
   bool get isQualitySwitching => _isQualitySwitching;
   bool get isSwitchingSource => _isSwitchingSource;
   bool get isInterruptionActive => _isInterruptionActive;
@@ -132,7 +133,15 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
           return;
         }
       }
-      if (!_isSeeking && _resolvingSong == null && !_isBuffering && !_isSwitchingSource && !_isQualitySwitching) {
+      if (!_isSeeking && !_isSwitchingSource && !_isQualitySwitching) {
+        // Allow position updates to flow through even during loading,
+        // as long as the audio engine is actually playing. This prevents
+        // the timestamp from being frozen at 00:00.
+        if (_resolvingSong != null || _isBuffering) {
+          // Only accept position updates if the player is actually playing
+          final playerPlaying = PlayerService.player.playing;
+          if (!playerPlaying) return;
+        }
         _position = pos;
         final currentMs = pos.inMilliseconds;
         if ((currentMs - lastNotifiedMs).abs() >= 240 || currentMs < 1000) {
@@ -229,9 +238,21 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
       if (song != null) {
         _position = Duration.zero;
         _ignorePositionUntilZero = true;
+        // Start a safety timer: if _resolvingSong isn't cleared within 15s,
+        // force-clear it to prevent permanent UI lockup.
+        _loadingSafetyTimer?.cancel();
+        _loadingSafetyTimer = Timer(const Duration(seconds: 15), () {
+          if (_resolvingSong != null) {
+            StabilityLogger.warning('Playback', 'Loading safety timer: force-clearing stuck _resolvingSong after 15s.');
+            _resolvingSong = null;
+            notifyListeners();
+          }
+        });
       } else {
         _position = Duration.zero;
         _ignorePositionUntilZero = true;
+        _loadingSafetyTimer?.cancel();
+        _loadingSafetyTimer = null;
       }
       notifyListeners();
     }));
@@ -409,6 +430,7 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _watchdogTimer?.cancel();
+    _loadingSafetyTimer?.cancel();
     for (final sub in _subscriptions) {
       sub.cancel();
     }

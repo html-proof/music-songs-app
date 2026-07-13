@@ -114,6 +114,7 @@ class PlayerService {
   static bool _pausedByNetworkLoss = false;
   static Timer? _bufferingWatchdogTimer;
   static Timer? _loadingWatchdogTimer;
+  static Timer? _playLoadingTimeoutTimer;
   static StreamSubscription<PlayerState>? _playerStateSubscription;
   static bool _isNetworkAvailable = true;
   static bool _wasExternalOutputBeforeInterrupt = false;
@@ -1864,6 +1865,23 @@ class PlayerService {
     _resolvingSongController.add(song);
     _isLoadingNewSong = true;
 
+    // Global loading timeout: if the entire play() pipeline doesn't complete
+    // within 15 seconds, force-cancel the loading state to prevent infinite
+    // "Loading..." in the UI.
+    _playLoadingTimeoutTimer?.cancel();
+    _playLoadingTimeoutTimer = Timer(const Duration(seconds: 15), () {
+      if (sessionId != _activePlaybackSessionId) return;
+      if (_resolvingSong == null && !_isLoadingNewSong) return;
+      StabilityLogger.warning('Playback', 'Global loading timeout (15s) triggered for: ${song.name}. Force-clearing loading state.');
+      _resolvingSong = null;
+      _resolvingSongController.add(null);
+      _isLoadingNewSong = false;
+      // Try to play if a source was loaded but focus acquisition hung
+      if (_player.processingState == ProcessingState.ready && !_player.playing) {
+        unawaited(_player.play());
+      }
+    });
+
     try {
       try {
         await _player.stop();
@@ -1956,6 +1974,17 @@ class PlayerService {
 
       _checkSession(sessionId);
 
+      // Clear the resolving state NOW — the audio source is loaded and ready.
+      // This unblocks the UI (position stream, play/pause button) immediately
+      // so the user isn't stuck in "Loading..." during audio focus acquisition.
+      if (sessionId == _activePlaybackSessionId) {
+        _resolvingSong = null;
+        _resolvingSongController.add(null);
+        _isLoadingNewSong = false;
+        _playLoadingTimeoutTimer?.cancel();
+        _playLoadingTimeoutTimer = null;
+      }
+
       StabilityLogger.info('Playback', 'Player preparation completed. Starting playback.');
       final started = await _playEnsuringAudioFocus();
       
@@ -1964,9 +1993,6 @@ class PlayerService {
       if (!started) {
         StabilityLogger.warning('Playback', 'Playback failed to start for song: ${playableSong.name} (audio focus denied).');
         if (sessionId == _activePlaybackSessionId) {
-          _resolvingSong = null;
-          _resolvingSongController.add(null);
-          _isLoadingNewSong = false;
           _userPausedOrStoppedPlayback = true;
           _savePlaybackState(wasPlayingOverride: false);
         }
@@ -1974,9 +2000,6 @@ class PlayerService {
       }
 
       if (sessionId == _activePlaybackSessionId) {
-        _resolvingSong = null;
-        _resolvingSongController.add(null);
-        _isLoadingNewSong = false;
         StabilityLogger.info('Playback', 'Playback started successfully. Final status: PLAYING.');
         _songPlayStartedAt = DateTime.now();
         _songPlayStartedId = playableSong.id;
@@ -2016,6 +2039,8 @@ class PlayerService {
         _resolvingSong = null;
         _resolvingSongController.add(null);
         _isLoadingNewSong = false;
+        _playLoadingTimeoutTimer?.cancel();
+        _playLoadingTimeoutTimer = null;
       }
       if (_isLoadingInterruptedError(e)) return;
       debugPrint('Playback error: $e');
@@ -4861,7 +4886,7 @@ class PlayerService {
     if (song == null) return;
     if (_isSongUsingLocalSource(song)) return;
 
-    _loadingWatchdogTimer = Timer(const Duration(seconds: 10), () async {
+    _loadingWatchdogTimer = Timer(const Duration(seconds: 8), () async {
       if (_currentSong?.id != song.id) return;
       final currentState = _player.processingState;
       if (currentState != ProcessingState.loading &&

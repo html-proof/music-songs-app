@@ -588,7 +588,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                       ),
                       AnimatedSwitcher(
                         duration: const Duration(milliseconds: 180),
-                        child: (player.isBuffering && !player.isOffline)
+                        child: (isLoadingNew && !player.isOffline)
                             ? const Padding(
                                 key: ValueKey('player-buffering'),
                                 padding: EdgeInsets.only(top: 8),
@@ -663,20 +663,20 @@ class _PlayerScreenState extends State<PlayerScreen> {
                               ? player.duration.inSeconds
                                     .toDouble()
                               : 1,
-                          onChangeStart: player.isBuffering
+                          onChangeStart: isLoadingNew
                               ? null
                               : (val) {
                                   _scrubNotifier.value = val;
                                   player.setSeeking(true);
                                 },
-                          onChanged: (player.isBuffering ||
+                          onChanged: (isLoadingNew ||
                                   player.duration ==
                                       Duration.zero)
                               ? null
                               : (val) {
                                   _scrubNotifier.value = val;
                                 },
-                          onChangeEnd: player.isBuffering
+                          onChangeEnd: isLoadingNew
                               ? null
                               : (val) async {
                                   await player.seek(
@@ -766,7 +766,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                       ),
                       child: IconButton(
                         iconSize: 36,
-                        icon: player.isBuffering
+                        icon: (player.isBuffering || isLoadingNew)
                             ? const SizedBox(
                                 width: 24,
                                 height: 24,
@@ -781,9 +781,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
                                     : Icons.play_arrow_rounded,
                                 color: Colors.white,
                               ),
-                        onPressed: player.isBuffering
-                            ? null
-                            : () => player.togglePlayPause(),
+                        // Always tappable: during loading, togglePlayPause()
+                        // cancels the stuck load. During buffering, it pauses.
+                        onPressed: () => player.togglePlayPause(),
                       ),
                     ),
                     const SizedBox(width: 4),

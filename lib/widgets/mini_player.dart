@@ -800,7 +800,7 @@ class _MiniPlayerState extends State<MiniPlayer> {
                               ),
                               _GlassPlayPauseButton(
                                 isPlaying: player.isPlaying,
-                                isLoading: player.isBuffering,
+                                isLoading: player.isBuffering || player.isLoadingNewSong,
                                 onPressed: player.togglePlayPause,
                               ),
                               _MiniControlButton(
@@ -875,10 +875,11 @@ class _GlassPlayPauseButtonState extends State<_GlassPlayPauseButton> {
   Widget build(BuildContext context) {
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onTapDown: widget.isLoading ? null : (_) => setState(() => _pressed = true),
-      onTapCancel: widget.isLoading ? null : () => setState(() => _pressed = false),
-      onTapUp: widget.isLoading ? null : (_) => setState(() => _pressed = false),
-      onTap: widget.isLoading ? null : () => widget.onPressed(),
+      // Always tappable: during loading, togglePlayPause() cancels the stuck load.
+      onTapDown: (_) => setState(() => _pressed = true),
+      onTapCancel: () => setState(() => _pressed = false),
+      onTapUp: (_) => setState(() => _pressed = false),
+      onTap: () => widget.onPressed(),
       child: Container(
         width: 52,
         height: 52,

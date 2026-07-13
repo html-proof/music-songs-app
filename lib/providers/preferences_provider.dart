@@ -58,6 +58,7 @@ class PreferencesProvider extends ChangeNotifier {
   bool get autoCleanCacheEnabled => _preferences?.autoCleanCacheEnabled ?? true;
   bool get offlinePlaybackEnabled => _preferences?.offlinePlaybackEnabled ?? true;
   bool get skipUnavailableOffline => _preferences?.skipUnavailableOffline ?? true;
+  bool get allowStreamingFallback => _preferences?.allowStreamingFallback ?? true;
 
   void syncWithAuth(User? user) {
     final nextUid = user?.uid;
@@ -169,6 +170,7 @@ class PreferencesProvider extends ChangeNotifier {
     bool? autoCleanCacheEnabled,
     bool? offlinePlaybackEnabled,
     bool? skipUnavailableOffline,
+    bool? allowStreamingFallback,
   }) async {
     final user = _currentUser;
     if (user == null) return;
@@ -251,6 +253,8 @@ class PreferencesProvider extends ChangeNotifier {
           offlinePlaybackEnabled ?? _preferences?.offlinePlaybackEnabled ?? true,
       skipUnavailableOffline:
           skipUnavailableOffline ?? _preferences?.skipUnavailableOffline ?? true,
+      allowStreamingFallback:
+          allowStreamingFallback ?? _preferences?.allowStreamingFallback ?? true,
     );
 
     await PreferencesService.savePreferences(updated);
@@ -401,6 +405,16 @@ class PreferencesProvider extends ChangeNotifier {
       languages: current.languages,
       favoriteArtists: current.favoriteArtists,
       skipUnavailableOffline: value,
+    );
+  }
+
+  Future<void> setStreamingFallbackEnabled(bool value) async {
+    final current = _preferences;
+    if (current == null) return;
+    await savePreferences(
+      languages: current.languages,
+      favoriteArtists: current.favoriteArtists,
+      allowStreamingFallback: value,
     );
   }
 

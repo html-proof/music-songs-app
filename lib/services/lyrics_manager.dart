@@ -223,166 +223,57 @@ class LyricsManager extends ChangeNotifier {
       return;
     }
 
-    // 4. Run Phase 1 searches in background (no status timer!)
-    LyricsPayload? found;
-    String providerSource = '';
-
+    // 4. Run progressive search asynchronously in the background.
+    // Allow up to approximately 10 seconds for the entire search to complete.
     try {
-      final results = await Future.wait<LyricsPayload?>([
-        // Attempt 1: full song-aware lookup (Saavn + LRCLIB exact + search)
-        LyricsService.getLyricsPayloadForSong(song),
-        // Attempt 2: plain title search
-        LyricsService.getLyricsByQuery(title, song),
-        // Attempt 3: title + artist
-        if (artist.isNotEmpty)
-          LyricsService.getLyricsByQuery('$title $artist'.trim(), song),
-      ]).timeout(
-        const Duration(seconds: 8),
-        onTimeout: () => const <LyricsPayload?>[null, null, null],
+      final found = await LyricsService.progressiveLyricsSearch(song).timeout(
+        const Duration(seconds: 10),
       );
 
-      for (final res in results) {
-        if (res != null && res.hasAny) {
-          found = res;
-          providerSource = res.provider ?? 'lrclib';
-          break;
+      if (!_isMyGeneration(myGeneration)) return;
+
+      _retryTimer?.cancel();
+      _retryTimer = null;
+      _hardStopTimer?.cancel();
+      _hardStopTimer = null;
+
+      if (found != null && found.hasAny) {
+        await LyricsCache.put(
+          songId: songId,
+          title: title,
+          artist: artist,
+          album: album,
+          duration: duration,
+          payload: found,
+          providerSource: found.provider ?? 'lrclib',
+        );
+        if (_isMyGeneration(myGeneration)) {
+          _applyPayload(found, myGeneration);
+          // Prefetch next song lyrics in background
+          _prefetchNext();
+        }
+      } else {
+        // Cache unavailable so we don't hammer the API on subsequent plays
+        await LyricsCache.put(
+          songId: songId,
+          title: title,
+          artist: artist,
+          album: album,
+          duration: duration,
+          payload: null,
+          providerSource: 'none',
+          isUnavailable: true,
+        );
+        if (_isMyGeneration(myGeneration)) {
+          _applyUnavailable();
         }
       }
     } catch (e) {
-      debugPrint('[LyricsManager] Phase 1 error: $e');
-    }
-
-    if (!_isMyGeneration(myGeneration)) return;
-
-    _retryTimer?.cancel();
-    _retryTimer = null;
-    _hardStopTimer?.cancel();
-    _hardStopTimer = null;
-
-    if (found != null && found.hasAny) {
-      // Cache and apply
-      await LyricsCache.put(
-        songId: songId,
-        title: title,
-        artist: artist,
-        album: album,
-        duration: duration,
-        payload: found,
-        providerSource: providerSource,
-      );
+      debugPrint('[LyricsManager] Background progressive search timed out or failed: $e');
       if (_isMyGeneration(myGeneration)) {
-        _applyPayload(found, myGeneration);
-        // Prefetch next song lyrics in background
-        _prefetchNext();
+        _applyUnavailable();
       }
-      return;
     }
-
-    // If offline now, don't schedule phase 2 retries
-    if (ConnectivityManager.isOffline) {
-      _applyUnavailable();
-      return;
-    }
-
-    // ── Phase 1 failed — transition to background retrying ──
-    _state = LyricsLoadState.retrying;
-    notifyListeners();
-
-    _schedulePhase2(song, myGeneration, songId, title, artist, album, duration);
-  }
-
-  // ─────────────────────────────────────────────────────────
-  // PHASE 2 — Background retries (15s / 30s / 60s)
-  // ─────────────────────────────────────────────────────────
-  void _schedulePhase2(
-    Song song,
-    int myGeneration,
-    String songId,
-    String title,
-    String artist,
-    String album,
-    int duration,
-  ) {
-    var attempt = 1;
-    const maxAttempts = 3;
-    const delays = [15, 30, 60]; // seconds
-
-    void scheduleNext() {
-      if (ConnectivityManager.isOffline) {
-        if (_isMyGeneration(myGeneration)) {
-          _applyUnavailable();
-        }
-        return;
-      }
-
-      if (attempt > maxAttempts) {
-        if (_isMyGeneration(myGeneration)) {
-          // Cache unavailable to prevent hammering
-          unawaited(LyricsCache.put(
-            songId: songId,
-            title: title,
-            artist: artist,
-            album: album,
-            duration: duration,
-            payload: null,
-            providerSource: 'none',
-            isUnavailable: true,
-          ));
-          _applyUnavailable();
-        }
-        return;
-      }
-
-      final delaySecs = attempt <= delays.length ? delays[attempt - 1] : delays.last;
-      _retryTimer?.cancel();
-      _retryTimer = Timer(Duration(seconds: delaySecs), () async {
-        if (!_isMyGeneration(myGeneration)) return;
-        if (ConnectivityManager.isOffline) {
-          _applyUnavailable();
-          return;
-        }
-
-        final albumName = song.album ?? song.sourceAlbumName ?? '';
-        final queries = <String>[
-          '$title $artist'.trim(),
-          if (albumName.isNotEmpty) '$title $albumName'.trim(),
-          title,
-          if (artist.isNotEmpty) artist,
-        ];
-        final query = queries[(attempt - 1).clamp(0, queries.length - 1)];
-
-        LyricsPayload? result;
-        try {
-          result = await LyricsService.getLyricsByQuery(query, song)
-              .timeout(const Duration(seconds: 8), onTimeout: () => null);
-        } catch (e) {
-          debugPrint('[LyricsManager] Phase 2 attempt $attempt failed: $e');
-        }
-
-        if (!_isMyGeneration(myGeneration)) return;
-
-        if (result != null && result.hasAny) {
-          await LyricsCache.put(
-            songId: songId,
-            title: title,
-            artist: artist,
-            album: album,
-            duration: duration,
-            payload: result,
-            providerSource: 'lrclib',
-          );
-          if (_isMyGeneration(myGeneration)) {
-            _applyPayload(result, myGeneration);
-          }
-          return;
-        }
-
-        attempt++;
-        scheduleNext();
-      });
-    }
-
-    scheduleNext();
   }
 
   // ─────────────────────────────────────────────────────────

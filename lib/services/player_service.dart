@@ -2597,16 +2597,35 @@ class PlayerService {
 
     final songId = song.id.trim();
     if (songId.isNotEmpty) {
-      final downloadPath = await DownloadService.getLocalPath(songId);
-      if (downloadPath != null && downloadPath.isNotEmpty) {
-        StabilityLogger.info('Playback', 'Playback priority: playing manual download for $songId from $downloadPath');
-        return song.copyWith(streamUrl: downloadPath);
-      }
-
-      final offlinePath = OfflineService.getLocalPath(songId);
-      if (offlinePath != null && offlinePath.isNotEmpty) {
-        StabilityLogger.info('Playback', 'Playback priority: playing offline cache for $songId from $offlinePath');
-        return song.copyWith(streamUrl: offlinePath);
+      final isDownloadedDb = await DownloadService.isSongDownloadedInDb(songId);
+      if (isDownloadedDb) {
+        final downloadPath = await DownloadService.getLocalPath(songId);
+        if (downloadPath != null && downloadPath.isNotEmpty) {
+          StabilityLogger.info('Playback', 'Playback priority: playing manual download for $songId from $downloadPath');
+          return song.copyWith(streamUrl: downloadPath);
+        } else {
+          // Local file is missing! Check if streaming fallback is allowed.
+          final isOfflineMode = ConnectivityManager.isOffline;
+          final uid = _currentUserUidSafely();
+          bool allowStreamingFallback = true;
+          if (uid != null) {
+            final prefs = await PreferencesService.getPreferences(uid);
+            if (prefs != null) {
+              allowStreamingFallback = prefs.allowStreamingFallback;
+            }
+          }
+          if (isOfflineMode || !allowStreamingFallback) {
+            StabilityLogger.warning('Playback', 'Downloaded file for $songId is missing and streaming fallback is not allowed or app is offline. Aborting playback.');
+            return null;
+          }
+          StabilityLogger.info('Playback', 'Downloaded file for $songId is missing. Falling back to online streaming.');
+        }
+      } else {
+        final offlinePath = OfflineService.getLocalPath(songId);
+        if (offlinePath != null && offlinePath.isNotEmpty) {
+          StabilityLogger.info('Playback', 'Playback priority: playing offline cache for $songId from $offlinePath');
+          return song.copyWith(streamUrl: offlinePath);
+        }
       }
     }
 

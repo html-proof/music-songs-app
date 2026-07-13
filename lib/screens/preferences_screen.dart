@@ -141,6 +141,7 @@ class PreferencesScreen extends StatelessWidget {
                           preferences.conversationAssistIgnoreSingleEarbud,
                       offlinePlaybackEnabled: preferences.offlinePlaybackEnabled,
                       skipUnavailableOffline: preferences.skipUnavailableOffline,
+                      allowStreamingFallback: preferences.allowStreamingFallback,
                       onAutoplayChanged: (enabled) async {
                         await preferences.setAutoplayEnabled(enabled);
                       },
@@ -177,6 +178,9 @@ class PreferencesScreen extends StatelessWidget {
                       },
                       onSkipUnavailableOfflineChanged: (enabled) async {
                         await preferences.setSkipUnavailableOffline(enabled);
+                      },
+                      onStreamingFallbackChanged: (enabled) async {
+                        await preferences.setStreamingFallbackEnabled(enabled);
                       },
                     ),
                     const SizedBox(height: 16),
@@ -230,6 +234,7 @@ class _PlaybackSettingsCard extends StatelessWidget {
   final bool conversationAssistIgnoreSingleEarbud;
   final bool offlinePlaybackEnabled;
   final bool skipUnavailableOffline;
+  final bool allowStreamingFallback;
   final ValueChanged<bool> onAutoplayChanged;
   final ValueChanged<AudioQuality> onAudioQualityChanged;
   final ValueChanged<AudioQuality> onDownloadQualityChanged;
@@ -241,6 +246,7 @@ class _PlaybackSettingsCard extends StatelessWidget {
   final ValueChanged<bool> onConversationAssistIgnoreSingleEarbudChanged;
   final ValueChanged<bool> onOfflinePlaybackChanged;
   final ValueChanged<bool> onSkipUnavailableOfflineChanged;
+  final ValueChanged<bool> onStreamingFallbackChanged;
 
   const _PlaybackSettingsCard({
     required this.autoplayEnabled,
@@ -253,6 +259,7 @@ class _PlaybackSettingsCard extends StatelessWidget {
     required this.conversationAssistIgnoreSingleEarbud,
     required this.offlinePlaybackEnabled,
     required this.skipUnavailableOffline,
+    required this.allowStreamingFallback,
     required this.onAutoplayChanged,
     required this.onAudioQualityChanged,
     required this.onDownloadQualityChanged,
@@ -263,6 +270,7 @@ class _PlaybackSettingsCard extends StatelessWidget {
     required this.onConversationAssistIgnoreSingleEarbudChanged,
     required this.onOfflinePlaybackChanged,
     required this.onSkipUnavailableOfflineChanged,
+    required this.onStreamingFallbackChanged,
   });
 
   @override
@@ -332,6 +340,21 @@ class _PlaybackSettingsCard extends StatelessWidget {
               style: TextStyle(color: AppTheme.textSecondary, fontSize: 12),
             ),
             onChanged: onSkipUnavailableOfflineChanged,
+          ),
+          const Divider(height: 1, color: AppTheme.cardDark),
+          SwitchListTile.adaptive(
+            contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+            value: allowStreamingFallback,
+            activeThumbColor: AppTheme.accentPurple,
+            title: const Text(
+              'Streaming Fallback',
+              style: TextStyle(color: AppTheme.textPrimary, fontSize: 14),
+            ),
+            subtitle: const Text(
+              'Allow streaming online when a downloaded song file is missing.',
+              style: TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+            ),
+            onChanged: onStreamingFallbackChanged,
           ),
           const Divider(height: 1, color: AppTheme.cardDark),
 

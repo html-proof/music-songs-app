@@ -215,4 +215,13 @@ class LyricsCache {
     _memCache.clear();
     _box?.clear();
   }
+
+  static Future<void> invalidate(String songId) async {
+    final sId = songId.trim();
+    if (sId.isEmpty) return;
+    _memCache.remove(sId);
+    if (_box != null) {
+      await _box!.delete(sId);
+    }
+  }
 }

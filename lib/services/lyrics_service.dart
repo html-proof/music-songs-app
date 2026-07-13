@@ -9,6 +9,7 @@ import 'package:path_provider/path_provider.dart';
 import '../models/song.dart';
 import 'api_service.dart';
 import 'lyrics_cache.dart';
+import 'stability_logger.dart';
 
 @immutable
 class LyricsPayload {
@@ -234,6 +235,160 @@ class LyricsService {
       }
     }
 
+    return null;
+  }
+
+  /// Progressively search for lyrics using richer metadata combinations and fallback sources.
+  static Future<LyricsPayload?> progressiveLyricsSearch(Song song) async {
+    final songId = song.id.trim();
+    final title = song.name.trim();
+    final artist = (song.artist ?? '').trim();
+    final album = (song.sourceAlbumName ?? song.album ?? '').trim();
+    final duration = song.duration ?? 0;
+    final isrc = (song.isrc ?? '').trim();
+
+    StabilityLogger.info('Lyrics', 'Starting progressive background search for: $title (ID: $songId)');
+
+    // 1. Try our own Saavn Backend first (if available)
+    if (songId.isNotEmpty) {
+      try {
+        final saavnCand = await _fetchSaavnCandidate(songId, artist: artist);
+        if (saavnCand != null && saavnCand.plainLyrics != null && saavnCand.plainLyrics!.trim().isNotEmpty) {
+          StabilityLogger.info('Lyrics', 'Provider SUCCESS: Saavn Backend for $songId');
+          return LyricsPayload(
+            plainLyrics: saavnCand.plainLyrics,
+            syncedLyrics: saavnCand.syncedLyrics,
+            provider: 'saavn',
+          );
+        }
+      } catch (e) {
+        StabilityLogger.warning('Lyrics', 'Saavn Backend lookup failed: $e');
+      }
+    }
+
+    final cleanTitle = _cleanTitle(title);
+    final cleanArtist = _cleanArtist(artist);
+    final cleanAlbum = _cleanTitle(album);
+
+    // List of query strategies to try on LRCLIB
+    final strategies = <({String label, Future<Map<String, dynamic>?> Function() execute})>[
+      // Strategy 7: ISRC or MusicBrainz ID lookup (if available)
+      if (isrc.isNotEmpty)
+        (
+          label: 'ISRC ($isrc)',
+          execute: () => _lrclibGetEntry(artist: '', title: '', isrc: isrc),
+        ),
+      // Strategy 6: Song Title + Artist + Album + Duration (Full exact match)
+      if (cleanTitle.isNotEmpty && cleanArtist.isNotEmpty && cleanAlbum.isNotEmpty && duration > 0)
+        (
+          label: 'Title+Artist+Album+Duration',
+          execute: () => _lrclibGetEntry(
+            artist: cleanArtist,
+            title: cleanTitle,
+            album: cleanAlbum,
+            durationSeconds: duration,
+          ),
+        ),
+      // Strategy 5: Song Title + Artist + Album/Movie
+      if (cleanTitle.isNotEmpty && cleanArtist.isNotEmpty && cleanAlbum.isNotEmpty)
+        (
+          label: 'Title+Artist+Album',
+          execute: () => _lrclibGetEntry(
+            artist: cleanArtist,
+            title: cleanTitle,
+            album: cleanAlbum,
+          ),
+        ),
+      // Strategy 2: Song Title + Artist
+      if (cleanTitle.isNotEmpty && cleanArtist.isNotEmpty)
+        (
+          label: 'Title+Artist',
+          execute: () => _lrclibGetEntry(
+            artist: cleanArtist,
+            title: cleanTitle,
+          ),
+        ),
+      // Strategy 3: Song Title + Album (or Movie)
+      if (cleanTitle.isNotEmpty && cleanAlbum.isNotEmpty)
+        (
+          label: 'Title+Album',
+          execute: () => _lrclibGetEntry(
+            artist: '',
+            title: cleanTitle,
+            album: cleanAlbum,
+          ),
+        ),
+      // Strategy 1: Song Title
+      if (cleanTitle.isNotEmpty)
+        (
+          label: 'Title only',
+          execute: () => _lrclibGetEntry(
+            artist: '',
+            title: cleanTitle,
+          ),
+        ),
+    ];
+
+    final lookup = _LyricsLookup.fromSong(song);
+
+    // Try strategies sequentially as fallbacks
+    for (final strategy in strategies) {
+      try {
+        debugPrint('[LyricsService] Trying strategy: ${strategy.label}');
+        final result = await strategy.execute().timeout(
+          const Duration(seconds: 3),
+        );
+        if (result != null) {
+          final candidate = _candidateFromJson(result);
+          if (candidate != null && candidate.plainLyrics != null && candidate.plainLyrics!.trim().isNotEmpty) {
+            StabilityLogger.info('Lyrics', 'Provider SUCCESS: LRCLIB ${strategy.label} for $songId');
+            return LyricsPayload(
+              plainLyrics: candidate.plainLyrics,
+              syncedLyrics: candidate.syncedLyrics,
+              provider: 'lrclib',
+            );
+          }
+        }
+      } catch (e) {
+        debugPrint('[LyricsService] Strategy ${strategy.label} failed/timed out: $e');
+      }
+    }
+
+    // 8. Try LRCLIB search fallback
+    try {
+      final query = '$cleanTitle $cleanArtist'.trim();
+      debugPrint('[LyricsService] Trying LRCLIB search query: $query');
+      final entries = await _lrclibSearchEntries(query).timeout(const Duration(seconds: 4));
+      if (entries.isNotEmpty) {
+        final candidates = entries
+            .map((json) => _candidateFromJson(json))
+            .whereType<_LyricsCandidate>()
+            .toList();
+        final bestPayload = _selectBestPayload(lookup, candidates);
+        if (bestPayload != null && bestPayload.hasAny) {
+          StabilityLogger.info('Lyrics', 'Provider SUCCESS: LRCLIB Search fallback for $songId');
+          return bestPayload;
+        }
+      }
+    } catch (e) {
+      debugPrint('[LyricsService] LRCLIB search fallback failed: $e');
+    }
+
+    // 9. JioSaavn Web Scraper Fallback (if songUrl is available)
+    if (song.songUrl != null && song.songUrl!.isNotEmpty) {
+      try {
+        StabilityLogger.info('Lyrics', 'Falling back to JioSaavn scrape for: ${song.name}');
+        final scraped = await _scrapeJioSaavnLyrics(song.songUrl!).timeout(const Duration(seconds: 4));
+        if (scraped != null && scraped.hasAny) {
+          StabilityLogger.info('Lyrics', 'Provider SUCCESS: JioSaavn scrape for $songId');
+          return scraped;
+        }
+      } catch (e) {
+        StabilityLogger.warning('Lyrics', 'JioSaavn scrape fallback failed: $e');
+      }
+    }
+
+    StabilityLogger.warning('Lyrics', 'All progressive lyrics searches failed for: $title (ID: $songId)');
     return null;
   }
 
@@ -465,10 +620,12 @@ class LyricsService {
     required String title,
     String? album,
     int? durationSeconds,
+    String? isrc,
   }) async {
     try {
       final query = <String, String>{
-        'track_name': title,
+        if (isrc != null && isrc.trim().isNotEmpty) 'isrc': isrc.trim(),
+        if (title.trim().isNotEmpty) 'track_name': title,
         if (artist.trim().isNotEmpty) 'artist_name': artist,
         if ((album ?? '').trim().isNotEmpty) 'album_name': album!.trim(),
         if (durationSeconds != null && durationSeconds > 0)

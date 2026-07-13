@@ -503,56 +503,73 @@ class DownloadService {
   }
 
   /// Delete a downloaded song for current user.
-  static Future<void> deleteSong(String songId) async {
+  static Future<bool> deleteSong(String songId) async {
     final uid = _currentUserUid();
-    if (uid == null || uid.isEmpty) return;
+    if (uid == null || uid.isEmpty) return false;
 
     final metadata = await _readMetadataEntries();
     if (metadata == null) {
       StabilityLogger.warning('Download', 'Could not read metadata to delete song. Aborting deletion.');
-      return;
+      return false;
     }
     StabilityLogger.info('Download', 'Explicit request to delete downloaded song: $songId (UID: $uid)');
 
-    final deletedEntry = metadata.cast<Map<String, dynamic>?>().firstWhere(
-      (entry) => entry != null && _entrySongId(entry) == songId && _entryUid(entry) == uid,
-      orElse: () => null,
-    );
-
-    metadata.removeWhere(
+    final entryIndex = metadata.indexWhere(
       (entry) => _entrySongId(entry) == songId && _entryUid(entry) == uid,
     );
-    await _writeMetadataEntries(metadata);
-    await SessionStateService.clearDownloadState(uid: uid, songId: songId);
-
-    if (deletedEntry != null) {
-      final albumId = (deletedEntry['albumId'] ?? deletedEntry['album_id'] ?? '').toString().trim();
-      if (albumId.isNotEmpty) {
-        unawaited(AlbumFilter.invalidateCache(albumId));
-      }
+    if (entryIndex == -1) {
+      // Song is not in metadata, treat as deleted successfully
+      return true;
     }
+    final deletedEntry = metadata[entryIndex];
 
     // Remove file only if no other account still references this song.
     final hasOtherOwner = metadata.any(
-      (entry) => _entrySongId(entry) == songId,
+      (entry) => _entrySongId(entry) == songId && _entryUid(entry) != uid,
     );
+
     if (!hasOtherOwner) {
       StabilityLogger.info('Download', 'Deleting local files for song $songId (no other owner references)');
-      final dir = await _downloadsDir;
-      final songDir = Directory('${dir.path}/songs/$songId');
-      if (await songDir.exists()) {
-        await songDir.delete(recursive: true);
+      try {
+        final dir = await _downloadsDir;
+        final songDir = Directory('${dir.path}/songs/$songId');
+        if (await songDir.exists()) {
+          await songDir.delete(recursive: true);
+        }
+        // Also clean up legacy flat files if they exist
+        final legacyFile = File('${dir.path}/$songId.mp4');
+        final legacyPart = File('${dir.path}/$songId.mp4.part');
+        final legacyArt = File('${dir.path}/$songId.jpg');
+        final legacyLrc = File('${dir.path}/$songId.lrc');
+        if (await legacyFile.exists()) await legacyFile.delete();
+        if (await legacyPart.exists()) await legacyPart.delete();
+        if (await legacyArt.exists()) await legacyArt.delete();
+        if (await legacyLrc.exists()) await legacyLrc.delete();
+
+        // Invalidate lyrics cache since it is deleted and no longer referenced
+        await LyricsCache.invalidate(songId);
+      } catch (e, st) {
+        StabilityLogger.error('Download', 'Failed to delete local files for song $songId. Aborting deletion.', e, st);
+        return false;
       }
-      // Also clean up legacy flat files if they exist
-      final legacyFile = File('${dir.path}/$songId.mp4');
-      final legacyPart = File('${dir.path}/$songId.mp4.part');
-      final legacyArt = File('${dir.path}/$songId.jpg');
-      final legacyLrc = File('${dir.path}/$songId.lrc');
-      if (await legacyFile.exists()) await legacyFile.delete();
-      if (await legacyPart.exists()) await legacyPart.delete();
-      if (await legacyArt.exists()) await legacyArt.delete();
-      if (await legacyLrc.exists()) await legacyLrc.delete();
     }
+
+    // Now delete metadata database record and clear session state
+    metadata.removeAt(entryIndex);
+    try {
+      await _writeMetadataEntries(metadata);
+      await SessionStateService.clearDownloadState(uid: uid, songId: songId);
+    } catch (e, st) {
+      StabilityLogger.error('Download', 'Failed to remove metadata record for song $songId. Aborting deletion.', e, st);
+      return false;
+    }
+
+    final albumId = (deletedEntry['albumId'] ?? deletedEntry['album_id'] ?? '').toString().trim();
+    if (albumId.isNotEmpty) {
+      unawaited(AlbumFilter.invalidateCache(albumId));
+    }
+
+    return true;
   }
 
   /// Get the local file path for a downloaded song for current user.
@@ -1260,5 +1277,16 @@ class DownloadService {
     });
 
     await _writeMetadataEntries(entries);
+  }
+
+  /// Check if the song has a metadata record in the database for the current user.
+  static Future<bool> isSongDownloadedInDb(String songId) async {
+    final uid = _currentUserUid();
+    if (uid == null || uid.isEmpty) return false;
+    final metadata = await _readMetadataEntries();
+    if (metadata == null) return false;
+    return metadata.any(
+      (entry) => _entrySongId(entry) == songId && _entryUid(entry) == uid,
+    );
   }
 }

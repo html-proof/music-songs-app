@@ -154,7 +154,11 @@ class DownloadProvider extends ChangeNotifier {
     if (_activeUid == null || _activeUid!.isEmpty) return;
     
     // Clear from both sources to ensure full removal
-    await DownloadService.deleteSong(songId);
+    final success = await DownloadService.deleteSong(songId);
+    if (!success) {
+      // Abort UI state changes to keep it visible
+      return;
+    }
     await OfflineService.deleteRecord(songId);
     
     _downloadedIds.remove(songId);

@@ -179,6 +179,7 @@ class UserPreferences {
   final bool autoCleanCacheEnabled;
   final bool offlinePlaybackEnabled;
   final bool skipUnavailableOffline;
+  final bool allowStreamingFallback;
 
   UserPreferences({
     required this.uid,
@@ -210,6 +211,7 @@ class UserPreferences {
     this.autoCleanCacheEnabled = true,
     this.offlinePlaybackEnabled = true,
     this.skipUnavailableOffline = true,
+    this.allowStreamingFallback = true,
   });
 
   factory UserPreferences.fromJson(Map<String, dynamic> json) {
@@ -307,6 +309,7 @@ class UserPreferences {
       autoCleanCacheEnabled: json['autoCleanCacheEnabled'] != false,
       offlinePlaybackEnabled: json['offlinePlaybackEnabled'] ?? true,
       skipUnavailableOffline: json['skipUnavailableOffline'] ?? true,
+      allowStreamingFallback: json['allowStreamingFallback'] ?? true,
     );
   }
 
@@ -343,6 +346,7 @@ class UserPreferences {
       'autoCleanCacheEnabled': autoCleanCacheEnabled,
       'offlinePlaybackEnabled': offlinePlaybackEnabled,
       'skipUnavailableOffline': skipUnavailableOffline,
+      'allowStreamingFallback': allowStreamingFallback,
     };
   }
 
@@ -375,6 +379,7 @@ class UserPreferences {
     bool? autoCleanCacheEnabled,
     bool? offlinePlaybackEnabled,
     bool? skipUnavailableOffline,
+    bool? allowStreamingFallback,
   }) {
     return UserPreferences(
       uid: uid,
@@ -432,6 +437,8 @@ class UserPreferences {
           offlinePlaybackEnabled ?? this.offlinePlaybackEnabled,
       skipUnavailableOffline:
           skipUnavailableOffline ?? this.skipUnavailableOffline,
+      allowStreamingFallback:
+          allowStreamingFallback ?? this.allowStreamingFallback,
     );
   }
 

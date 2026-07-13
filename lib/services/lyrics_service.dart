@@ -399,16 +399,17 @@ class LyricsService {
       // Flatten the candidates list
       final candidates = allResults.expand((x) => x).toList();
 
-      if (candidates.isEmpty) {
-        StabilityLogger.warning('Lyrics', 'All parallel lyrics searches returned empty for: $title (ID: $songId)');
-        return null;
-      }
-
       final lookup = _LyricsLookup.fromSong(song);
-      final bestPayload = _selectBestPayload(lookup, candidates);
+      final bestPayload = candidates.isNotEmpty ? _selectBestPayload(lookup, candidates) : null;
 
       if (bestPayload != null && bestPayload.hasAny) {
         return bestPayload;
+      }
+
+      // If standard APIs failed, run our fallback search engine scraper
+      final scrapedPayload = await _scrapeLyricsFromSearchEngine(title, artist, client);
+      if (scrapedPayload != null && scrapedPayload.hasAny) {
+        return scrapedPayload;
       }
     } catch (e) {
       debugPrint('[LyricsService] Parallel progressive search failed or timed out: $e');
@@ -419,6 +420,107 @@ class LyricsService {
       client.close();
     }
 
+    return null;
+  }
+
+  static String decodeHtmlEntities(String text) {
+    return text
+        .replaceAll('&amp;', '&')
+        .replaceAll('&quot;', '"')
+        .replaceAll('&#039;', "'")
+        .replaceAll('&apos;', "'")
+        .replaceAll('&lt;', '<')
+        .replaceAll('&gt;', '>')
+        .replaceAll('&nbsp;', ' ')
+        .trim();
+  }
+
+  static Future<LyricsPayload?> _scrapeLyricsFromSearchEngine(
+      String title, String artist, http.Client client) async {
+    try {
+      final query = Uri.encodeComponent('$title $artist lyrics');
+      final ddgUrl = 'https://html.duckduckgo.com/html/?q=$query';
+
+      StabilityLogger.info('Lyrics', 'Scraping search engine fallback for: $title $artist');
+
+      final searchResponse = await client.get(Uri.parse(ddgUrl), headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      }).timeout(const Duration(seconds: 4));
+
+      if (searchResponse.statusCode != 200) {
+        return null;
+      }
+
+      final html = searchResponse.body;
+      final regExp = RegExp(r'href="([^"]+)"');
+      final matches = regExp.allMatches(html);
+
+      final List<String> targetUrls = [];
+      for (final match in matches) {
+        final rawLink = match.group(1)!;
+        final decodedLink = Uri.decodeFull(rawLink);
+        final uddgMatch = RegExp(r'uddg=([^&]+)').firstMatch(decodedLink);
+        if (uddgMatch != null) {
+          final targetUrl = uddgMatch.group(1)!;
+          if (targetUrl.contains('azlyrics.com/lyrics/')) {
+            targetUrls.add(targetUrl);
+          } else if (targetUrl.contains('songlyrics.com/')) {
+            targetUrls.add(targetUrl);
+          }
+        }
+      }
+
+      if (targetUrls.isEmpty) {
+        return null;
+      }
+
+      for (final url in targetUrls) {
+        try {
+          StabilityLogger.info('Lyrics', 'Scraping target URL: $url');
+          final response = await client.get(Uri.parse(url), headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          }).timeout(const Duration(seconds: 4));
+
+          if (response.statusCode != 200) continue;
+
+          final pageHtml = response.body;
+          String? rawLyrics;
+
+          if (url.contains('azlyrics.com')) {
+            final commentRegExp = RegExp(r'<!-- Usage of azlyrics\.com content[\s\S]*?-->([\s\S]*?)</div>');
+            final lyricsMatch = commentRegExp.firstMatch(pageHtml);
+            if (lyricsMatch != null) {
+              rawLyrics = lyricsMatch.group(1)!;
+            }
+          } else if (url.contains('songlyrics.com')) {
+            final lyricsDivRegExp = RegExp(r'<p id="songLyricsDiv"[^>]*>([\s\S]*?)</p>');
+            final lyricsMatch = lyricsDivRegExp.firstMatch(pageHtml);
+            if (lyricsMatch != null) {
+              rawLyrics = lyricsMatch.group(1)!;
+            }
+          }
+
+          if (rawLyrics != null) {
+            var lyrics = rawLyrics.replaceAll(RegExp(r'<br\s*/?>', caseSensitive: false), '\n');
+            lyrics = lyrics.replaceAll(RegExp(r'<[^>]*>'), '');
+            lyrics = decodeHtmlEntities(lyrics);
+
+            if (lyrics.isNotEmpty && !lyrics.toLowerCase().contains('we do not have the lyrics for this song')) {
+              StabilityLogger.info('Lyrics', 'Successfully scraped search engine lyrics from: $url');
+              return LyricsPayload(
+                plainLyrics: lyrics,
+                syncedLyrics: null,
+                provider: 'Search Scraper (${Uri.parse(url).host})',
+              );
+            }
+          }
+        } catch (e) {
+          debugPrint('[LyricsService] Scraper failed for $url: $e');
+        }
+      }
+    } catch (e) {
+      debugPrint('[LyricsService] Error during search engine lyrics scraping: $e');
+    }
     return null;
   }
 

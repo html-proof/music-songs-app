@@ -5826,7 +5826,8 @@ class CustomAudioPlayer extends AudioPlayer {
   CustomAudioPlayer() : super(
     audioLoadConfiguration: const AudioLoadConfiguration(
       androidLoadControl: AndroidLoadControl(
-        maxBufferDuration: Duration(seconds: 20),
+        minBufferDuration: Duration(seconds: 15),
+        maxBufferDuration: Duration(seconds: 30),
         backBufferDuration: Duration(seconds: 10),
       ),
     ),

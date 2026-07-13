@@ -27,4 +27,21 @@ void main() {
       expect(normalized, 'shayad full song');
     });
   });
+
+  group('Lyrics Service Scraper Fallback Tests', () {
+    test('decodeHtmlEntities decodes common HTML entities correctly', () {
+      final input = 'Kesariya tera ishq hai piya &amp; &quot;love storiyan&quot;&#039;s';
+      final decoded = LyricsService.decodeHtmlEntities(input);
+      expect(decoded, 'Kesariya tera ishq hai piya & "love storiyan"\'s');
+    });
+
+    test('DuckDuckGo search result links with uddg parameters are parsed correctly', () {
+      final link = '//duckduckgo.com/l/?uddg=https://www.azlyrics.com/lyrics/bollywood/kesariya.html&amp;rut=d597257';
+      final decodedLink = Uri.decodeFull(link);
+      final uddgMatch = RegExp(r'uddg=([^&]+)').firstMatch(decodedLink);
+      expect(uddgMatch, isNotNull);
+      final targetUrl = uddgMatch!.group(1)!;
+      expect(targetUrl, 'https://www.azlyrics.com/lyrics/bollywood/kesariya.html');
+    });
+  });
 }

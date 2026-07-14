@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:fluttertoast/fluttertoast.dart';
@@ -390,7 +391,7 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                             _buildSongsTab(player, visibleSongs, visiblePlaylist),
                             _buildArtistsTab(),
                             _buildAlbumsTab(),
-                            _buildPlaylistsTab(downloadedPlaylists),
+                            _buildPlaylistsTab(context, allPlaylists),
                           ],
                         ),
                 ),
@@ -549,10 +550,11 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
     );
   }
 
-  Widget _buildPlaylistsTab(List<UserPlaylist> playlists) {
-    if (_allOfflineSongs.isEmpty) {
-      return _buildEmptyState();
-    }
+  Widget _buildPlaylistsTab(BuildContext context, List<UserPlaylist> playlists) {
+    final playlistsProvider = context.read<PlaylistProvider>();
+    final downloadProvider = context.read<DownloadProvider>();
+    final player = context.read<PlayerProvider>();
+
     if (playlists.isEmpty) {
       return Center(
         child: Column(
@@ -561,12 +563,12 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
             const Icon(Icons.playlist_play_rounded, size: 64, color: AppTheme.textMuted),
             const SizedBox(height: 16),
             const Text(
-              'No downloaded playlists',
+              'No playlists found',
               style: TextStyle(color: AppTheme.textPrimary, fontSize: 16, fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 8),
             const Text(
-              'Playlists you download will appear here.',
+              'Playlists you create or import will appear here.',
               style: TextStyle(color: AppTheme.textSecondary, fontSize: 12),
             ),
           ],
@@ -579,6 +581,7 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
       itemBuilder: (context, index) {
         final playlist = playlists[index];
         final songCount = playlist.songs.length;
+        final offlineCount = playlistsProvider.offlinePlayableCount(playlist);
 
         String? coverUrl;
         if ((playlist.coverImageUrl ?? '').trim().isNotEmpty) {
@@ -591,6 +594,10 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
             }
           }
         }
+
+        final subtitleText = offlineCount == songCount
+            ? '$songCount ${songCount == 1 ? 'song' : 'songs'} offline'
+            : '$offlineCount of $songCount songs offline';
 
         return ListTile(
           contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
@@ -617,8 +624,112 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
             style: const TextStyle(color: AppTheme.textPrimary, fontWeight: FontWeight.bold, fontSize: 14),
           ),
           subtitle: Text(
-            '$songCount ${songCount == 1 ? 'song' : 'songs'} offline',
+            subtitleText,
             style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+          ),
+          trailing: PopupMenuButton<String>(
+            icon: const Icon(Icons.more_vert_rounded, color: AppTheme.textSecondary),
+            color: AppTheme.cardDark,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            onSelected: (value) async {
+              switch (value) {
+                case 'play':
+                  if (playlist.songs.isNotEmpty) {
+                    player.play(playlist.songs.first, playlist: playlist.songs, index: 0);
+                  }
+                  break;
+                case 'shuffle':
+                  if (playlist.songs.isNotEmpty) {
+                    if (!player.shuffleModeEnabled) {
+                      await player.toggleShuffleMode();
+                    }
+                    final randomIndex = Random().nextInt(playlist.songs.length);
+                    player.play(playlist.songs[randomIndex], playlist: playlist.songs, index: randomIndex);
+                  }
+                  break;
+                case 'download':
+                  if (playlist.songs.isNotEmpty) {
+                    downloadProvider.downloadPlaylist(
+                      playlist.id,
+                      playlist.name,
+                      playlist.songs,
+                    );
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text('Downloading "${playlist.name}"...'),
+                        backgroundColor: AppTheme.accentPurple,
+                      ),
+                    );
+                  }
+                  break;
+                case 'delete':
+                  final confirmed = await _confirmDelete(
+                    title: 'Delete Playlist',
+                    message: 'Remove "${playlist.name}" from library?',
+                  );
+                  if (confirmed == true) {
+                    await playlistsProvider.deletePlaylist(playlist.id);
+                    _showToast('Playlist deleted');
+                  }
+                  break;
+              }
+            },
+            itemBuilder: (context) {
+              final hasSongs = playlist.songs.isNotEmpty;
+              final isPlaylistDownloaded = hasSongs &&
+                  playlist.songs.every((s) => downloadProvider.isDownloaded(s.id));
+              
+              return [
+                PopupMenuItem(
+                  value: 'play',
+                  enabled: hasSongs,
+                  child: const Row(
+                    children: [
+                      Icon(Icons.play_arrow_rounded, color: AppTheme.textPrimary, size: 20),
+                      SizedBox(width: 8),
+                      Text('Play'),
+                    ],
+                  ),
+                ),
+                PopupMenuItem(
+                  value: 'shuffle',
+                  enabled: hasSongs,
+                  child: const Row(
+                    children: [
+                      Icon(Icons.shuffle_rounded, color: AppTheme.textPrimary, size: 20),
+                      SizedBox(width: 8),
+                      Text('Shuffle'),
+                    ],
+                  ),
+                ),
+                PopupMenuItem(
+                  value: 'download',
+                  enabled: hasSongs && !isPlaylistDownloaded,
+                  child: Row(
+                    children: [
+                      Icon(
+                        isPlaylistDownloaded ? Icons.check_circle_rounded : Icons.arrow_circle_down_rounded,
+                        color: isPlaylistDownloaded ? AppTheme.accentPurple : AppTheme.textPrimary,
+                        size: 20,
+                      ),
+                      const SizedBox(width: 8),
+                      Text(isPlaylistDownloaded ? 'Downloaded' : 'Download All'),
+                    ],
+                  ),
+                ),
+                const PopupMenuDivider(),
+                const PopupMenuItem(
+                  value: 'delete',
+                  child: Row(
+                    children: [
+                      Icon(Icons.delete_outline_rounded, color: Colors.redAccent, size: 20),
+                      SizedBox(width: 8),
+                      Text('Delete', style: TextStyle(color: Colors.redAccent)),
+                    ],
+                  ),
+                ),
+              ];
+            },
           ),
           onTap: () {
             Navigator.push(

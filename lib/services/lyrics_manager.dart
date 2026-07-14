@@ -203,6 +203,7 @@ class LyricsManager extends ChangeNotifier {
         }
 
         _fetchLyrics(song);
+        _prefetchNext();
       }
     });
   }
@@ -284,7 +285,7 @@ class LyricsManager extends ChangeNotifier {
       return;
     }
 
-    // 2. Fast path: check cache before network
+    // 2. Fast path: check cache
     final cached = await LyricsCache.get(
       songId: songId,
       title: title,
@@ -294,6 +295,9 @@ class LyricsManager extends ChangeNotifier {
     );
 
     if (!_isMyGeneration(myGeneration)) return;
+
+    bool needsBackgroundRefresh = false;
+    bool needsUpgradeToSynced = false;
 
     if (cached != null) {
       if (cached.isUnavailable) {
@@ -318,19 +322,44 @@ class LyricsManager extends ChangeNotifier {
             providerSource: cached.providerSource,
           ));
         }
+
+        // Show cached lyrics instantly!
         _applyPayload(payload, myGeneration);
-        return;
+
+        // Check if cached entry is older than 24 hours (refresh check)
+        final age = DateTime.now().difference(cached.fetchedAt);
+        if (age.inHours >= 24) {
+          needsBackgroundRefresh = true;
+        }
+
+        // Check if the payload only has plain lyrics (upgrade to synced check)
+        if (!payload.hasSynced) {
+          needsUpgradeToSynced = true;
+        }
+
+        if (!needsBackgroundRefresh && !needsUpgradeToSynced) {
+          // No need to query network since we have fresh synced lyrics!
+          return;
+        }
       }
     }
 
-    // 3. Check connectivity. If offline, fail immediately to prevent hanging
+    // 3. Check connectivity. If offline, stop since we can't query the network
     if (ConnectivityManager.isOffline) {
-      _applyUnavailable();
+      if (cached == null) {
+        _applyUnavailable();
+      }
       return;
     }
 
-    // 4. Run progressive search asynchronously in the background.
-    // Allow up to approximately 10 seconds for the entire search to complete.
+    // 4. Run progressive search in the background.
+    // If we already showed cached lyrics, this is a silent background refresh/upgrade,
+    // so we must NOT change the state to `searching` or show any loading spinner.
+    if (cached == null) {
+      _state = LyricsLoadState.searching;
+      notifyListeners();
+    }
+
     try {
       final found = await LyricsService.progressiveLyricsSearch(song).timeout(
         const Duration(seconds: 10),
@@ -338,12 +367,19 @@ class LyricsManager extends ChangeNotifier {
 
       if (!_isMyGeneration(myGeneration)) return;
 
-      _retryTimer?.cancel();
-      _retryTimer = null;
-      _hardStopTimer?.cancel();
-      _hardStopTimer = null;
-
       if (found != null && found.hasAny) {
+        // Upgrade check: if we already have plain/synced lyrics displayed, only swap/update if the new one is better
+        // (e.g. if we had plain and found synced, or if it is a fresh refresh).
+        bool shouldApply = true;
+        if (cached != null) {
+          final currentHasSynced = _payload?.hasSynced ?? false;
+          final newHasSynced = found.hasSynced;
+          // If we had synced lyrics, and the refreshed one is plain, do not overwrite/downgrade.
+          if (currentHasSynced && !newHasSynced) {
+            shouldApply = false;
+          }
+        }
+
         await LyricsCache.put(
           songId: songId,
           title: title,
@@ -353,12 +389,11 @@ class LyricsManager extends ChangeNotifier {
           payload: found,
           providerSource: found.provider ?? 'lrclib',
         );
-        if (_isMyGeneration(myGeneration)) {
+
+        if (shouldApply && _isMyGeneration(myGeneration)) {
           _applyPayload(found, myGeneration);
-          // Prefetch next song lyrics in background
-          _prefetchNext();
         }
-      } else {
+      } else if (cached == null) {
         // Cache unavailable so we don't hammer the API on subsequent plays
         await LyricsCache.put(
           songId: songId,
@@ -376,7 +411,7 @@ class LyricsManager extends ChangeNotifier {
       }
     } catch (e) {
       debugPrint('[LyricsManager] Background progressive search timed out or failed: $e');
-      if (_isMyGeneration(myGeneration)) {
+      if (cached == null && _isMyGeneration(myGeneration)) {
         _applyUnavailable();
       }
     }

@@ -1,3 +1,5 @@
+import 'dart:async';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'package:fuzzy/fuzzy.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -14,6 +16,7 @@ import '../models/user_playlist.dart';
 import '../services/playlist_service.dart';
 import '../services/download_service.dart';
 import '../services/background_learning_service.dart';
+import '../services/preferences_service.dart';
 
 class SearchProvider extends ChangeNotifier {
   static const String _recentSearchesKey = 'recent_searches_v1';
@@ -156,8 +159,64 @@ class SearchProvider extends ChangeNotifier {
   String get query => _query;
   bool get offlineMode => _offlineMode;
 
+  // User metadata for ranking
+  final Set<String> _recentPlaySongIds = {};
+  final Set<String> _localPlayHistoryIds = {};
+  final Set<String> _playlistSongIds = {};
+  final Set<String> _favoriteArtistNames = {};
+
   SearchProvider() {
     _loadRecentSearches();
+    unawaited(loadUserMetadataForRanking());
+  }
+
+  Future<void> loadUserMetadataForRanking() async {
+    try {
+      // 1. Favorite Artists
+      final uid = FirebaseAuth.instance.currentUser?.uid;
+      if (uid != null) {
+        final prefs = await PreferencesService.getPreferences(uid);
+        if (prefs != null) {
+          _favoriteArtistNames.clear();
+          for (final artist in prefs.favoriteArtists) {
+            final name = (artist['name'] ?? '').toLowerCase().trim();
+            if (name.isNotEmpty) _favoriteArtistNames.add(name);
+          }
+        }
+      }
+
+      // 2. Playlist Songs
+      final playlists = await PlaylistService.getPlaylists();
+      _playlistSongIds.clear();
+      for (final pl in playlists) {
+        for (final song in pl.songs) {
+          _playlistSongIds.add(song.id);
+        }
+      }
+
+      // 3. Recent Played (API)
+      final history = await ApiService.getHistory(type: 'play', limit: 50).catchError((_) => <dynamic>[]);
+      _recentPlaySongIds.clear();
+      for (final item in history) {
+        if (item is Map) {
+          final sId = (item['songId'] ?? item['song_id'] ?? item['id'] ?? '').toString().trim();
+          if (sId.isNotEmpty) _recentPlaySongIds.add(sId);
+        }
+      }
+
+      // 4. Local Play History from Offline Database
+      final offlineRecords = await OfflineService.getOfflineSongRecords();
+      _localPlayHistoryIds.clear();
+      for (final rec in offlineRecords) {
+        if (rec.lastPlayedAt > 0) {
+          _localPlayHistoryIds.add(rec.song.id);
+        }
+      }
+
+      notifyListeners();
+    } catch (e) {
+      debugPrint('[SearchProvider] Failed to load user metadata for ranking: $e');
+    }
   }
 
   void updatePreferredLanguages(List<String> langs) {
@@ -316,14 +375,26 @@ class SearchProvider extends ChangeNotifier {
     if (_localArtistIndex.length > 50) _localArtistIndex.removeRange(0, 10);
   }
 
+  static String removeDiacritics(String str) {
+    var withDia = 'ÀÁÂÃÄÅàáâãäåÒÓÔÕÕÖØòóôõöøÈÉÊËèéêëðÇçÐÌÍÎÏìíîïÙÚÛÜùúûüÑñÝýÿ';
+    var defaultLetter = 'AAAAAAaaaaaaOOOOOOOooooooEEEEeeeeeCcDIIIIiiiiUUUUuuuuNnYyy';
+    for (int i = 0; i < withDia.length; i++) {
+      str = str.replaceAll(withDia[i], defaultLetter[i]);
+    }
+    str = str.replaceAll('ß', 'ss');
+    str = str.replaceAll('æ', 'ae');
+    str = str.replaceAll('œ', 'oe');
+    return str;
+  }
+
   String _normalize(String s) {
-    return s.trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
+    var cleaned = s.trim().toLowerCase();
+    cleaned = removeDiacritics(cleaned);
+    return cleaned.replaceAll(RegExp(r'\s+'), ' ');
   }
 
   String _compact(String value) {
-    return _normalize(
-      value,
-    ).replaceAll(RegExp(r'[^\p{L}\p{N}]', unicode: true), '');
+    return _normalize(value).replaceAll(RegExp(r'[^\p{L}\p{N}]', unicode: true), '');
   }
 
   String _normalizeLanguage(String language) {
@@ -407,6 +478,8 @@ class SearchProvider extends ChangeNotifier {
       clear();
       return;
     }
+
+    unawaited(loadUserMetadataForRanking());
 
     _query = query.trim();
     _loading = true;
@@ -901,6 +974,9 @@ class SearchProvider extends ChangeNotifier {
         isOfficial = (item as dynamic).isOfficial ?? true;
       } catch (_) {}
 
+      final compactName = _compact(getName(item));
+      final compactArtist = _compact(getArtist(item));
+
       final match = _scoreMatch(
         query: query,
         compactQuery: compactQuery,
@@ -920,6 +996,68 @@ class SearchProvider extends ChangeNotifier {
         biasBoost = BackgroundLearningService.getBiasBoost(id, query: query);
       }
 
+      double prioritisedBoost = 0.0;
+
+      // 1. Exact Title Match
+      final matchesExactTitle = name == query || compactName == compactQuery;
+      if (matchesExactTitle) {
+        prioritisedBoost += 10000.0;
+      }
+
+      // 2. Exact Artist Match
+      final matchesExactArtist = artist == query || compactArtist == compactQuery;
+      if (matchesExactArtist) {
+        prioritisedBoost += 5000.0;
+      }
+
+      // 3. Downloaded/Offline
+      bool isDownloaded = false;
+      if (item is Song) {
+        isDownloaded = _offlineSongIds.contains(id);
+      } else if (item is Album) {
+        isDownloaded = _offlineAlbumIds.contains(id);
+      }
+      if (isDownloaded) {
+        prioritisedBoost += 2500.0;
+      }
+
+      // 4. Recently Played
+      bool isRecent = false;
+      if (item is Song) {
+        isRecent = _recentPlaySongIds.contains(id) || _localPlayHistoryIds.contains(id);
+      }
+      if (isRecent) {
+        prioritisedBoost += 1000.0;
+      }
+
+      // 5. Favorites
+      bool isFavorite = false;
+      if (item is Song) {
+        final cleanArtist = (item.artist ?? '').toLowerCase().trim();
+        if (cleanArtist.isNotEmpty && _favoriteArtistNames.contains(cleanArtist)) {
+          isFavorite = true;
+        }
+        if (_playlistSongIds.contains(id)) {
+          isFavorite = true;
+        }
+      } else if (item is Artist) {
+        final cleanArtist = item.name.toLowerCase().trim();
+        if (_favoriteArtistNames.contains(cleanArtist)) {
+          isFavorite = true;
+        }
+      }
+      if (isFavorite) {
+        prioritisedBoost += 500.0;
+      }
+
+      // 6. Popularity / Play Count
+      if (item is Song) {
+        final popularity = item.popularity ?? 0;
+        final playCount = item.playCount ?? 0;
+        final popBoost = (popularity * 2.0 + playCount * 0.001).clamp(0.0, 200.0);
+        prioritisedBoost += popBoost;
+      }
+
       final candidate = _RankedCandidate<T>(
         item: item,
         languageBucket: 0,
@@ -929,7 +1067,8 @@ class SearchProvider extends ChangeNotifier {
             (isOfficial ? 14.0 : -4.0) +
             _computeSearchPriorityBoost(item) +
             _computeSourceOrderBoost(sourceRank) +
-            biasBoost,
+            biasBoost +
+            prioritisedBoost,
         qualityScore: getQualityScore(item),
         sourceRank: sourceRank,
         tieBreaker: name,

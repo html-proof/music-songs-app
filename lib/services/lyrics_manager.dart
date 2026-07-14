@@ -178,6 +178,15 @@ class LyricsManager extends ChangeNotifier {
                 );
                 if (!payload.hasSynced && payload.hasPlain) {
                   payload = LyricsAlignmentEngine.align(song, payload);
+                  unawaited(LyricsCache.put(
+                    songId: song.id,
+                    title: song.name,
+                    artist: song.artist ?? '',
+                    album: song.sourceAlbumName ?? song.album ?? '',
+                    duration: song.duration ?? 0,
+                    payload: payload,
+                    providerSource: cached.providerSource,
+                  ));
                 }
                 _applyPayload(payload, _generation);
               }
@@ -269,6 +278,7 @@ class LyricsManager extends ChangeNotifier {
       var finalLrc = localLrc;
       if (!localLrc.hasSynced && localLrc.hasPlain) {
         finalLrc = LyricsAlignmentEngine.align(song, localLrc);
+        unawaited(LyricsService.saveLocalLrc(songId, finalLrc));
       }
       _applyPayload(finalLrc, myGeneration);
       return;
@@ -298,6 +308,15 @@ class LyricsManager extends ChangeNotifier {
         var payload = cached.toPayload();
         if (!payload.hasSynced && payload.hasPlain) {
           payload = LyricsAlignmentEngine.align(song, payload);
+          unawaited(LyricsCache.put(
+            songId: songId,
+            title: title,
+            artist: artist,
+            album: album,
+            duration: duration,
+            payload: payload,
+            providerSource: cached.providerSource,
+          ));
         }
         _applyPayload(payload, myGeneration);
         return;
@@ -555,12 +574,19 @@ class LyricsManager extends ChangeNotifier {
     final targetTime = lines[targetIndex].time;
     final drift = (millis - targetTime.inMilliseconds).abs();
 
-    // If drift is less than 150ms, keep the current line to avoid jitter / early transitions
-    if (drift < 150) {
+    if (drift <= 50) {
+      // ±50 ms -> No change (keep cached index to prevent jitter)
       return cachedIndex;
+    } else if (drift <= 100) {
+      // ±100 ms -> Smooth correction (update to target index)
+      return targetIndex;
+    } else if (drift > 250) {
+      // >250 ms -> Recalculate/jump immediately (update to target index)
+      return targetIndex;
     }
 
-    return targetIndex;
+    // Default fallback (between 100ms and 250ms)
+    return cachedIndex;
   }
 
   // ─────────────────────────────────────────────────────────

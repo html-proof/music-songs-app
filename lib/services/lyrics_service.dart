@@ -79,6 +79,8 @@ class _LyricsLookup {
   final String album;
   final String? language;
   final int? durationSeconds;
+  final String? isrc;
+  final bool isExplicit;
 
   const _LyricsLookup({
     required this.trackId,
@@ -87,6 +89,8 @@ class _LyricsLookup {
     required this.album,
     required this.language,
     required this.durationSeconds,
+    this.isrc,
+    this.isExplicit = false,
   });
 
   factory _LyricsLookup.fromSong(Song song) {
@@ -102,6 +106,8 @@ class _LyricsLookup {
       album: album,
       language: song.language?.toString().trim(),
       durationSeconds: song.duration,
+      isrc: song.isrc?.trim(),
+      isExplicit: song.isExplicit,
     );
   }
 }
@@ -115,6 +121,7 @@ class _LyricsCandidate {
   final String albumName;
   final int? durationSeconds;
   final String? language;
+  final String? isrc;
 
   const _LyricsCandidate({
     required this.plainLyrics,
@@ -124,6 +131,7 @@ class _LyricsCandidate {
     required this.albumName,
     required this.durationSeconds,
     required this.language,
+    this.isrc,
   });
 }
 
@@ -1072,6 +1080,7 @@ class LyricsService {
           '',
       durationSeconds: _parseDurationSeconds(json['duration']),
       language: _normalizeOptionalString(json['language'] ?? json['lang']),
+      isrc: _normalizeOptionalString(json['isrc']),
     );
   }
 
@@ -1095,10 +1104,21 @@ class LyricsService {
   ) {
     if (candidates.isEmpty) return null;
 
+    final verifiedCandidates = candidates.where((candidate) {
+      final score = _calculateConfidenceScore(lookup, candidate);
+      debugPrint('[LyricsService] Candidate: "${candidate.trackName}" by "${candidate.artistName}", Confidence: $score');
+      return score >= 0.82;
+    }).toList();
+
+    if (verifiedCandidates.isEmpty) {
+      debugPrint('[LyricsService] Rejecting all lyrics candidates due to confidence score below 0.82');
+      return null;
+    }
+
     final expectedLanguage = _normalizeLanguage(lookup.language);
     final strictPayload = _selectBestPayloadByMode(
       lookup,
-      candidates,
+      verifiedCandidates,
       expectedLanguage: expectedLanguage,
       relaxed: false,
     );
@@ -1108,7 +1128,7 @@ class LyricsService {
 
     final relaxedPayload = _selectBestPayloadByMode(
       lookup,
-      candidates,
+      verifiedCandidates,
       expectedLanguage: expectedLanguage,
       relaxed: true,
     );
@@ -1118,7 +1138,7 @@ class LyricsService {
 
     return _selectLoosePayload(
       lookup,
-      candidates,
+      verifiedCandidates,
       expectedLanguage: expectedLanguage,
     );
   }
@@ -1535,13 +1555,102 @@ class LyricsService {
         .toSet();
   }
 
+  static String removeDiacritics(String str) {
+    var withDia = 'ÀÁÂÃÄÅàáâãäåÒÓÔÕÕÖØòóôõöøÈÉÊËèéêëðÇçÐÌÍÎÏìíîïÙÚÛÜùúûüÑñÝýÿ';
+    var defaultLetter = 'AAAAAAaaaaaaOOOOOOOooooooEEEEeeeeeCcDIIIIiiiiUUUUuuuuNnYyy';
+    for (int i = 0; i < withDia.length; i++) {
+      str = str.replaceAll(withDia[i], defaultLetter[i]);
+    }
+    str = str.replaceAll('ß', 'ss');
+    str = str.replaceAll('æ', 'ae');
+    str = str.replaceAll('œ', 'oe');
+    return str;
+  }
+
   static String _normalizeMatchText(String value) {
-    return value
-        .toLowerCase()
+    var cleaned = value.toLowerCase();
+    cleaned = removeDiacritics(cleaned);
+    return cleaned
         .replaceAll("'", ' ')
         .replaceAll(RegExp(r'[\(\)\[\]\{\},.!?;:"@#\$%\^&\*\+\=/\\|<>_-]'), ' ')
         .replaceAll(RegExp(r'\s+'), ' ')
         .trim();
+  }
+
+  static double _calculateConfidenceScore(_LyricsLookup lookup, _LyricsCandidate candidate) {
+    if (lookup.isrc != null && lookup.isrc!.trim().isNotEmpty &&
+        candidate.isrc != null && candidate.isrc!.trim().isNotEmpty &&
+        lookup.isrc!.trim().toLowerCase() == candidate.isrc!.trim().toLowerCase()) {
+      return 1.0;
+    }
+
+    double confidence = 1.0;
+
+    final expectedTitle = _normalizeMatchText(lookup.title);
+    final candidateTitle = _normalizeMatchText(candidate.trackName);
+    final titleSimilarity = _similarityScore(expectedTitle, candidateTitle);
+    if (titleSimilarity < 0.85) {
+      confidence -= (1.0 - titleSimilarity) * 0.5;
+    }
+
+    final expectedArtist = _normalizeMatchText(lookup.artist);
+    final candidateArtist = _normalizeMatchText(candidate.artistName);
+    final artistSimilarity = _similarityScore(expectedArtist, candidateArtist);
+    if (artistSimilarity < 0.85) {
+      confidence -= (1.0 - artistSimilarity) * 0.4;
+    }
+
+    if (lookup.album.isNotEmpty && candidate.albumName.isNotEmpty) {
+      final expectedAlbum = _normalizeMatchText(lookup.album);
+      final candidateAlbum = _normalizeMatchText(candidate.albumName);
+      final albumSimilarity = _similarityScore(expectedAlbum, candidateAlbum);
+      if (albumSimilarity < 0.70) {
+        confidence -= (1.0 - albumSimilarity) * 0.15;
+      }
+    }
+
+    if (lookup.durationSeconds != null && lookup.durationSeconds! > 0 &&
+        candidate.durationSeconds != null && candidate.durationSeconds! > 0) {
+      final durationDiff = (lookup.durationSeconds! - candidate.durationSeconds!).abs();
+      if (durationDiff > 2) {
+        confidence -= (durationDiff - 2) * 0.05 + 0.1;
+      }
+    } else {
+      confidence -= 0.1;
+    }
+
+    if (lookup.language != null && lookup.language!.isNotEmpty) {
+      final expectedLang = _normalizeLanguage(lookup.language);
+      final candidateLang = _normalizeLanguage(candidate.language);
+      if (expectedLang != null && candidateLang != null && expectedLang != candidateLang) {
+        confidence -= 0.3;
+      }
+    }
+
+    final candidateLower = '${candidate.trackName.toLowerCase()} ${candidate.albumName.toLowerCase()}';
+    final songIsExplicit = lookup.isExplicit;
+    final candidateIsExplicit = candidateLower.contains('explicit') || 
+                                 (candidate.plainLyrics != null && _containsExplicitKeywords(candidate.plainLyrics!));
+    final candidateIsClean = candidateLower.contains('clean') || candidateLower.contains('edit');
+
+    if (songIsExplicit && candidateIsClean) {
+      confidence -= 0.25;
+    } else if (!songIsExplicit && candidateIsExplicit) {
+      confidence -= 0.25;
+    }
+
+    return confidence.clamp(0.0, 1.0);
+  }
+
+  static bool _containsExplicitKeywords(String text) {
+    final lower = text.toLowerCase();
+    final explicitWords = [
+      ' fuck ', ' fuckin', ' faggot ', ' shit ', ' bitch ', ' asshole '
+    ];
+    for (final word in explicitWords) {
+      if (lower.contains(word)) return true;
+    }
+    return false;
   }
 
   static String? _normalizeLanguage(String? language) {

@@ -10,12 +10,14 @@ import '../providers/player_provider.dart';
 import '../providers/playlist_provider.dart';
 import '../screens/album_detail_screen.dart';
 import '../services/api_service.dart';
+import '../services/offline_service.dart';
 import '../services/listening_safety_service.dart';
 import '../services/lyrics_manager.dart';
 import '../services/player_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/offline_artwork.dart';
 import '../widgets/spotify_progress_bar.dart';
+import '../widgets/mini_player.dart';
 
 class PlayerScreen extends StatefulWidget {
   const PlayerScreen({super.key});
@@ -424,7 +426,27 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   Future<void> _openAlbum(BuildContext context, Song song) async {
-    var albumId = (song.sourceAlbumId ?? song.albumId ?? '').trim();
+    final isOffline = Provider.of<PlayerProvider>(context, listen: false).isOffline;
+    final preferredAlbumId = ((song.sourceAlbumId ?? '').trim().isNotEmpty
+        ? song.sourceAlbumId
+        : song.albumId)?.trim() ?? '';
+
+    if (isOffline) {
+      final bundle = await _buildLocalFallbackBundle(song, preferredAlbumId);
+      if (!mounted) return;
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => LocalAlbumFallbackScreen(
+            bundle: bundle,
+            currentSongId: song.id,
+          ),
+        ),
+      );
+      return;
+    }
+
+    var albumId = preferredAlbumId;
 
     // If no album ID on the song, try fetching song details from API to discover it
     if (albumId.isEmpty) {
@@ -547,10 +569,138 @@ class _PlayerScreenState extends State<PlayerScreen> {
       } catch (_) {}
     }
 
+    // Try to locate a matching offline/cached album if online searches failed
+    if (albumId.isNotEmpty || albumName.isNotEmpty) {
+      try {
+        final bundle = await _buildLocalFallbackBundle(song, albumId);
+        if (!mounted) return;
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => LocalAlbumFallbackScreen(
+              bundle: bundle,
+              currentSongId: song.id,
+            ),
+          ),
+        );
+        return;
+      } catch (_) {}
+    }
+
     if (!mounted) return;
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(const SnackBar(content: Text('Album not found')));
+  }
+
+  Future<LocalAlbumBundle> _buildLocalFallbackBundle(
+    Song song,
+    String preferredAlbumId,
+  ) async {
+    final offlineMatch = await _findOfflineAlbumGroup(
+      song,
+      preferredAlbumId: preferredAlbumId,
+    );
+    if (offlineMatch != null) {
+      return LocalAlbumBundle(
+        albumId: offlineMatch.albumId,
+        albumName: offlineMatch.albumName,
+        artist: offlineMatch.artist,
+        imageUrl: offlineMatch.imageUrl,
+        songs: offlineMatch.songs
+            .map((record) => record.song)
+            .toList(growable: false),
+      );
+    }
+
+    final queue = context.read<PlayerProvider>().queue;
+    final fallbackAlbumName =
+        (song.sourceAlbumName ?? song.album ?? 'Unknown Album').trim();
+    final fallbackArtist = (song.sourceAlbumArtist ?? song.artist)?.trim();
+    final fallbackImage =
+        (song.sourceAlbumImageUrl ?? song.imageUrl)?.trim().isNotEmpty == true
+        ? (song.sourceAlbumImageUrl ?? song.imageUrl)!.trim()
+        : null;
+
+    final albumSongs = queue
+        .where(
+          (queuedSong) => _songBelongsToAlbum(
+            queuedSong,
+            preferredAlbumId: preferredAlbumId,
+            fallbackAlbumName: fallbackAlbumName,
+          ),
+        )
+        .toList(growable: false);
+
+    return LocalAlbumBundle(
+      albumId: preferredAlbumId.isNotEmpty
+          ? preferredAlbumId
+          : (song.albumId ?? '').trim(),
+      albumName: fallbackAlbumName.isEmpty
+          ? 'Unknown Album'
+          : fallbackAlbumName,
+      artist: fallbackArtist,
+      imageUrl: fallbackImage,
+      songs: albumSongs.isEmpty ? <Song>[song] : albumSongs,
+    );
+  }
+
+  Future<OfflineAlbumGroup?> _findOfflineAlbumGroup(
+    Song song, {
+    required String preferredAlbumId,
+  }) async {
+    try {
+      final offlineAlbums = await OfflineService.getOfflineAlbums();
+      final wantedId = preferredAlbumId.trim();
+      if (wantedId.isNotEmpty) {
+        for (final group in offlineAlbums) {
+          if (group.albumId.trim() == wantedId) {
+            return group;
+          }
+        }
+      }
+
+      final wantedName = _normalizeLookup(
+        song.sourceAlbumName ?? song.album ?? '',
+      );
+      if (wantedName.isEmpty) return null;
+
+      for (final group in offlineAlbums) {
+        final groupName = _normalizeLookup(group.albumName);
+        if (groupName == wantedName) {
+          return group;
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  bool _songBelongsToAlbum(
+    Song song, {
+    required String preferredAlbumId,
+    required String fallbackAlbumName,
+  }) {
+    final expectedId = preferredAlbumId.trim();
+    if (expectedId.isNotEmpty) {
+      final songAlbumIds = <String>{
+        (song.sourceAlbumId ?? '').trim(),
+        (song.albumId ?? '').trim(),
+      };
+      if (songAlbumIds.contains(expectedId)) {
+        return true;
+      }
+    }
+
+    final expectedName = _normalizeLookup(fallbackAlbumName);
+    if (expectedName.isEmpty) return false;
+    final songAlbumName = _normalizeLookup(
+      song.sourceAlbumName ?? song.album ?? '',
+    );
+    return songAlbumName == expectedName;
+  }
+
+  String _normalizeLookup(String value) {
+    return value.toLowerCase().replaceAll(RegExp(r'\s+'), ' ').trim();
   }
 
   @override

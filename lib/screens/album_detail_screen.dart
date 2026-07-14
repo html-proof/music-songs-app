@@ -9,6 +9,7 @@ import '../providers/player_provider.dart';
 import '../providers/download_provider.dart';
 import '../providers/preferences_provider.dart';
 import '../services/api_service.dart';
+import '../services/offline_service.dart';
 import '../theme/app_theme.dart';
 import '../utils/content_filter.dart';
 import '../utils/language_utils.dart';
@@ -146,6 +147,23 @@ class _AlbumDetailScreenState extends State<AlbumDetailScreen> {
         artistInfo.name ?? widget.album.artist,
       );
     } catch (e) {
+      try {
+        final offlineAlbums = await OfflineService.getOfflineAlbums();
+        final match = offlineAlbums.firstWhere(
+          (group) => group.albumId == widget.album.id || 
+                     (group.albumName.toLowerCase().trim() == widget.album.name.toLowerCase().trim() && widget.album.name.trim().isNotEmpty),
+        );
+        final offlineSongs = match.songs.map((r) => r.song).toList();
+        if (offlineSongs.isNotEmpty) {
+          if (!mounted) return;
+          setState(() {
+            _songs = offlineSongs;
+            _isLoading = false;
+          });
+          return;
+        }
+      } catch (_) {}
+
       if (!mounted) return;
       setState(() {
         _error = e.toString();

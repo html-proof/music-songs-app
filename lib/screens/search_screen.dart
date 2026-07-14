@@ -220,7 +220,7 @@ class _SearchScreenState extends State<SearchScreen> {
                           }
 
                           _searchDebounce = Timer(
-                            const Duration(milliseconds: 250),
+                            const Duration(milliseconds: 200),
                             () {
                               if (!mounted) return;
                               context.read<SearchProvider>().search(normalized);

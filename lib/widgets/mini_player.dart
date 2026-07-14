@@ -384,7 +384,7 @@ class _MiniPlayerState extends State<MiniPlayer> {
     return '';
   }
 
-  Future<_LocalAlbumBundle> _buildLocalFallbackBundle(
+  Future<LocalAlbumBundle> _buildLocalFallbackBundle(
     BuildContext context, {
     required Song song,
     required String preferredAlbumId,
@@ -394,7 +394,7 @@ class _MiniPlayerState extends State<MiniPlayer> {
       preferredAlbumId: preferredAlbumId,
     );
     if (offlineMatch != null) {
-      return _LocalAlbumBundle(
+      return LocalAlbumBundle(
         albumId: offlineMatch.albumId,
         albumName: offlineMatch.albumName,
         artist: offlineMatch.artist,
@@ -424,7 +424,7 @@ class _MiniPlayerState extends State<MiniPlayer> {
         )
         .toList(growable: false);
 
-    return _LocalAlbumBundle(
+    return LocalAlbumBundle(
       albumId: preferredAlbumId.isNotEmpty
           ? preferredAlbumId
           : (song.albumId ?? '').trim(),
@@ -493,13 +493,13 @@ class _MiniPlayerState extends State<MiniPlayer> {
 
   Future<void> _openLocalAlbumFallback(
     BuildContext context, {
-    required _LocalAlbumBundle bundle,
+    required LocalAlbumBundle bundle,
     required String currentSongId,
   }) async {
     await Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (_) => _LocalAlbumFallbackScreen(
+        builder: (_) => LocalAlbumFallbackScreen(
           bundle: bundle,
           currentSongId: currentSongId,
         ),
@@ -1180,14 +1180,14 @@ class _MiniSeekBarState extends State<_MiniSeekBar> {
 }
 
 @immutable
-class _LocalAlbumBundle {
+class LocalAlbumBundle {
   final String albumId;
   final String albumName;
   final String? artist;
   final String? imageUrl;
   final List<Song> songs;
 
-  const _LocalAlbumBundle({
+  const LocalAlbumBundle({
     required this.albumId,
     required this.albumName,
     required this.artist,
@@ -1196,11 +1196,12 @@ class _LocalAlbumBundle {
   });
 }
 
-class _LocalAlbumFallbackScreen extends StatelessWidget {
-  final _LocalAlbumBundle bundle;
+class LocalAlbumFallbackScreen extends StatelessWidget {
+  final LocalAlbumBundle bundle;
   final String currentSongId;
 
-  const _LocalAlbumFallbackScreen({
+  const LocalAlbumFallbackScreen({
+    super.key,
     required this.bundle,
     required this.currentSongId,
   });

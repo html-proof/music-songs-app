@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import '../models/song.dart';
 import 'lyrics_alignment_engine.dart';
 import 'lyrics_cache.dart';
@@ -24,11 +25,29 @@ enum LyricsLoadState {
 // Parsed synced lyric line (moved from player_screen.dart)
 // ─────────────────────────────────────────────────────────────
 @immutable
+class WordHighlight {
+  final String word;
+  final Duration startOffset; // Offset from line start time
+  final Duration endOffset;   // Offset from line start time
+
+  const WordHighlight({
+    required this.word,
+    required this.startOffset,
+    required this.endOffset,
+  });
+}
+
+@immutable
 class TimedLyricLine {
   final Duration time;
   final String text;
+  final List<WordHighlight>? words; // Optional word-level highlights
 
-  const TimedLyricLine({required this.time, required this.text});
+  const TimedLyricLine({
+    required this.time,
+    required this.text,
+    this.words,
+  });
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -351,10 +370,10 @@ class LyricsManager extends ChangeNotifier {
     if (!_isMyGeneration(myGeneration)) return;
 
     final originalLines = payload.syncedLyrics != null
-        ? _parseSyncedLyrics(payload.syncedLyrics!)
+        ? parseSyncedLyrics(payload.syncedLyrics!)
         : const <TimedLyricLine>[];
     final translationLines = payload.translationSyncedLyrics != null
-        ? _parseSyncedLyrics(payload.translationSyncedLyrics!)
+        ? parseSyncedLyrics(payload.translationSyncedLyrics!)
         : const <TimedLyricLine>[];
 
     _payload = payload;
@@ -389,7 +408,11 @@ class LyricsManager extends ChangeNotifier {
     multiLine: true,
   );
 
-  static List<TimedLyricLine> _parseSyncedLyrics(String rawSyncedLyrics) {
+  static final RegExp _wordTagRegex = RegExp(
+    r'<(\d{1,2}):(\d{2})(?:[.:](\d{1,3}))?>',
+  );
+
+  static List<TimedLyricLine> parseSyncedLyrics(String rawSyncedLyrics) {
     final parsed = <TimedLyricLine>[];
     final seenEntries = <String>{};
     final rows = rawSyncedLyrics.split('\n');
@@ -423,15 +446,75 @@ class LyricsManager extends ChangeNotifier {
         if (seenEntries.contains(dedupeKey)) continue;
         seenEntries.add(dedupeKey);
 
+        final words = _parseWordHighlights(text, timestampMs);
+        final cleanText = text.replaceAll(_wordTagRegex, '').replaceAll(RegExp(r'\s+'), ' ').trim();
+
         parsed.add(TimedLyricLine(
           time: Duration(milliseconds: timestampMs),
-          text: text,
+          text: cleanText,
+          words: words,
         ));
       }
     }
 
     parsed.sort((a, b) => a.time.compareTo(b.time));
     return parsed;
+  }
+
+  static List<WordHighlight>? _parseWordHighlights(String lineText, int lineStartMs) {
+    final matches = _wordTagRegex.allMatches(lineText).toList();
+    if (matches.isEmpty) return null;
+
+    final words = <WordHighlight>[];
+    
+    int getMs(Match m) {
+      final minute = int.tryParse(m.group(1) ?? '') ?? 0;
+      final second = int.tryParse(m.group(2) ?? '') ?? 0;
+      final fractionRaw = m.group(3);
+      var millisecond = 0;
+      if (fractionRaw != null && fractionRaw.isNotEmpty) {
+        if (fractionRaw.length == 3) {
+          millisecond = int.tryParse(fractionRaw) ?? 0;
+        } else if (fractionRaw.length == 2) {
+          millisecond = (int.tryParse(fractionRaw) ?? 0) * 10;
+        } else {
+          millisecond = (int.tryParse(fractionRaw) ?? 0) * 100;
+        }
+      }
+      return (minute * 60 * 1000) + (second * 1000) + millisecond;
+    }
+
+    // First word check before any tag
+    final firstMatchStart = matches.first.start;
+    if (firstMatchStart > 0) {
+      final firstWordText = lineText.substring(0, firstMatchStart).trim();
+      if (firstWordText.isNotEmpty) {
+        final endMs = getMs(matches.first);
+        words.add(WordHighlight(
+          word: firstWordText,
+          startOffset: Duration.zero,
+          endOffset: Duration(milliseconds: math.max(0, endMs - lineStartMs)),
+        ));
+      }
+    }
+
+    for (var i = 0; i < matches.length; i++) {
+      final match = matches[i];
+      final startMs = getMs(match);
+      final endPos = (i + 1 < matches.length) ? matches[i + 1].start : lineText.length;
+      final wordText = lineText.substring(match.end, endPos).trim();
+      if (wordText.isEmpty) continue;
+
+      final endMs = (i + 1 < matches.length) ? getMs(matches[i + 1]) : (startMs + 400);
+
+      words.add(WordHighlight(
+        word: wordText,
+        startOffset: Duration(milliseconds: math.max(0, startMs - lineStartMs)),
+        endOffset: Duration(milliseconds: math.max(0, endMs - lineStartMs)),
+      ));
+    }
+
+    return words.isEmpty ? null : words;
   }
 
   // ─────────────────────────────────────────────────────────

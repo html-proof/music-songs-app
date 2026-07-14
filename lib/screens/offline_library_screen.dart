@@ -268,7 +268,6 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
     final player = context.read<PlayerProvider>();
     final isOffline = context.select<PlayerProvider, bool>((p) => p.isOffline);
     final playlistsProvider = context.watch<PlaylistProvider>();
-    final downloadProvider = context.watch<DownloadProvider>();
     
     final visibleSongs = _visibleOfflineSongs;
     final visiblePlaylist = _playlistFor(visibleSongs);
@@ -279,10 +278,6 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
     }
 
     final allPlaylists = playlistsProvider.playlists;
-    final downloadedPlaylists = allPlaylists.where((pl) {
-      return pl.songs.isNotEmpty &&
-          pl.songs.any((s) => downloadProvider.isDownloaded(s.id));
-    }).toList();
 
     return DefaultTabController(
       length: 4,

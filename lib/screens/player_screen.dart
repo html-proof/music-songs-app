@@ -1366,10 +1366,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
                       final distance = (index - activeIndex).abs();
 
                       return LyricLineWidget(
-                        text: line.text,
+                        line: line,
                         isActive: isActive,
                         isPast: isPast,
                         distance: distance,
+                        positionNotifier: _positionNotifier,
                         onTap: () {
                           context.read<PlayerProvider>().seek(line.time);
                         },
@@ -1609,20 +1610,87 @@ class _OutputDeviceIcon extends StatelessWidget {
 }
 
 class LyricLineWidget extends StatelessWidget {
-  final String text;
+  final TimedLyricLine line;
   final bool isActive;
   final bool isPast;
   final int distance;
   final VoidCallback onTap;
+  final ValueNotifier<Duration> positionNotifier;
 
   const LyricLineWidget({
     super.key,
-    required this.text,
+    required this.line,
     required this.isActive,
     required this.isPast,
     required this.distance,
     required this.onTap,
+    required this.positionNotifier,
   });
+
+  TextStyle _lineStyle(bool active, bool past, int dist) {
+    return TextStyle(
+      color: active
+          ? AppTheme.textPrimary
+          : past
+              ? AppTheme.textMuted.withValues(alpha: 0.95)
+              : Colors.white.withValues(alpha: 0.82),
+      fontWeight: active ? FontWeight.w800 : FontWeight.w500,
+      fontSize: active ? 18 : 15,
+      height: 1.2,
+    );
+  }
+
+  Widget _buildWordHighlightText(Duration position) {
+    final words = line.words;
+    if (words == null || words.isEmpty) {
+      return Text(
+        line.text,
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+        textAlign: TextAlign.center,
+        style: _lineStyle(true, false, 0),
+      );
+    }
+
+    final elapsed = position - line.time;
+    final spans = <TextSpan>[];
+
+    for (var i = 0; i < words.length; i++) {
+      final wordHighlight = words[i];
+      final start = wordHighlight.startOffset;
+      final end = wordHighlight.endOffset;
+
+      Color color;
+      FontWeight fontWeight;
+      
+      if (elapsed >= start && elapsed <= end) {
+        color = AppTheme.textPrimary;
+        fontWeight = FontWeight.w900;
+      } else if (elapsed > end) {
+        color = AppTheme.textPrimary.withValues(alpha: 0.85);
+        fontWeight = FontWeight.w700;
+      } else {
+        color = Colors.white.withValues(alpha: 0.5);
+        fontWeight = FontWeight.w500;
+      }
+
+      spans.add(TextSpan(
+        text: wordHighlight.word + (i == words.length - 1 ? '' : ' '),
+        style: TextStyle(
+          color: color,
+          fontWeight: fontWeight,
+          fontSize: 18,
+        ),
+      ));
+    }
+
+    return RichText(
+      maxLines: 2,
+      overflow: TextOverflow.ellipsis,
+      textAlign: TextAlign.center,
+      text: TextSpan(children: spans),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1657,22 +1725,18 @@ class LyricLineWidget extends StatelessWidget {
                 scale: targetScale,
                 duration: const Duration(milliseconds: 150),
                 curve: Curves.easeOut,
-                child: Text(
-                  text,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    color: isActive
-                        ? AppTheme.textPrimary
-                        : isPast
-                            ? AppTheme.textMuted.withValues(alpha: 0.95)
-                            : Colors.white.withValues(alpha: 0.82),
-                    fontWeight: isActive ? FontWeight.w800 : FontWeight.w500,
-                    fontSize: isActive ? 18 : 15,
-                    height: 1.2,
-                  ),
-                ),
+                child: isActive && line.words != null && line.words!.isNotEmpty
+                    ? ValueListenableBuilder<Duration>(
+                        valueListenable: positionNotifier,
+                        builder: (context, pos, _) => _buildWordHighlightText(pos),
+                      )
+                    : Text(
+                        line.text,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        textAlign: TextAlign.center,
+                        style: _lineStyle(isActive, isPast, distance),
+                      ),
               ),
             ),
           ),

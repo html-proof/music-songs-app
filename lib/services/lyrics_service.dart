@@ -19,6 +19,7 @@ class LyricsPayload {
   final String? translationPlainLyrics;
   final String? translationSyncedLyrics;
   final String? provider;
+  final double? confidence;
 
   const LyricsPayload({
     required this.plainLyrics,
@@ -26,6 +27,7 @@ class LyricsPayload {
     this.translationPlainLyrics,
     this.translationSyncedLyrics,
     this.provider,
+    this.confidence,
   });
 
   bool get hasPlain => plainLyrics != null && plainLyrics!.trim().isNotEmpty;
@@ -46,6 +48,7 @@ class LyricsPayload {
       'translationPlainLyrics': translationPlainLyrics,
       'translationSyncedLyrics': translationSyncedLyrics,
       'provider': provider,
+      'confidence': confidence,
     };
   }
 
@@ -59,6 +62,7 @@ class LyricsPayload {
       translationPlainLyrics: json['translationPlainLyrics']?.toString(),
       translationSyncedLyrics: json['translationSyncedLyrics']?.toString(),
       provider: json['provider']?.toString(),
+      confidence: json['confidence'] != null ? (double.tryParse(json['confidence'].toString()) ?? 1.0) : null,
     );
   }
 }
@@ -217,6 +221,45 @@ class LyricsService {
       }
     } catch (e) {
       debugPrint('[LyricsService] Failed to load local LRC file: $e');
+    }
+    return null;
+  }
+
+  static Future<LyricsPayload?> alignAudioWithServer(Song song, String plainLyrics) async {
+    final client = ApiService.createSecureHttpClient(pinCertificates: false);
+    try {
+      final audioUrl = song.streamUrl ?? '';
+      if (audioUrl.isEmpty) return null;
+
+      debugPrint('[LyricsService] Attempting server forced-alignment for: ${song.name}');
+      final response = await client.post(
+        Uri.parse('http://localhost:8000/align'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'audio_url': audioUrl,
+          'lyrics': plainLyrics,
+          'title': song.name,
+          'artist': song.artist ?? '',
+        }),
+      ).timeout(const Duration(seconds: 15));
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final syncedLrc = data['synced_lyrics']?.toString();
+        final confidence = double.tryParse(data['confidence']?.toString() ?? '1.0') ?? 1.0;
+        
+        if (syncedLrc != null && syncedLrc.trim().isNotEmpty) {
+          debugPrint('[LyricsService] Server alignment successful with confidence $confidence');
+          return LyricsPayload(
+            plainLyrics: plainLyrics,
+            syncedLyrics: syncedLrc,
+            provider: 'forced_alignment',
+            confidence: confidence,
+          );
+        }
+      }
+    } catch (e) {
+      debugPrint('[LyricsService] Failed to align lyrics via server: $e');
     }
     return null;
   }
@@ -405,6 +448,8 @@ class LyricsService {
 
       if (bestPayload != null && bestPayload.hasAny) {
         if (!bestPayload.hasSynced && bestPayload.hasPlain) {
+          final serverAligned = await alignAudioWithServer(song, bestPayload.plainLyrics!);
+          if (serverAligned != null) return serverAligned;
           return LyricsAlignmentEngine.align(song, bestPayload);
         }
         return bestPayload;
@@ -414,6 +459,8 @@ class LyricsService {
       final scrapedPayload = await _scrapeLyricsFromSearchEngine(title, artist, album, song.language, client);
       if (scrapedPayload != null && scrapedPayload.hasAny) {
         if (!scrapedPayload.hasSynced && scrapedPayload.hasPlain) {
+          final serverAligned = await alignAudioWithServer(song, scrapedPayload.plainLyrics!);
+          if (serverAligned != null) return serverAligned;
           return LyricsAlignmentEngine.align(song, scrapedPayload);
         }
         return scrapedPayload;
@@ -749,7 +796,8 @@ class LyricsService {
         if (payload != null && payload.hasAny) {
           var finalPayload = payload;
           if (!payload.hasSynced && payload.hasPlain) {
-            finalPayload = LyricsAlignmentEngine.align(song, payload);
+            final serverAligned = await alignAudioWithServer(song, payload.plainLyrics!);
+            finalPayload = serverAligned ?? LyricsAlignmentEngine.align(song, payload);
           }
           await LyricsCache.put(
             songId: song.id,

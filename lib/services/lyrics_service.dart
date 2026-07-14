@@ -385,8 +385,14 @@ class LyricsService {
       // Stage 2: Saavn Backend (4s timeout)
       if (songId.isNotEmpty) {
         try {
-          final cand = await _fetchSaavnCandidate(songId, artist: artist, client: client)
-              .timeout(const Duration(seconds: 4));
+          final cand = await _fetchSaavnCandidate(
+            songId,
+            title: title,
+            artist: artist,
+            album: album,
+            duration: duration,
+            client: client,
+          ).timeout(const Duration(seconds: 4));
           if (cand != null) {
             final payload = await verifyAndCache([cand], 'Saavn Backend');
             if (payload != null) return payload;
@@ -899,7 +905,10 @@ class LyricsService {
     if (lookup.trackId.isNotEmpty) {
       final saavnCandidate = await _fetchSaavnCandidate(
         lookup.trackId,
+        title: lookup.title,
         artist: lookup.artist,
+        album: lookup.album,
+        duration: lookup.durationSeconds,
       );
       if (saavnCandidate != null) {
         // Saavn lyrics are usually high quality for these tracks.
@@ -1066,7 +1075,10 @@ class LyricsService {
 
   static Future<_LyricsCandidate?> _fetchSaavnCandidate(
     String trackId, {
-    String? artist,
+    required String title,
+    required String artist,
+    required String album,
+    int? duration,
     http.Client? client,
   }) async {
     final clientToUse = client ?? ApiService.createSecureHttpClient(pinCertificates: false);
@@ -1092,10 +1104,10 @@ class LyricsService {
       return _LyricsCandidate(
         plainLyrics: hasLrcTags ? null : lyrics,
         syncedLyrics: hasLrcTags ? lyrics : data['snippets']?.toString(),
-        trackName: data['name'] ?? '',
-        artistName: data['artist'] ?? artist ?? '',
-        albumName: data['album'] ?? '',
-        durationSeconds: null,
+        trackName: data['name'] ?? title,
+        artistName: data['artist'] ?? artist,
+        albumName: data['album'] ?? album,
+        durationSeconds: duration,
         language: null,
       );
     } catch (e) {
@@ -1161,21 +1173,29 @@ class LyricsService {
   ) {
     if (candidates.isEmpty) return null;
 
-    final verifiedCandidates = candidates.where((candidate) {
+    var targetCandidates = candidates.where((candidate) {
       final score = _calculateConfidenceScore(lookup, candidate);
       debugPrint('[LyricsService] Candidate: "${candidate.trackName}" by "${candidate.artistName}", Confidence: $score');
       return score >= 0.82;
     }).toList();
 
-    if (verifiedCandidates.isEmpty) {
-      debugPrint('[LyricsService] Rejecting all lyrics candidates due to confidence score below 0.82');
+    if (targetCandidates.isEmpty) {
+      debugPrint('[LyricsService] No candidates passed 0.82. Trying relaxed threshold >= 0.50...');
+      targetCandidates = candidates.where((candidate) {
+        final score = _calculateConfidenceScore(lookup, candidate);
+        return score >= 0.50;
+      }).toList();
+    }
+
+    if (targetCandidates.isEmpty) {
+      debugPrint('[LyricsService] Rejecting all lyrics candidates due to confidence score below 0.50');
       return null;
     }
 
     final expectedLanguage = _normalizeLanguage(lookup.language);
     final strictPayload = _selectBestPayloadByMode(
       lookup,
-      verifiedCandidates,
+      targetCandidates,
       expectedLanguage: expectedLanguage,
       relaxed: false,
     );
@@ -1185,7 +1205,7 @@ class LyricsService {
 
     final relaxedPayload = _selectBestPayloadByMode(
       lookup,
-      verifiedCandidates,
+      targetCandidates,
       expectedLanguage: expectedLanguage,
       relaxed: true,
     );
@@ -1195,7 +1215,7 @@ class LyricsService {
 
     return _selectLoosePayload(
       lookup,
-      verifiedCandidates,
+      targetCandidates,
       expectedLanguage: expectedLanguage,
     );
   }
@@ -1645,14 +1665,30 @@ class LyricsService {
 
     final expectedTitle = _normalizeMatchText(lookup.title);
     final candidateTitle = _normalizeMatchText(candidate.trackName);
-    final titleSimilarity = _similarityScore(expectedTitle, candidateTitle);
+    double titleSimilarity = _similarityScore(expectedTitle, candidateTitle);
+
+    final expectedCleanTitle = _normalizeMatchText(_cleanTitle(lookup.title));
+    final candidateCleanTitle = _normalizeMatchText(_cleanTitle(candidate.trackName));
+    final cleanTitleSimilarity = _similarityScore(expectedCleanTitle, candidateCleanTitle);
+    if (cleanTitleSimilarity > titleSimilarity) {
+      titleSimilarity = cleanTitleSimilarity;
+    }
+
     if (titleSimilarity < 0.85) {
       confidence -= (1.0 - titleSimilarity) * 0.5;
     }
 
     final expectedArtist = _normalizeMatchText(lookup.artist);
     final candidateArtist = _normalizeMatchText(candidate.artistName);
-    final artistSimilarity = _similarityScore(expectedArtist, candidateArtist);
+    double artistSimilarity = _similarityScore(expectedArtist, candidateArtist);
+
+    final expectedPrimary = _normalizeMatchText(_getPrimaryArtist(lookup.artist));
+    final candidatePrimary = _normalizeMatchText(_getPrimaryArtist(candidate.artistName));
+    final primarySimilarity = _similarityScore(expectedPrimary, candidatePrimary);
+    if (primarySimilarity > artistSimilarity) {
+      artistSimilarity = primarySimilarity;
+    }
+
     if (artistSimilarity < 0.85) {
       confidence -= (1.0 - artistSimilarity) * 0.4;
     }
@@ -1660,7 +1696,15 @@ class LyricsService {
     if (lookup.album.isNotEmpty && candidate.albumName.isNotEmpty) {
       final expectedAlbum = _normalizeMatchText(lookup.album);
       final candidateAlbum = _normalizeMatchText(candidate.albumName);
-      final albumSimilarity = _similarityScore(expectedAlbum, candidateAlbum);
+      double albumSimilarity = _similarityScore(expectedAlbum, candidateAlbum);
+
+      final expectedCleanAlbum = _normalizeMatchText(_cleanTitle(lookup.album));
+      final candidateCleanAlbum = _normalizeMatchText(_cleanTitle(candidate.albumName));
+      final cleanAlbumSimilarity = _similarityScore(expectedCleanAlbum, candidateCleanAlbum);
+      if (cleanAlbumSimilarity > albumSimilarity) {
+        albumSimilarity = cleanAlbumSimilarity;
+      }
+
       if (albumSimilarity < 0.70) {
         confidence -= (1.0 - albumSimilarity) * 0.15;
       }
@@ -1669,18 +1713,16 @@ class LyricsService {
     if (lookup.durationSeconds != null && lookup.durationSeconds! > 0 &&
         candidate.durationSeconds != null && candidate.durationSeconds! > 0) {
       final durationDiff = (lookup.durationSeconds! - candidate.durationSeconds!).abs();
-      if (durationDiff > 2) {
-        confidence -= (durationDiff - 2) * 0.05 + 0.1;
+      if (durationDiff > 4) {
+        confidence -= (durationDiff - 4) * 0.05 + 0.1;
       }
-    } else {
-      confidence -= 0.1;
     }
 
     if (lookup.language != null && lookup.language!.isNotEmpty) {
       final expectedLang = _normalizeLanguage(lookup.language);
       final candidateLang = _normalizeLanguage(candidate.language);
       if (expectedLang != null && candidateLang != null && expectedLang != candidateLang) {
-        confidence -= 0.3;
+        confidence -= 0.2;
       }
     }
 
@@ -1691,9 +1733,9 @@ class LyricsService {
     final candidateIsClean = candidateLower.contains('clean') || candidateLower.contains('edit');
 
     if (songIsExplicit && candidateIsClean) {
-      confidence -= 0.25;
+      confidence -= 0.2;
     } else if (!songIsExplicit && candidateIsExplicit) {
-      confidence -= 0.25;
+      confidence -= 0.2;
     }
 
     return confidence.clamp(0.0, 1.0);

@@ -981,15 +981,74 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
             const SizedBox(height: 28),
 
-            // Controls Row — clean 5-button Spotify layout
+            // Controls Row — Stacked Spotify/Apple Music layout with perfect centering
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 24),
-              child: Row(
+              child: Stack(
+                alignment: Alignment.center,
                 children: [
-                  // Previous button
-                  Expanded(
-                    child: Center(
-                      child: IconButton(
+                  // Background row: Shuffle (left), Queue & Download (right)
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      // Shuffle button
+                      IconButton(
+                        iconSize: 28,
+                        icon: Icon(
+                          Icons.shuffle_rounded,
+                          color: player.shuffleModeEnabled
+                              ? AppTheme.accentPurple
+                              : Colors.white54,
+                        ),
+                        onPressed: () => player.toggleShuffleMode(),
+                      ),
+                      // Right side actions
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          IconButton(
+                            iconSize: 28,
+                            icon: const Icon(
+                              Icons.playlist_add_rounded,
+                              color: AppTheme.textSecondary,
+                            ),
+                            onPressed: () => _showAddToPlaylistSheet(song),
+                          ),
+                          const SizedBox(width: 20),
+                          IconButton(
+                            iconSize: 28,
+                            icon: isDownloading
+                                ? SizedBox(
+                                    width: 22,
+                                    height: 22,
+                                    child: CircularProgressIndicator(
+                                      value: downloads.progress[song.id],
+                                      strokeWidth: 2,
+                                      color: AppTheme.accentPurple,
+                                    ),
+                                  )
+                                : Icon(
+                                    isDownloaded
+                                        ? Icons.download_done
+                                        : Icons.download_rounded,
+                                    color: isDownloaded
+                                        ? Colors.green
+                                        : AppTheme.textSecondary,
+                                  ),
+                            onPressed: isDownloaded || isDownloading
+                                ? null
+                                : () => downloads.download(song),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+
+                  // Foreground row: Center playback controls (Previous, Play/Pause, Next)
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
                         iconSize: 28,
                         icon: const Icon(
                           Icons.skip_previous_rounded,
@@ -997,12 +1056,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
                         ),
                         onPressed: () => player.skipPrevious(),
                       ),
-                    ),
-                  ),
-                  // Play/Pause button — large gradient circle, wrapped in Expanded for pixel-perfect layout
-                  Expanded(
-                    child: Center(
-                      child: Container(
+                      const SizedBox(width: 28),
+                      // Play/Pause button — large gradient circle
+                      Container(
                         width: 68,
                         height: 68,
                         decoration: BoxDecoration(
@@ -1027,12 +1083,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
                           onPressed: () => player.togglePlayPause(),
                         ),
                       ),
-                    ),
-                  ),
-                  // Next button
-                  Expanded(
-                    child: Center(
-                      child: IconButton(
+                      const SizedBox(width: 28),
+                      IconButton(
                         iconSize: 28,
                         icon: const Icon(
                           Icons.skip_next_rounded,
@@ -1042,49 +1094,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                             ? () => player.skipNext()
                             : null,
                       ),
-                    ),
-                  ),
-                  // Queue / Playlist Add button
-                  Expanded(
-                    child: Center(
-                      child: IconButton(
-                        iconSize: 28,
-                        icon: const Icon(
-                          Icons.playlist_add_rounded,
-                          color: AppTheme.textSecondary,
-                        ),
-                        onPressed: () => _showAddToPlaylistSheet(song),
-                      ),
-                    ),
-                  ),
-                  // Download button
-                  Expanded(
-                    child: Center(
-                      child: IconButton(
-                        iconSize: 28,
-                        icon: isDownloading
-                            ? SizedBox(
-                                width: 22,
-                                height: 22,
-                                child: CircularProgressIndicator(
-                                  value: downloads.progress[song.id],
-                                  strokeWidth: 2,
-                                  color: AppTheme.accentPurple,
-                                ),
-                              )
-                            : Icon(
-                                isDownloaded
-                                    ? Icons.download_done
-                                    : Icons.download_rounded,
-                                color: isDownloaded
-                                    ? Colors.green
-                                    : AppTheme.textSecondary,
-                              ),
-                        onPressed: isDownloaded || isDownloading
-                            ? null
-                            : () => downloads.download(song),
-                      ),
-                    ),
+                    ],
                   ),
                 ],
               ),

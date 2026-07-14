@@ -713,6 +713,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
         }
 
         final isLoadingNew = player.isLoadingNewSong;
+        context.watch<LyricsManager>();
 
         // Automatically trigger lyrics request for active song if needed
         // Only fire once per song to avoid rebuild loops
@@ -731,6 +732,18 @@ class _PlayerScreenState extends State<PlayerScreen> {
               context.read<LyricsManager>().requestLyrics(song);
             }
           });
+        }
+
+        // Sync active lyric index immediately when rebuild occurs (e.g. lyrics loaded or song changed)
+        if (_scrubNotifier.value == null) {
+          final index = _activeIndexForPosition(_positionNotifier.value);
+          if (index != _activeLyricIndexNotifier.value) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted && _scrubNotifier.value == null) {
+                _activeLyricIndexNotifier.value = index;
+              }
+            });
+          }
         }
 
         final downloads = context.watch<DownloadProvider>();
@@ -1449,8 +1462,34 @@ class _PlayerScreenState extends State<PlayerScreen> {
     final lyricsManager = context.watch<LyricsManager>();
 
     if (lyricsManager.state == LyricsLoadState.searching ||
-        lyricsManager.state == LyricsLoadState.retrying ||
-        lyricsManager.state == LyricsLoadState.idle) {
+        lyricsManager.state == LyricsLoadState.retrying) {
+      return const Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SizedBox(
+              width: 28,
+              height: 28,
+              child: CircularProgressIndicator(
+                strokeWidth: 2.5,
+                color: AppTheme.accentPurple,
+              ),
+            ),
+            SizedBox(height: 16),
+            Text(
+              "Searching for lyrics...",
+              style: TextStyle(
+                color: AppTheme.textSecondary,
+                fontSize: 14,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    if (lyricsManager.state == LyricsLoadState.idle) {
       return const SizedBox.shrink();
     }
 

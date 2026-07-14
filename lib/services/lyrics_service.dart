@@ -517,30 +517,67 @@ class LyricsService {
         StabilityLogger.info('Lyrics', 'Scraping search engine fallback with query: $queryStr');
 
         try {
-          final searchResponse = await client.get(Uri.parse(ddgUrl), headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          }).timeout(const Duration(seconds: 4));
+          final List<String> targetUrls = [];
 
-          if (searchResponse.statusCode != 200) {
-            continue;
+          // Try DuckDuckGo first
+          try {
+            final searchResponse = await client.get(Uri.parse(ddgUrl), headers: {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            }).timeout(const Duration(seconds: 4));
+
+            if (searchResponse.statusCode == 200) {
+              final html = searchResponse.body;
+              final regExp = RegExp(r'href="([^"]+)"');
+              final matches = regExp.allMatches(html);
+
+              for (final match in matches) {
+                final rawLink = match.group(1)!;
+                final decodedLink = Uri.decodeFull(rawLink);
+                final uddgMatch = RegExp(r'uddg=([^&]+)').firstMatch(decodedLink);
+                if (uddgMatch != null) {
+                  final targetUrl = uddgMatch.group(1)!;
+                  if (targetUrl.contains('azlyrics.com/lyrics/') || targetUrl.contains('songlyrics.com/')) {
+                    targetUrls.add(targetUrl);
+                  }
+                }
+              }
+            }
+          } catch (e) {
+            debugPrint('[LyricsService] DuckDuckGo query failed: $e');
           }
 
-          final html = searchResponse.body;
-          final regExp = RegExp(r'href="([^"]+)"');
-          final matches = regExp.allMatches(html);
+          // Fallback to Google Search if DuckDuckGo yielded nothing
+          if (targetUrls.isEmpty) {
+            try {
+              final googleUrl = 'https://www.google.com/search?q=$query';
+              StabilityLogger.info('Lyrics', 'Scraping Google search fallback with query: $queryStr');
+              final googleResponse = await client.get(Uri.parse(googleUrl), headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+              }).timeout(const Duration(seconds: 4));
 
-          final List<String> targetUrls = [];
-          for (final match in matches) {
-            final rawLink = match.group(1)!;
-            final decodedLink = Uri.decodeFull(rawLink);
-            final uddgMatch = RegExp(r'uddg=([^&]+)').firstMatch(decodedLink);
-            if (uddgMatch != null) {
-              final targetUrl = uddgMatch.group(1)!;
-              if (targetUrl.contains('azlyrics.com/lyrics/')) {
-                targetUrls.add(targetUrl);
-              } else if (targetUrl.contains('songlyrics.com/')) {
-                targetUrls.add(targetUrl);
+              if (googleResponse.statusCode == 200) {
+                final html = googleResponse.body;
+                final regExp = RegExp(r'href="([^"]+)"');
+                final matches = regExp.allMatches(html);
+
+                for (final match in matches) {
+                  final rawLink = match.group(1)!;
+                  final decodedLink = Uri.decodeFull(rawLink);
+                  if (decodedLink.contains('azlyrics.com/lyrics/') || decodedLink.contains('songlyrics.com/')) {
+                    final startIndex = decodedLink.indexOf('http');
+                    if (startIndex != -1) {
+                      var targetUrl = decodedLink.substring(startIndex);
+                      final ampIndex = targetUrl.indexOf('&');
+                      if (ampIndex != -1) {
+                        targetUrl = targetUrl.substring(0, ampIndex);
+                      }
+                      targetUrls.add(targetUrl);
+                    }
+                  }
+                }
               }
+            } catch (e) {
+              debugPrint('[LyricsService] Google query failed: $e');
             }
           }
 

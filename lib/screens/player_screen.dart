@@ -1178,12 +1178,105 @@ class _PlayerScreenState extends State<PlayerScreen> {
   Widget _buildLyricsPreviewCard(Song song) {
     final lyricsManager = context.watch<LyricsManager>();
 
+    // 1. Searching or Retrying Card
     if (lyricsManager.state == LyricsLoadState.searching ||
-        lyricsManager.state == LyricsLoadState.retrying ||
-        lyricsManager.state == LyricsLoadState.idle) {
-      return const SizedBox.shrink();
+        lyricsManager.state == LyricsLoadState.retrying) {
+      return Container(
+        margin: const EdgeInsets.only(left: 24, right: 24, bottom: 24),
+        padding: const EdgeInsets.fromLTRB(24, 20, 24, 24),
+        decoration: BoxDecoration(
+          color: AppTheme.surfaceDark.withValues(alpha: 0.45),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
+        ),
+        child: const Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.lyrics_rounded, color: AppTheme.textMuted, size: 20),
+                SizedBox(width: 8),
+                Text(
+                  'LYRICS',
+                  style: TextStyle(
+                    color: AppTheme.textMuted,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 12,
+                    letterSpacing: 1.5,
+                  ),
+                ),
+                Spacer(),
+                SizedBox(
+                  width: 14,
+                  height: 14,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: AppTheme.textMuted,
+                  ),
+                ),
+              ],
+            ),
+            SizedBox(height: 12),
+            Text(
+              "Searching for lyrics...",
+              style: TextStyle(
+                color: AppTheme.textMuted,
+                fontSize: 15.5,
+                fontWeight: FontWeight.w600,
+              ),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ],
+        ),
+      );
     }
 
+    // 2. Idle State Card (Placeholder)
+    if (lyricsManager.state == LyricsLoadState.idle) {
+      return Container(
+        margin: const EdgeInsets.only(left: 24, right: 24, bottom: 24),
+        padding: const EdgeInsets.fromLTRB(24, 20, 24, 24),
+        decoration: BoxDecoration(
+          color: AppTheme.surfaceDark.withValues(alpha: 0.45),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
+        ),
+        child: const Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.lyrics_rounded, color: AppTheme.textMuted, size: 20),
+                SizedBox(width: 8),
+                Text(
+                  'LYRICS',
+                  style: TextStyle(
+                    color: AppTheme.textMuted,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 12,
+                    letterSpacing: 1.5,
+                  ),
+                ),
+              ],
+            ),
+            SizedBox(height: 12),
+            Text(
+              "...",
+              style: TextStyle(
+                color: AppTheme.textMuted,
+                fontSize: 15.5,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    // 3. Unavailable / Empty Card
     if (lyricsManager.state == LyricsLoadState.unavailable || lyricsManager.payload == null) {
       return Container(
         margin: const EdgeInsets.only(left: 24, right: 24, bottom: 24),
@@ -1193,13 +1286,36 @@ class _PlayerScreenState extends State<PlayerScreen> {
           borderRadius: BorderRadius.circular(16),
           border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
         ),
-        child: const Row(
+        child: const Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.lyrics_rounded, color: AppTheme.textMuted, size: 20),
-            SizedBox(width: 8),
+            Row(
+              children: [
+                Icon(Icons.lyrics_rounded, color: AppTheme.textMuted, size: 20),
+                SizedBox(width: 8),
+                Text(
+                  'LYRICS',
+                  style: TextStyle(
+                    color: AppTheme.textMuted,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 12,
+                    letterSpacing: 1.5,
+                  ),
+                ),
+              ],
+            ),
+            SizedBox(height: 12),
             Text(
               "Lyrics not found",
-              style: TextStyle(color: AppTheme.textMuted, fontSize: 13.5, fontWeight: FontWeight.w600),
+              style: TextStyle(
+                color: AppTheme.textMuted,
+                fontSize: 15.5,
+                fontWeight: FontWeight.w600,
+                height: 1.35,
+              ),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
             ),
           ],
         ),
@@ -1207,6 +1323,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
 
     final syncedLyrics = _currentSyncedLyrics;
+    
+    // 4. Plain Text Ready Card (available but not synced)
     if (syncedLyrics.isEmpty) {
       final plain = _plainLyricsForCurrentMode();
       if (plain == null || plain.trim().isEmpty) {
@@ -1218,13 +1336,36 @@ class _PlayerScreenState extends State<PlayerScreen> {
             borderRadius: BorderRadius.circular(16),
             border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
           ),
-          child: const Row(
+          child: const Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(Icons.lyrics_rounded, color: AppTheme.textMuted, size: 20),
-              SizedBox(width: 8),
+              Row(
+                children: [
+                  Icon(Icons.lyrics_rounded, color: AppTheme.textMuted, size: 20),
+                  SizedBox(width: 8),
+                  Text(
+                    'LYRICS',
+                    style: TextStyle(
+                      color: AppTheme.textMuted,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 12,
+                      letterSpacing: 1.5,
+                    ),
+                  ),
+                ],
+              ),
+              SizedBox(height: 12),
               Text(
                 "Lyrics not found",
-                style: TextStyle(color: AppTheme.textMuted, fontSize: 13.5, fontWeight: FontWeight.w600),
+                style: TextStyle(
+                  color: AppTheme.textMuted,
+                  fontSize: 15.5,
+                  fontWeight: FontWeight.w600,
+                  height: 1.35,
+                ),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
               ),
             ],
           ),
@@ -1252,13 +1393,38 @@ class _PlayerScreenState extends State<PlayerScreen> {
             borderRadius: BorderRadius.circular(16),
             border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
           ),
-          child: const Row(
+          child: const Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(Icons.lyrics_rounded, color: AppTheme.accentPurple, size: 20),
-              SizedBox(width: 8),
+              Row(
+                children: [
+                  Icon(Icons.lyrics_rounded, color: AppTheme.accentPurple, size: 20),
+                  SizedBox(width: 8),
+                  Text(
+                    'LYRICS',
+                    style: TextStyle(
+                      color: AppTheme.textPrimary,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 12,
+                      letterSpacing: 1.5,
+                    ),
+                  ),
+                  Spacer(),
+                  Icon(Icons.keyboard_arrow_up_rounded, color: AppTheme.textMuted, size: 22),
+                ],
+              ),
+              SizedBox(height: 12),
               Text(
                 'Lyrics (Plain Text) — Tap to view',
-                style: TextStyle(color: AppTheme.textPrimary, fontSize: 13.5, fontWeight: FontWeight.w600),
+                style: TextStyle(
+                  color: AppTheme.textPrimary,
+                  fontSize: 15.5,
+                  fontWeight: FontWeight.w700,
+                  height: 1.35,
+                ),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
               ),
             ],
           ),
@@ -1266,6 +1432,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       );
     }
 
+    // 5. Synced Lyrics Ready Card
     return GestureDetector(
       onVerticalDragEnd: (details) {
         if (details.primaryVelocity! < -100) {
@@ -1315,6 +1482,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
           children: [
             const Row(
               children: [

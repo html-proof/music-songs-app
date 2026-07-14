@@ -220,6 +220,35 @@ class Song {
     );
   }
 
+  Map<String, dynamic> toJson() {
+    return <String, dynamic>{
+      'id': id,
+      'name': name,
+      'album': album,
+      'albumId': albumId,
+      'sourceAlbumId': sourceAlbumId,
+      'sourceAlbumName': sourceAlbumName,
+      'sourceAlbumArtist': sourceAlbumArtist,
+      'sourceAlbumImageUrl': sourceAlbumImageUrl,
+      'primaryArtists': artist,
+      'imageUrl': imageUrl,
+      'streamUrl': streamUrl,
+      'language': language,
+      'duration': duration,
+      'year': year,
+      'type': type,
+      'explicitContent': isExplicit,
+      'isOfficial': isOfficial,
+      '_recommendationScore': recommendationScore,
+      'playCount': playCount,
+      'popularity': popularity,
+      'url': songUrl,
+      'hasLyrics': hasLyrics,
+      'isrc': isrc,
+      'musicbrainzId': musicbrainzId,
+    };
+  }
+
   Song withPlaybackSource({
     required String albumId,
     required String albumName,

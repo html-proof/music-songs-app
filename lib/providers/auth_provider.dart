@@ -26,10 +26,19 @@ class AuthProvider extends ChangeNotifier {
     notifyListeners();
 
     _authSubscription?.cancel();
-    _authSubscription = AuthService.authStateChanges.listen((user) {
+    _authSubscription = AuthService.authStateChanges.listen((user) async {
+      final oldUser = _user;
       _user = user;
       _loading = false;
       notifyListeners();
+
+      if (oldUser == null && user != null) {
+        try {
+          await PlayerService.restorePlaybackAfterLogin();
+        } catch (e) {
+          debugPrint('Failed to restore playback session after login: $e');
+        }
+      }
     });
   }
 

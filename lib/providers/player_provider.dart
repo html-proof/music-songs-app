@@ -57,6 +57,7 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
   String? _qualityAdjustmentMessage;
   Song? _resolvingSong;
   bool _shuffleModeEnabled = false;
+  LoopMode _loopMode = LoopMode.off;
 
   final List<StreamSubscription> _subscriptions = [];
   DateTime _lastPositionUpdate = DateTime.now();
@@ -66,6 +67,7 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
   Song? get resolvingSong => _resolvingSong;
   bool get isPlaying => _isPlaying;
   bool get shuffleModeEnabled => _shuffleModeEnabled;
+  LoopMode get loopMode => _loopMode;
   Duration get position => _position;
   Duration get duration => _duration;
   bool get isOffline => _isOffline;
@@ -127,6 +129,7 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
     _outputDeviceState = ListeningSafetyService.outputDeviceState;
     _isConversationMode = PlayerService.conversationModeActive;
     _shuffleModeEnabled = PlayerService.shuffleModeEnabled;
+    _loopMode = PlayerService.loopMode;
   }
 
   void _bindListeners() {
@@ -136,6 +139,11 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
       if (playing) {
         unawaited(_hydrateSongStateIfMissing());
       }
+    }));
+
+    _subscriptions.add(PlayerService.loopModeStream.listen((mode) {
+      _loopMode = mode;
+      notifyListeners();
     }));
 
     int lastNotifiedMs = -1;
@@ -323,9 +331,12 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state != AppLifecycleState.resumed) return;
-    _syncRuntimeSnapshot();
-    unawaited(_hydrateSongStateIfMissing(force: true));
+    if (state == AppLifecycleState.resumed) {
+      _syncRuntimeSnapshot();
+      unawaited(_hydrateSongStateIfMissing(force: true));
+    } else if (state == AppLifecycleState.paused || state == AppLifecycleState.inactive) {
+      unawaited(PlayerService.savePlaybackStateOnBackground());
+    }
   }
 
   Future<void> _hydrateSongStateIfMissing({bool force = false}) async {
@@ -377,6 +388,7 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
     _isConversationMode = PlayerService.conversationModeActive;
     _outputDeviceState = ListeningSafetyService.outputDeviceState;
     _shuffleModeEnabled = PlayerService.shuffleModeEnabled;
+    _loopMode = PlayerService.loopMode;
     if (notify) notifyListeners();
   }
 
@@ -437,6 +449,16 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
 
   Future<void> toggleShuffleMode() async {
     await PlayerService.setShuffleModeEnabled(!_shuffleModeEnabled);
+    notifyListeners();
+  }
+
+  Future<void> toggleRepeatMode() async {
+    final nextMode = switch (_loopMode) {
+      LoopMode.off => LoopMode.all,
+      LoopMode.all => LoopMode.one,
+      LoopMode.one => LoopMode.off,
+    };
+    await PlayerService.setLoopMode(nextMode);
     notifyListeners();
   }
 

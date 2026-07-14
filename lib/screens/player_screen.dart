@@ -3,6 +3,7 @@ import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:just_audio/just_audio.dart';
 import '../models/album.dart';
 import '../models/song.dart';
 import '../providers/download_provider.dart';
@@ -1047,7 +1048,28 @@ class _PlayerScreenState extends State<PlayerScreen> {
                       : null,
                 ),
                 const SizedBox(width: 4),
-                // Download button
+                // Repeat button
+                IconButton(
+                  icon: Icon(
+                    player.loopMode == LoopMode.one
+                        ? Icons.repeat_one_rounded
+                        : Icons.repeat_rounded,
+                    color: player.loopMode == LoopMode.off
+                        ? Colors.white54
+                        : AppTheme.accentPurple,
+                  ),
+                  onPressed: () => player.toggleRepeatMode(),
+                ),
+                const SizedBox(width: 4),
+                IconButton(
+                  icon: const Icon(
+                    Icons.playlist_add_rounded,
+                    color: AppTheme.textSecondary,
+                  ),
+                  onPressed: () => _showAddToPlaylistSheet(song),
+                ),
+                const SizedBox(width: 4),
+                // Download button (moved next to playlist add button)
                 IconButton(
                   icon: isDownloading
                       ? SizedBox(
@@ -1070,14 +1092,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
                   onPressed: isDownloaded || isDownloading
                       ? null
                       : () => downloads.download(song),
-                ),
-                const SizedBox(width: 4),
-                IconButton(
-                  icon: const Icon(
-                    Icons.playlist_add_rounded,
-                    color: AppTheme.textSecondary,
-                  ),
-                  onPressed: () => _showAddToPlaylistSheet(song),
                 ),
               ],
             ),

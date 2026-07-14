@@ -317,6 +317,11 @@ class LyricsService {
     return null;
   }
 
+  static String _getPrimaryArtist(String artistText) {
+    if (artistText.isEmpty) return '';
+    return artistText.split(RegExp(r',|;|feat\.|ft\.', caseSensitive: false)).first.trim();
+  }
+
   static Future<LyricsPayload?> progressiveLyricsSearch(Song song) async {
     final songId = song.id.trim();
     final title = song.name.trim();
@@ -325,7 +330,7 @@ class LyricsService {
     final duration = song.duration ?? 0;
     final isrc = (song.isrc ?? '').trim();
 
-    StabilityLogger.info('Lyrics', 'Starting progressive background search for: $title (ID: $songId)');
+    StabilityLogger.info('Lyrics', 'Starting progressive layered search for: $title (ID: $songId)');
 
     cancelActiveSearches();
     final client = ApiService.createSecureHttpClient(pinCertificates: false);
@@ -334,105 +339,139 @@ class LyricsService {
     try {
       final cleanTitle = _cleanTitle(title);
       final cleanArtist = _cleanArtist(artist);
+      final primaryArtist = _getPrimaryArtist(artist);
+      final cleanPrimaryArtist = _cleanArtist(primaryArtist);
       final cleanAlbum = _cleanTitle(album);
+      final lookup = _LyricsLookup.fromSong(song);
 
-      // Generate normalized queries
+      Future<LyricsPayload?> verifyAndCache(List<_LyricsCandidate> candidates, String source) async {
+        if (candidates.isEmpty) return null;
+        final best = _selectBestPayload(lookup, candidates);
+        if (best != null && best.hasAny) {
+          debugPrint('[LyricsService] Verified lyrics found from $source (Confidence: ${best.confidence})');
+          var finalPayload = best;
+          if (!best.hasSynced && best.hasPlain) {
+            final serverAligned = await alignAudioWithServer(song, best.plainLyrics!);
+            if (serverAligned != null) {
+              finalPayload = serverAligned;
+            } else {
+              finalPayload = LyricsAlignmentEngine.align(song, best);
+            }
+          }
+          return finalPayload;
+        }
+        return null;
+      }
+
+      // Stage 1: ISRC lookup on LRCLIB (3s timeout)
+      if (isrc.isNotEmpty) {
+        try {
+          final res = await _lrclibGetEntry(
+            artist: '',
+            title: '',
+            isrc: isrc,
+            client: client,
+          ).timeout(const Duration(seconds: 3));
+          if (res != null) {
+            final cand = _candidateFromJson(res);
+            if (cand != null) {
+              final payload = await verifyAndCache([cand], 'LRCLIB ISRC Get');
+              if (payload != null) return payload;
+            }
+          }
+        } catch (_) {}
+      }
+
+      // Stage 2: Saavn Backend (4s timeout)
+      if (songId.isNotEmpty) {
+        try {
+          final cand = await _fetchSaavnCandidate(songId, artist: artist, client: client)
+              .timeout(const Duration(seconds: 4));
+          if (cand != null) {
+            final payload = await verifyAndCache([cand], 'Saavn Backend');
+            if (payload != null) return payload;
+          }
+        } catch (_) {}
+      }
+
+      // Stage 3: Title + Artist Exact Get on LRCLIB (4s timeout)
+      if (cleanTitle.isNotEmpty && cleanArtist.isNotEmpty) {
+        try {
+          final res = await _lrclibGetEntry(
+            artist: cleanArtist,
+            title: cleanTitle,
+            album: cleanAlbum.isNotEmpty ? cleanAlbum : null,
+            durationSeconds: duration > 0 ? duration : null,
+            client: client,
+          ).timeout(const Duration(seconds: 4));
+          if (res != null) {
+            final cand = _candidateFromJson(res);
+            if (cand != null) {
+              final payload = await verifyAndCache([cand], 'LRCLIB Clean Title+Artist Get');
+              if (payload != null) return payload;
+            }
+          }
+        } catch (_) {}
+      }
+
+      // Stage 4: Title + Primary Artist Exact Get on LRCLIB (4s timeout)
+      if (cleanTitle.isNotEmpty && cleanPrimaryArtist.isNotEmpty && cleanPrimaryArtist != cleanArtist) {
+        try {
+          final res = await _lrclibGetEntry(
+            artist: cleanPrimaryArtist,
+            title: cleanTitle,
+            album: cleanAlbum.isNotEmpty ? cleanAlbum : null,
+            durationSeconds: duration > 0 ? duration : null,
+            client: client,
+          ).timeout(const Duration(seconds: 4));
+          if (res != null) {
+            final cand = _candidateFromJson(res);
+            if (cand != null) {
+              final payload = await verifyAndCache([cand], 'LRCLIB Clean Title+Primary Artist Get');
+              if (payload != null) return payload;
+            }
+          }
+        } catch (_) {}
+      }
+
+      // Stage 5: Title + Album Exact Get on LRCLIB (4s timeout)
+      if (cleanTitle.isNotEmpty && cleanAlbum.isNotEmpty) {
+        try {
+          final res = await _lrclibGetEntry(
+            artist: '',
+            title: cleanTitle,
+            album: cleanAlbum,
+            durationSeconds: duration > 0 ? duration : null,
+            client: client,
+          ).timeout(const Duration(seconds: 4));
+          if (res != null) {
+            final cand = _candidateFromJson(res);
+            if (cand != null) {
+              final payload = await verifyAndCache([cand], 'LRCLIB Clean Title+Album Get');
+              if (payload != null) return payload;
+            }
+          }
+        } catch (_) {}
+      }
+
+      // Stage 6: Broad Search Queries (5s timeout)
+      final Set<String> queryStrings = {};
       final queryTitle = normalizeQuery(title);
       final queryArtist = normalizeQuery(artist);
+      final queryPrimaryArtist = normalizeQuery(primaryArtist);
       final queryAlbum = normalizeQuery(album);
 
-      final Set<String> queryStrings = {};
       if (queryTitle.isNotEmpty) {
         queryStrings.add(queryTitle);
-        if (queryArtist.isNotEmpty) {
-          queryStrings.add('$queryTitle $queryArtist');
+        if (queryArtist.isNotEmpty) queryStrings.add('$queryTitle $queryArtist');
+        if (queryPrimaryArtist.isNotEmpty && queryPrimaryArtist != queryArtist) {
+          queryStrings.add('$queryTitle $queryPrimaryArtist');
         }
-        if (queryAlbum.isNotEmpty) {
-          queryStrings.add('$queryTitle $queryAlbum');
-          if (queryArtist.isNotEmpty) {
-            queryStrings.add('$queryTitle $queryArtist $queryAlbum');
-          }
-        }
-        queryStrings.add('$queryTitle full');
-        queryStrings.add('$queryTitle song');
+        if (queryAlbum.isNotEmpty) queryStrings.add('$queryTitle $queryAlbum');
       }
 
-      final List<Future<List<_LyricsCandidate>>> tasks = [];
-
-      // 1. Saavn Backend
-      if (songId.isNotEmpty) {
-        tasks.add(() async {
-          try {
-            final cand = await _fetchSaavnCandidate(songId, artist: artist, client: client);
-            if (cand != null) return [cand];
-          } catch (_) {}
-          return const <_LyricsCandidate>[];
-        }());
-      }
-
-      // 2. JioSaavn Web Scraper
-      if (song.songUrl != null && song.songUrl!.isNotEmpty) {
-        tasks.add(() async {
-          try {
-            final scraped = await _scrapeJioSaavnLyrics(song.songUrl!, client: client);
-            if (scraped != null) {
-              return [_LyricsCandidate(
-                plainLyrics: scraped.plainLyrics,
-                syncedLyrics: scraped.syncedLyrics,
-                trackName: title,
-                artistName: artist,
-                albumName: album,
-                durationSeconds: duration,
-                language: song.language,
-              )];
-            }
-          } catch (_) {}
-          return const <_LyricsCandidate>[];
-        }());
-      }
-
-      // 3. LRCLIB Get API Tasks
-      if (isrc.isNotEmpty) {
-        tasks.add(() async {
-          try {
-            final res = await _lrclibGetEntry(
-              artist: '',
-              title: '',
-              isrc: isrc,
-              client: client,
-            );
-            if (res != null) {
-              final cand = _candidateFromJson(res);
-              if (cand != null) return [cand];
-            }
-          } catch (_) {}
-          return const <_LyricsCandidate>[];
-        }());
-      }
-
-      if (cleanTitle.isNotEmpty && cleanArtist.isNotEmpty) {
-        tasks.add(() async {
-          try {
-            final res = await _lrclibGetEntry(
-              artist: cleanArtist,
-              title: cleanTitle,
-              album: cleanAlbum.isNotEmpty ? cleanAlbum : null,
-              durationSeconds: duration > 0 ? duration : null,
-              client: client,
-            );
-            if (res != null) {
-              final cand = _candidateFromJson(res);
-              if (cand != null) return [cand];
-            }
-          } catch (_) {}
-          return const <_LyricsCandidate>[];
-        }());
-      }
-
-      // Parallel search queries on LRCLIB
-      for (final q in queryStrings) {
-        if (q.isEmpty) continue;
-        tasks.add(() async {
+      if (queryStrings.isNotEmpty) {
+        final searchTasks = queryStrings.map((q) async {
           try {
             final entries = await _lrclibSearchEntries(q, client: client);
             return entries
@@ -441,40 +480,58 @@ class LyricsService {
                 .toList();
           } catch (_) {}
           return const <_LyricsCandidate>[];
-        }());
+        }).toList();
+
+        try {
+          final searchResults = await Future.wait(searchTasks).timeout(const Duration(seconds: 5));
+          final flatCandidates = searchResults.expand((x) => x).toList();
+          final payload = await verifyAndCache(flatCandidates, 'LRCLIB Search');
+          if (payload != null) return payload;
+        } catch (_) {}
       }
 
-      // Wait for all parallel searches to complete (with a timeout of 8 seconds)
-      final allResults = await Future.wait(tasks)
-          .timeout(const Duration(seconds: 8));
+      // Stage 7: Web Scrapers (6s timeout)
+      if (song.songUrl != null && song.songUrl!.isNotEmpty) {
+        try {
+          final scraped = await _scrapeJioSaavnLyrics(song.songUrl!, client: client)
+              .timeout(const Duration(seconds: 6));
+          if (scraped != null) {
+            final cand = _LyricsCandidate(
+              plainLyrics: scraped.plainLyrics,
+              syncedLyrics: scraped.syncedLyrics,
+              trackName: title,
+              artistName: artist,
+              albumName: album,
+              durationSeconds: duration,
+              language: song.language,
+            );
+            final payload = await verifyAndCache([cand], 'JioSaavn Web Scraper');
+            if (payload != null) return payload;
+          }
+        } catch (_) {}
+      }
 
-      // Flatten the candidates list
-      final candidates = allResults.expand((x) => x).toList();
-
-      final lookup = _LyricsLookup.fromSong(song);
-      final bestPayload = candidates.isNotEmpty ? _selectBestPayload(lookup, candidates) : null;
-
-      if (bestPayload != null && bestPayload.hasAny) {
-        if (!bestPayload.hasSynced && bestPayload.hasPlain) {
-          final serverAligned = await alignAudioWithServer(song, bestPayload.plainLyrics!);
-          if (serverAligned != null) return serverAligned;
-          return LyricsAlignmentEngine.align(song, bestPayload);
+      // Fallback search engine scraper (6s timeout)
+      try {
+        final scrapedPayload = await _scrapeLyricsFromSearchEngine(title, artist, album, song.language, client)
+            .timeout(const Duration(seconds: 6));
+        if (scrapedPayload != null && scrapedPayload.hasAny) {
+          debugPrint('[LyricsService] Verified lyrics found from Search Engine Scraper');
+          var finalPayload = scrapedPayload;
+          if (!scrapedPayload.hasSynced && scrapedPayload.hasPlain) {
+            final serverAligned = await alignAudioWithServer(song, scrapedPayload.plainLyrics!);
+            if (serverAligned != null) {
+              finalPayload = serverAligned;
+            } else {
+              finalPayload = LyricsAlignmentEngine.align(song, scrapedPayload);
+            }
+          }
+          return finalPayload;
         }
-        return bestPayload;
-      }
+      } catch (_) {}
 
-      // If standard APIs failed, run our fallback search engine scraper
-      final scrapedPayload = await _scrapeLyricsFromSearchEngine(title, artist, album, song.language, client);
-      if (scrapedPayload != null && scrapedPayload.hasAny) {
-        if (!scrapedPayload.hasSynced && scrapedPayload.hasPlain) {
-          final serverAligned = await alignAudioWithServer(song, scrapedPayload.plainLyrics!);
-          if (serverAligned != null) return serverAligned;
-          return LyricsAlignmentEngine.align(song, scrapedPayload);
-        }
-        return scrapedPayload;
-      }
     } catch (e) {
-      debugPrint('[LyricsService] Parallel progressive search failed or timed out: $e');
+      debugPrint('[LyricsService] Layered progressive search failed: $e');
     } finally {
       if (_activeClient == client) {
         _activeClient = null;

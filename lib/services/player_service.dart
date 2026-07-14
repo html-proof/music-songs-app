@@ -49,6 +49,14 @@ class PlaybackResumeCandidate {
   final String outputDeviceType;
   final bool shouldAutoResume;
 
+  // New fields for full playback restore
+  final List<Song>? queue;
+  final List<Song>? originalQueue;
+  final int currentIndex;
+  final bool shuffleModeEnabled;
+  final LoopMode loopMode;
+  final List<String>? playbackSourceKeys;
+
   const PlaybackResumeCandidate({
     required this.song,
     required this.position,
@@ -58,6 +66,12 @@ class PlaybackResumeCandidate {
     required this.outputDeviceName,
     required this.outputDeviceType,
     required this.shouldAutoResume,
+    this.queue,
+    this.originalQueue,
+    this.currentIndex = 0,
+    this.shuffleModeEnabled = false,
+    this.loopMode = LoopMode.off,
+    this.playbackSourceKeys,
   });
 }
 
@@ -146,7 +160,7 @@ class PlayerService {
   static bool get _isMobile => _isAndroid || _isIOS;
 
   static DateTime _lastPersistedAt = DateTime.fromMillisecondsSinceEpoch(0);
-  static const Duration _persistInterval = Duration(seconds: 15);
+  static const Duration _persistInterval = Duration(seconds: 5);
   static const Duration _maxPlaybackRestoreAge = Duration(hours: 24);
   static const Duration autoResumeWindow = Duration(minutes: 30);
 
@@ -317,6 +331,24 @@ class PlayerService {
   static Stream<Duration?> get durationStream => _durationStreamController.stream;
   static Stream<bool> get playingStream => _player.playingStream;
   static Stream<PlayerState> get playerStateStream => _player.playerStateStream;
+
+  static LoopMode get loopMode => _player.loopMode;
+  static Stream<LoopMode> get loopModeStream => _player.loopModeStream;
+
+  static Future<void> setLoopMode(LoopMode mode) async {
+    try {
+      await _player.setLoopMode(mode);
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('playback_loop_mode', mode.name);
+      await _savePlaybackState();
+    } catch (e) {
+      debugPrint('Failed to set loop mode: $e');
+    }
+  }
+
+  static Future<void> savePlaybackStateOnBackground() async {
+    await _savePlaybackState();
+  }
   static Stream<bool> get qualitySwitchingStream =>
       _qualitySwitchingController.stream;
   static bool get isQualitySwitching => _isQualitySwitching;
@@ -838,8 +870,15 @@ class PlayerService {
       final prefs = await SharedPreferences.getInstance();
       _shuffleModeEnabled = prefs.getBool('playback_shuffle_enabled') ?? false;
       _shuffleModeController.add(_shuffleModeEnabled);
+
+      final loopModeName = prefs.getString('playback_loop_mode') ?? LoopMode.off.name;
+      final savedLoopMode = LoopMode.values.firstWhere(
+        (m) => m.name == loopModeName,
+        orElse: () => LoopMode.off,
+      );
+      await _player.setLoopMode(savedLoopMode);
     } catch (e) {
-      debugPrint('Failed to load shuffle preference: $e');
+      debugPrint('Failed to load shuffle or loop preference: $e');
     }
 
     AudioSession? session;
@@ -2698,9 +2737,7 @@ class PlayerService {
     return true;
   }
 
-  static AudioSource _buildAudioSource(Song song) {
-    return _resolvePlaybackTarget(song).audioSource;
-  }
+
 
   static _ResolvedPlaybackTarget _resolvePlaybackTarget(Song song) {
     final declaredStreamUrl = (song.streamUrl ?? '').trim();
@@ -4300,6 +4337,12 @@ class PlayerService {
       'outputDeviceType': output.type.name,
       'outputDeviceName': output.name,
       'timestamp': DateTime.now().millisecondsSinceEpoch,
+      'queue': _queue.map((s) => s.toJson()).toList(),
+      'originalQueue': _originalQueue.map((s) => s.toJson()).toList(),
+      'currentIndex': _currentIndex,
+      'shuffleModeEnabled': _shuffleModeEnabled,
+      'loopMode': _player.loopMode.name,
+      'playbackSourceKeys': _queuePlaybackSourceKeys,
     };
   }
 
@@ -4332,6 +4375,34 @@ class PlayerService {
     );
     if (song.id.trim().isEmpty || !_hasStreamUrl(song)) return null;
 
+    final loopModeName = stateMap['loopMode']?.toString() ?? 'off';
+    final loopMode = LoopMode.values.firstWhere(
+      (m) => m.name == loopModeName,
+      orElse: () => LoopMode.off,
+    );
+
+    final queue = <Song>[];
+    if (stateMap['queue'] is List) {
+      for (final sJson in stateMap['queue'] as List) {
+        if (sJson is Map) {
+          queue.add(Song.fromJson(Map<String, dynamic>.from(sJson)));
+        }
+      }
+    }
+
+    final originalQueue = <Song>[];
+    if (stateMap['originalQueue'] is List) {
+      for (final sJson in stateMap['originalQueue'] as List) {
+        if (sJson is Map) {
+          originalQueue.add(Song.fromJson(Map<String, dynamic>.from(sJson)));
+        }
+      }
+    }
+
+    final playbackSourceKeys = (stateMap['playbackSourceKeys'] as List?)
+        ?.map((k) => k.toString())
+        .toList();
+
     return PlaybackResumeCandidate(
       song: song,
       position: Duration(milliseconds: positionMs),
@@ -4342,6 +4413,12 @@ class PlayerService {
       outputDeviceName: (stateMap['outputDeviceName'] ?? '').toString().trim(),
       outputDeviceType: (stateMap['outputDeviceType'] ?? '').toString().trim(),
       shouldAutoResume: age <= autoWindow,
+      queue: queue.isNotEmpty ? queue : null,
+      originalQueue: originalQueue.isNotEmpty ? originalQueue : null,
+      currentIndex: _parseInt(stateMap['currentIndex']),
+      shuffleModeEnabled: stateMap['shuffleModeEnabled'] == true,
+      loopMode: loopMode,
+      playbackSourceKeys: playbackSourceKeys,
     );
   }
 
@@ -4350,48 +4427,149 @@ class PlayerService {
   ) async {
     try {
       final isOffline = ConnectivityManager.isOffline;
-
       var songToRestore = candidate.song;
-      if (isOffline) {
-        final downloadedPath = await DownloadService.getLocalPath(
-          songToRestore.id,
-        );
-        final cachedPath =
-            downloadedPath ?? OfflineService.getLocalPath(songToRestore.id);
-        if (cachedPath == null || cachedPath.trim().isEmpty) {
-          return PlaybackResumeResult.offlineSongUnavailable;
-        }
 
-        songToRestore = songToRestore.copyWith(streamUrl: cachedPath);
+      final client = ApiService.createSecureHttpClient(pinCertificates: false);
+      try {
+        if (isOffline) {
+          final downloadedPath = await DownloadService.getLocalPath(songToRestore.id);
+          final cachedPath = downloadedPath ?? OfflineService.getLocalPath(songToRestore.id);
+          if (cachedPath == null || cachedPath.trim().isEmpty) {
+            // Song missing offline! Search offline database for same song title
+            final downloadedSongs = await DownloadService.getDownloadedSongs();
+            Song? fallbackSong;
+            for (final ds in downloadedSongs) {
+              if (ds.name.trim().toLowerCase() == songToRestore.name.trim().toLowerCase()) {
+                fallbackSong = ds;
+                break;
+              }
+            }
+            if (fallbackSong != null) {
+              final path = await DownloadService.getLocalPath(fallbackSong.id) ?? OfflineService.getLocalPath(fallbackSong.id);
+              if (path != null && path.trim().isNotEmpty) {
+                songToRestore = fallbackSong.copyWith(streamUrl: path);
+              } else {
+                _showThrottledToast("Song unavailable.");
+                return PlaybackResumeResult.offlineSongUnavailable;
+              }
+            } else {
+              _showThrottledToast("Song unavailable.");
+              return PlaybackResumeResult.offlineSongUnavailable;
+            }
+          } else {
+            songToRestore = songToRestore.copyWith(streamUrl: cachedPath);
+          }
+        } else {
+          // Online: Verify/refresh stream URL
+          final resolvedSong = await _resolveSongForPlayback(
+            songToRestore,
+            forceRefresh: false,
+            requestId: PlaybackCoordinator.newRequest(songToRestore),
+            client: client,
+          );
+          if (resolvedSong != null && _hasStreamUrl(resolvedSong)) {
+            songToRestore = resolvedSong;
+          } else {
+            // Stream URL invalid/expired/missing! Search API for same song title
+            try {
+              final searchPayload = await ApiService.globalSearch(songToRestore.name);
+              final results = searchPayload['songs'] ?? [];
+              Song? fallbackSong;
+              for (final res in results) {
+                final parsed = Song.fromJson(res);
+                if (parsed.name.trim().toLowerCase() == songToRestore.name.trim().toLowerCase() && _hasStreamUrl(parsed)) {
+                  fallbackSong = parsed;
+                  break;
+                }
+              }
+              if (fallbackSong != null) {
+                final resolvedFallback = await _resolveSongForPlayback(
+                  fallbackSong,
+                  forceRefresh: true,
+                  requestId: PlaybackCoordinator.newRequest(fallbackSong),
+                  client: client,
+                );
+                if (resolvedFallback != null && _hasStreamUrl(resolvedFallback)) {
+                  songToRestore = resolvedFallback;
+                } else {
+                  _showThrottledToast("Song unavailable.");
+                  return PlaybackResumeResult.offlineSongUnavailable;
+                }
+              } else {
+                _showThrottledToast("Song unavailable.");
+                return PlaybackResumeResult.offlineSongUnavailable;
+              }
+            } catch (_) {
+              _showThrottledToast("Song unavailable.");
+              return PlaybackResumeResult.offlineSongUnavailable;
+            }
+          }
+        }
+      } finally {
+        client.close();
       }
 
       _selectedAudioQuality = candidate.audioQuality;
       _temporaryAutoKbps = null;
       await _refreshResolvedPreferredQuality(applyNow: false, force: true);
 
+      final queueToRestore = candidate.queue ?? <Song>[songToRestore];
+      final originalQueueToRestore = candidate.originalQueue ?? queueToRestore;
+      var restoreIndex = candidate.currentIndex;
+      if (restoreIndex < 0 || restoreIndex >= queueToRestore.length) {
+        restoreIndex = 0;
+      }
+
+      // Update the song at restoreIndex in queue
+      if (restoreIndex >= 0 && restoreIndex < queueToRestore.length) {
+        queueToRestore[restoreIndex] = songToRestore;
+      }
+
       _currentSong = songToRestore;
       _queue
         ..clear()
-        ..add(songToRestore);
-      _currentIndex = 0;
+        ..addAll(queueToRestore);
+      _originalQueue
+        ..clear()
+        ..addAll(originalQueueToRestore);
+      _currentIndex = restoreIndex;
+
+      // Restore shuffle and loopMode
+      _shuffleModeEnabled = candidate.shuffleModeEnabled;
+      _shuffleModeController.add(_shuffleModeEnabled);
+      await _player.setLoopMode(candidate.loopMode);
+
+      final resolvedTargets = _resolvePlaybackTargets(_queue);
+      final sources = resolvedTargets
+          .map((target) => target.audioSource)
+          .toList(growable: false);
 
       await _runSerializedSourceMutation(() async {
-        await _player
-            .setAudioSource(
-              _buildAudioSource(songToRestore),
-              initialPosition: candidate.position,
-            )
-            .timeout(const Duration(seconds: 8));
+        await _player.setAudioSources(
+          sources,
+          initialIndex: _currentIndex,
+          initialPosition: candidate.position,
+        ).timeout(const Duration(seconds: 12), onTimeout: () {
+          throw TimeoutException('Player preparation timed out after 12 seconds');
+        });
       });
-      _updateTrackedPlaybackSourceKeys(
-        _resolvePlaybackTargets(<Song>[songToRestore]),
-      );
+
+      _updateTrackedPlaybackSourceKeys(resolvedTargets);
       _resetRateLimitStateForSong(_currentSong?.id);
 
-      // Don't auto-play - just load the song at the saved position so the
-      // mini player shows up. The user can press play when they want.
+      if (candidate.wasPlaying) {
+        final started = await _playEnsuringAudioFocus();
+        if (started) {
+          _songPlayStartedAt = DateTime.now();
+          _songPlayStartedId = songToRestore.id;
+          await _savePlaybackState();
+        } else {
+          await _savePlaybackState(wasPlayingOverride: false);
+        }
+      } else {
+        await _savePlaybackState(wasPlayingOverride: false);
+      }
 
-      await _savePlaybackState(wasPlayingOverride: false);
       unawaited(_triggerAutoplayIfNeeded());
       return PlaybackResumeResult.resumed;
     } on TimeoutException {

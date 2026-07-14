@@ -923,9 +923,12 @@ class PlayerService {
       _positionStreamController.add(Duration.zero);
       _durationStreamController.add(nextSong.duration != null ? Duration(seconds: nextSong.duration!) : Duration.zero);
 
-      PlaybackCoordinator.newRequest(nextSong);
-      final newSessionId = PlaybackCoordinator.currentIdentity!.sessionId;
-      _activeLogger = _PlaybackSessionLogger(newSessionId, nextSong.name);
+      final isSideEffectOfLoading = _isLoadingNewSong || _isSwitchingSource || _resolvingSong != null;
+      if (!isSideEffectOfLoading) {
+        PlaybackCoordinator.newRequest(nextSong);
+        final newSessionId = PlaybackCoordinator.currentIdentity!.sessionId;
+        _activeLogger = _PlaybackSessionLogger(newSessionId, nextSong.name);
+      }
 
       _currentSong = nextSong;
 

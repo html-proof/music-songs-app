@@ -442,7 +442,7 @@ class LyricsManager extends ChangeNotifier {
   /// actual vocal onset. This offset delays the highlight so the lyric
   /// appears exactly when the singer begins — matching Spotify / Apple Music
   /// behaviour. Higher value = lyrics appear later (delays highlight).
-  static const int _lyricsSyncOffsetMs = 1000;
+  static const int _lyricsSyncOffsetMs = 1200;
 
   static int activeIndexForPosition(
     List<TimedLyricLine> lines,

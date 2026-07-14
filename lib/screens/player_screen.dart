@@ -999,30 +999,34 @@ class _PlayerScreenState extends State<PlayerScreen> {
                       ),
                     ),
                   ),
-                  // Play/Pause button — large gradient circle
-                  Container(
-                    width: 68,
-                    height: 68,
-                    decoration: BoxDecoration(
-                      gradient: AppTheme.primaryGradient,
-                      shape: BoxShape.circle,
-                      boxShadow: [
-                        BoxShadow(
-                          color: AppTheme.accentPurple.withValues(alpha: 0.4),
-                          blurRadius: 20,
-                          spreadRadius: 2,
+                  // Play/Pause button — large gradient circle, wrapped in Expanded for pixel-perfect layout
+                  Expanded(
+                    child: Center(
+                      child: Container(
+                        width: 68,
+                        height: 68,
+                        decoration: BoxDecoration(
+                          gradient: AppTheme.primaryGradient,
+                          shape: BoxShape.circle,
+                          boxShadow: [
+                            BoxShadow(
+                              color: AppTheme.accentPurple.withValues(alpha: 0.4),
+                              blurRadius: 20,
+                              spreadRadius: 2,
+                            ),
+                          ],
                         ),
-                      ],
-                    ),
-                    child: IconButton(
-                      iconSize: 36,
-                      icon: Icon(
-                        player.isPlaying
-                            ? Icons.pause_rounded
-                            : Icons.play_arrow_rounded,
-                        color: Colors.white,
+                        child: IconButton(
+                          iconSize: 36,
+                          icon: Icon(
+                            player.isPlaying
+                                ? Icons.pause_rounded
+                                : Icons.play_arrow_rounded,
+                            color: Colors.white,
+                          ),
+                          onPressed: () => player.togglePlayPause(),
+                        ),
                       ),
-                      onPressed: () => player.togglePlayPause(),
                     ),
                   ),
                   // Next button

@@ -165,6 +165,11 @@ class PlayerService {
   static const Duration autoResumeWindow = Duration(minutes: 30);
 
   static StreamSubscription<Duration>? _positionSubscription;
+  static StreamSubscription<Duration>? _playerRawPositionSubscription;
+  static StreamSubscription<Duration?>? _playerRawDurationSubscription;
+  static StreamSubscription<bool>? _playerPlayingSubscription;
+  static StreamSubscription<ProcessingState>? _playerProcessingStateSubscription;
+  static StreamSubscription<Duration>? _playerBufferedPositionSubscription;
   static StreamSubscription<int?>? _indexSubscription;
   static StreamSubscription<double>? _volumeSubscription;
   static StreamSubscription<AudioInterruptionEvent>? _interruptionSubscription;
@@ -238,6 +243,329 @@ class PlayerService {
       StreamController<Duration>.broadcast();
   static final StreamController<Duration?> _durationStreamController =
       StreamController<Duration?>.broadcast();
+  static final StreamController<Duration> _bufferedPositionStreamController =
+      StreamController<Duration>.broadcast();
+  static Stream<Duration> get bufferedPositionStream => _bufferedPositionStreamController.stream;
+
+  static Timer? _progressTimer;
+  static Duration _lastKnownPosition = Duration.zero;
+
+  static Timer? _watchdogTimer;
+  static int _frozenCounter = 0;
+  static Duration _lastWatchdogPosition = Duration.zero;
+
+  static bool get isPlaying => _player.playing;
+  static Duration get position => _player.position;
+  static Duration get bufferedPosition => _player.bufferedPosition;
+  static Duration? get duration => _player.duration;
+  static ProcessingState get processingState => _player.processingState;
+  static PlayerState get playerState => _player.playerState;
+  static int? get playerCurrentIndex => _player.currentIndex;
+  static Stream<SequenceState?> get sequenceStateStream => _player.sequenceStateStream;
+  static Stream<int?> get currentIndexStream => _player.currentIndexStream;
+
+  static void _updateProgressTimerState() {
+    _progressTimer?.cancel();
+    _progressTimer = null;
+
+    final isPlaying = _player.playing;
+    final isCompleted = _player.processingState == ProcessingState.completed;
+    final isIdle = _player.processingState == ProcessingState.idle;
+
+    if (isPlaying && !isCompleted && !isIdle) {
+      _progressTimer = Timer.periodic(const Duration(milliseconds: 40), (timer) {
+        _pollProgress();
+      });
+    }
+  }
+
+  static void _stopProgressTimer() {
+    _progressTimer?.cancel();
+    _progressTimer = null;
+  }
+
+  static void _pollProgress() {
+    if (_player.audioSource == null) return;
+
+    final pos = _player.position;
+    final dur = _player.duration;
+    final buf = _player.bufferedPosition;
+
+    if (pos > Duration.zero) {
+      _lastKnownPosition = pos;
+    }
+
+    final activeTag = _player.sequenceState.currentSource?.tag;
+    final String? activeId = activeTag is MediaItem ? activeTag.id : null;
+    if (activeId != null && _currentSong != null && activeId != _currentSong!.id) {
+      return;
+    }
+
+    _positionStreamController.add(pos);
+    if (dur != null) {
+      _durationStreamController.add(dur);
+    }
+    _bufferedPositionStreamController.add(buf);
+
+    final now = DateTime.now();
+    if (now.difference(_lastPersistedAt) >= _persistInterval && _currentSong != null) {
+      _lastPersistedAt = now;
+      StabilityLogger.debug('Playback', 'Position update (timer): $pos');
+      unawaited(
+        OfflineService.recordPlaybackProgress(
+          _currentSong!,
+          pos,
+          duration: dur,
+        ),
+      );
+      _savePlaybackState();
+    }
+  }
+
+  static void _startWatchdog() {
+    _watchdogTimer?.cancel();
+    _watchdogTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      _runWatchdogCheck();
+    });
+  }
+
+  static void _runWatchdogCheck() {
+    final isPlaying = _player.playing;
+    final isConnected = _isNetworkAvailable;
+    final currentPos = _player.position;
+    final isCompleted = _player.processingState == ProcessingState.completed;
+    final isIdle = _player.processingState == ProcessingState.idle;
+
+    if (isPlaying && !isCompleted && !isIdle && _progressTimer == null) {
+      debugPrint('Watchdog: Progress timer was null during active playback. Restarting it.');
+      _updateProgressTimerState();
+    }
+
+    if (isPlaying && isConnected && currentPos == _lastWatchdogPosition && !isCompleted && !isIdle) {
+      _frozenCounter++;
+      debugPrint('Watchdog: Position has not changed for $_frozenCounter seconds.');
+    } else {
+      _frozenCounter = 0;
+    }
+
+    _lastWatchdogPosition = currentPos;
+
+    if (_frozenCounter >= 3) {
+      debugPrint('Watchdog: Playback is frozen (stuck at $currentPos). Triggering recovery.');
+      _frozenCounter = 0;
+      unawaited(_recoverPlayback());
+    }
+  }
+
+  static Future<void> _recoverPlayback() async {
+    final song = _currentSong;
+    if (song == null) return;
+
+    final savePosition = _lastKnownPosition > Duration.zero ? _lastKnownPosition : _player.position;
+    StabilityLogger.info('Playback', 'Recovering playback for ${song.name} at position $savePosition');
+
+    // 1. Reestablish subscriptions
+    _reestablishPlayerSubscriptions();
+
+    // 2. Refresh stream URL
+    final String? currentRequestId = PlaybackCoordinator.currentRequestId;
+    final resolved = await _resolveSongForPlayback(song, forceRefresh: true, requestId: currentRequestId);
+
+    if (resolved != null) {
+      _currentSong = resolved;
+      if (_queue.isNotEmpty && _currentIndex >= 0 && _currentIndex < _queue.length) {
+        _queue[_currentIndex] = resolved;
+      }
+      
+      _setSourceSwitching(true);
+      try {
+        await _replaceCurrentAudioSource(
+          updatedSong: resolved,
+          index: _currentIndex,
+          position: savePosition,
+        );
+      } finally {
+        _setSourceSwitching(false);
+      }
+    }
+
+    // 3. Seek and play
+    await _player.seek(savePosition);
+    await _playEnsuringAudioFocus();
+    _savePlaybackState();
+    
+    _positionStreamController.add(savePosition);
+    _playbackStateController.add(_player.playing ? PlaybackState.playing : PlaybackState.paused);
+  }
+
+  static void _setupPlayerSubscriptions() {
+    _cancelPlayerSubscriptions();
+
+    _updateProgressTimerState();
+
+    _playerRawPositionSubscription = _player.positionStream.listen((pos) {
+      if (_isSessionStale(null, _currentSong?.id ?? '') ||
+          _isSwitchingSource ||
+          _isLoadingNewSong ||
+          _resolvingSong != null) {
+        return;
+      }
+      _positionStreamController.add(pos);
+    });
+
+    _playerRawDurationSubscription = _player.durationStream.listen((dur) {
+      if (_isSessionStale(null, _currentSong?.id ?? '') ||
+          _isSwitchingSource ||
+          _isLoadingNewSong ||
+          _resolvingSong != null) {
+        return;
+      }
+      _durationStreamController.add(dur);
+    });
+
+    _positionSubscription = _player.positionStream.listen((_) {
+      if (!_player.playing || _currentSong == null) return;
+      final now = DateTime.now();
+      if (now.difference(_lastPersistedAt) >= _persistInterval) {
+        _lastPersistedAt = now;
+        StabilityLogger.debug('Playback', 'Position update: ${_player.position}');
+        unawaited(
+          OfflineService.recordPlaybackProgress(
+            _currentSong!,
+            _player.position,
+            duration: _player.duration,
+          ),
+        );
+        _savePlaybackState();
+      }
+    });
+
+    _playerPlayingSubscription = _player.playingStream.listen((_) => _updateProgressTimerState());
+    _playerProcessingStateSubscription = _player.processingStateStream.listen((_) => _updateProgressTimerState());
+
+    _playerBufferedPositionSubscription = _player.bufferedPositionStream.listen((buf) {
+      _bufferedPositionStreamController.add(buf);
+    });
+
+    _indexSubscription = _player.currentIndexStream.listen((index) {
+      if (index == null ||
+          _queue.isEmpty ||
+          index < 0 ||
+          index >= _queue.length) {
+        return;
+      }
+      _currentIndex = index;
+      final nextSong = _queue[index];
+
+      _positionStreamController.add(Duration.zero);
+      _durationStreamController.add(nextSong.duration != null ? Duration(seconds: nextSong.duration!) : Duration.zero);
+
+      final isSideEffectOfLoading = _isLoadingNewSong || _isSwitchingSource || _resolvingSong != null;
+      if (!isSideEffectOfLoading) {
+        PlaybackCoordinator.newRequest(nextSong);
+        final newSessionId = PlaybackCoordinator.currentIdentity!.sessionId;
+        _activeLogger = _PlaybackSessionLogger(newSessionId, nextSong.name);
+      }
+
+      _currentSong = nextSong;
+      _resetRateLimitStateForSong(_currentSong?.id);
+      if (!_isSourceMutationInProgress) {
+        _triggerAutoplayIfNeeded();
+      }
+      _savePlaybackState();
+      _preloadUpcomingSongs(index);
+    });
+
+    _playerStateSubscription = _player.playerStateStream.listen((state) {
+      StabilityLogger.info('Playback', 'PlayerState transition: playing=${state.playing}, processingState=${state.processingState}');
+      if (state.processingState == ProcessingState.completed) {
+        StabilityLogger.info('Playback', 'Playback completed for song: ${_currentSong?.name}');
+      }
+
+      if (_playbackState != PlaybackState.seeking) {
+        switch (state.processingState) {
+          case ProcessingState.idle:
+            _updatePlaybackState(PlaybackState.idle);
+            break;
+          case ProcessingState.loading:
+            _updatePlaybackState(PlaybackState.preparingDecoder);
+            break;
+          case ProcessingState.buffering:
+            _updatePlaybackState(PlaybackState.buffering);
+            break;
+          case ProcessingState.ready:
+            if (state.playing) {
+              _updatePlaybackState(PlaybackState.playing);
+            } else {
+              _updatePlaybackState(PlaybackState.paused);
+            }
+            break;
+          case ProcessingState.completed:
+            _updatePlaybackState(PlaybackState.idle);
+            break;
+        }
+      }
+
+      final isPlaying = state.playing;
+      if (isPlaying) {
+        _userPausedOrStoppedPlayback = false;
+        _pausedByNetworkLoss = false;
+        _pausedByAudioInterruption = false;
+        _pausedByOutputDisconnect = false;
+        _pausedByVideoPlayback = false;
+      } else {
+        if (!_pausedByAudioInterruption &&
+            !_pausedByOutputDisconnect &&
+            !_pausedByVideoPlayback &&
+            !_pausedByNetworkLoss) {
+          _userPausedOrStoppedPlayback = true;
+        }
+      }
+      _savePlaybackState();
+    });
+
+    _errorSubscription = _player.errorStream.listen((error) {
+      if (_isLoadingNewSong) {
+        StabilityLogger.debug('Playback', 'Ignoring player error stream event during song loading: ${error.message}');
+        return;
+      }
+      unawaited(
+        _handlePlayerError(error).catchError((Object e, StackTrace st) {
+          debugPrint('Player error handler failed: $e');
+        }),
+      );
+    });
+  }
+
+  static void _cancelPlayerSubscriptions() {
+    _playerRawPositionSubscription?.cancel();
+    _playerRawPositionSubscription = null;
+    _playerRawDurationSubscription?.cancel();
+    _playerRawDurationSubscription = null;
+    _positionSubscription?.cancel();
+    _positionSubscription = null;
+    _playerPlayingSubscription?.cancel();
+    _playerPlayingSubscription = null;
+    _playerProcessingStateSubscription?.cancel();
+    _playerProcessingStateSubscription = null;
+    _playerBufferedPositionSubscription?.cancel();
+         _playerBufferedPositionSubscription = null;
+    _indexSubscription?.cancel();
+    _indexSubscription = null;
+    _playerStateSubscription?.cancel();
+    _playerStateSubscription = null;
+    _errorSubscription?.cancel();
+    _errorSubscription = null;
+  }
+
+  static void _reestablishPlayerSubscriptions() {
+    _setupPlayerSubscriptions();
+  }
+
+  static Future<void> recoverPlayback() async {
+    await _recoverPlayback();
+  }
+
   static Song? _resolvingSong;
   static Song? get resolvingSong => _resolvingSong;
 
@@ -911,123 +1239,7 @@ class PlayerService {
       }
     }
 
-    _player.positionStream.listen((pos) {
-      if (_isSessionStale(null, _currentSong?.id ?? '') ||
-          _isSwitchingSource ||
-          _isLoadingNewSong ||
-          _resolvingSong != null) {
-        return;
-      }
-      _positionStreamController.add(pos);
-    });
-
-    _player.durationStream.listen((dur) {
-      if (_isSessionStale(null, _currentSong?.id ?? '') ||
-          _isSwitchingSource ||
-          _isLoadingNewSong ||
-          _resolvingSong != null) {
-        return;
-      }
-      _durationStreamController.add(dur);
-    });
-
-    _positionSubscription ??= _player.positionStream.listen((_) {
-      if (!_player.playing || _currentSong == null) return;
-      final now = DateTime.now();
-      if (now.difference(_lastPersistedAt) >= _persistInterval) {
-        _lastPersistedAt = now;
-        StabilityLogger.debug('Playback', 'Position update: ${_player.position}');
-        unawaited(
-          OfflineService.recordPlaybackProgress(
-            _currentSong!,
-            _player.position,
-            duration: _player.duration,
-          ),
-        );
-        _savePlaybackState();
-      }
-    });
-
-    _indexSubscription ??= _player.currentIndexStream.listen((index) {
-      if (index == null ||
-          _queue.isEmpty ||
-          index < 0 ||
-          index >= _queue.length) {
-        return;
-      }
-      _currentIndex = index;
-      final nextSong = _queue[index];
-
-      // Reset playback state immediately on index change to prevent previous song's state from leaking
-      _positionStreamController.add(Duration.zero);
-      _durationStreamController.add(nextSong.duration != null ? Duration(seconds: nextSong.duration!) : Duration.zero);
-
-      final isSideEffectOfLoading = _isLoadingNewSong || _isSwitchingSource || _resolvingSong != null;
-      if (!isSideEffectOfLoading) {
-        PlaybackCoordinator.newRequest(nextSong);
-        final newSessionId = PlaybackCoordinator.currentIdentity!.sessionId;
-        _activeLogger = _PlaybackSessionLogger(newSessionId, nextSong.name);
-      }
-
-      _currentSong = nextSong;
-
-      _resetRateLimitStateForSong(_currentSong?.id);
-      if (!_isSourceMutationInProgress) {
-        _triggerAutoplayIfNeeded();
-      }
-      _savePlaybackState();
-
-      // Trigger predictive background preloading of upcoming tracks
-      _preloadUpcomingSongs(index);
-    });
-
-    _playerStateSubscription ??= _player.playerStateStream.listen((state) {
-      StabilityLogger.info('Playback', 'PlayerState transition: playing=${state.playing}, processingState=${state.processingState}');
-      if (state.processingState == ProcessingState.completed) {
-        StabilityLogger.info('Playback', 'Playback completed for song: ${_currentSong?.name}');
-      }
-
-      if (_playbackState != PlaybackState.seeking) {
-        switch (state.processingState) {
-          case ProcessingState.idle:
-            _updatePlaybackState(PlaybackState.idle);
-            break;
-          case ProcessingState.loading:
-            _updatePlaybackState(PlaybackState.preparingDecoder);
-            break;
-          case ProcessingState.buffering:
-            _updatePlaybackState(PlaybackState.buffering);
-            break;
-          case ProcessingState.ready:
-            if (state.playing) {
-              _updatePlaybackState(PlaybackState.playing);
-            } else {
-              _updatePlaybackState(PlaybackState.paused);
-            }
-            break;
-          case ProcessingState.completed:
-            _updatePlaybackState(PlaybackState.idle);
-            break;
-        }
-      }
-
-      final isPlaying = state.playing;
-      if (isPlaying) {
-        _userPausedOrStoppedPlayback = false;
-        _pausedByNetworkLoss = false;
-        _pausedByAudioInterruption = false;
-        _pausedByOutputDisconnect = false;
-        _pausedByVideoPlayback = false;
-      } else {
-        if (!_pausedByAudioInterruption &&
-            !_pausedByOutputDisconnect &&
-            !_pausedByVideoPlayback &&
-            !_pausedByNetworkLoss) {
-          _userPausedOrStoppedPlayback = true;
-        }
-      }
-      _savePlaybackState();
-    });
+    _setupPlayerSubscriptions();
 
     if (_isAndroid) {
       _androidAudioSessionIdSubscription ??= _player.androidAudioSessionIdStream
@@ -1058,17 +1270,7 @@ class PlayerService {
       });
     }
 
-    _errorSubscription ??= _player.errorStream.listen((error) {
-      if (_isLoadingNewSong) {
-        StabilityLogger.debug('Playback', 'Ignoring player error stream event during song loading: ${error.message}');
-        return;
-      }
-      unawaited(
-        _handlePlayerError(error).catchError((Object e, StackTrace st) {
-          debugPrint('Player error handler failed: $e');
-        }),
-      );
-    });
+
 
     _outputDeviceSubscription ??= ListeningSafetyService.outputDeviceStream.listen((
       outputState,
@@ -1168,6 +1370,7 @@ class PlayerService {
       unawaited(_handleConnectivityChange(event));
     });
 
+    _startWatchdog();
     _isInitialized = true;
   }
 
@@ -5685,6 +5888,7 @@ class PlayerService {
   }
 
   static Future<void> dispose() async {
+    _stopProgressTimer();
     await _positionSubscription?.cancel();
     await _volumeSubscription?.cancel();
     await _indexSubscription?.cancel();
@@ -5699,6 +5903,7 @@ class PlayerService {
     _networkReEvalTimer?.cancel();
     _conversationRestoreTimer?.cancel();
     _duckPauseEscalationTimer?.cancel();
+    _watchdogTimer?.cancel();
 
     _positionSubscription = null;
     _volumeSubscription = null;
@@ -5714,6 +5919,8 @@ class PlayerService {
     _networkReEvalTimer = null;
     _conversationRestoreTimer = null;
     _duckPauseEscalationTimer = null;
+    _watchdogTimer = null;
+    _frozenCounter = 0;
     _temporaryAutoKbps = null;
     _cachedNetworkSpeedMbps = null;
     _lastNetworkSpeedProbeAt = null;

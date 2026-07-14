@@ -151,8 +151,8 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
       _lastPositionUpdate = DateTime.now();
 
       if (_ignorePositionUntilZero) {
-        final state = PlayerService.player.processingState;
-        final playing = PlayerService.player.playing;
+        final state = PlayerService.processingState;
+        final playing = PlayerService.isPlaying;
         if (pos == Duration.zero ||
             pos.inMilliseconds < 300 ||
             state == ProcessingState.ready ||
@@ -168,7 +168,7 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
         // the timestamp from being frozen at 00:00.
         if (_resolvingSong != null || _isBuffering) {
           // Only accept position updates if the player is actually playing
-          final playerPlaying = PlayerService.player.playing;
+          final playerPlaying = PlayerService.isPlaying;
           if (!playerPlaying && pos != Duration.zero) return;
         }
         _position = pos;
@@ -195,7 +195,7 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
       notifyListeners();
     }));
 
-    _subscriptions.add(PlayerService.player.currentIndexStream.listen((index) {
+    _subscriptions.add(PlayerService.currentIndexStream.listen((index) {
       if (_isQualitySwitching) return;
       final song = PlayerService.currentSong;
       if (song != null) {
@@ -294,7 +294,7 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
       notifyListeners();
     }));
 
-    _subscriptions.add(PlayerService.player.bufferedPositionStream.listen((buf) {
+    _subscriptions.add(PlayerService.bufferedPositionStream.listen((buf) {
       if (_isQualitySwitching) return;
       _bufferedPosition = buf;
       notifyListeners();
@@ -308,12 +308,26 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
 
   void _startWatchdog() {
     _watchdogTimer?.cancel();
-    _watchdogTimer = Timer.periodic(const Duration(seconds: 2), (timer) {
-      if (_isPlaying && !_isSeeking && !_isBuffering && !_isSwitchingSource && !_isQualitySwitching) {
+    _watchdogTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      final isPlaying = PlayerService.isPlaying;
+      final isConnected = _isOffline == false;
+      final isCompleted = PlayerService.playerState.processingState == ProcessingState.completed;
+
+      if (isPlaying && isConnected && !isCompleted) {
         final timeSinceLastUpdate = DateTime.now().difference(_lastPositionUpdate);
         if (timeSinceLastUpdate > const Duration(seconds: 3)) {
-          StabilityLogger.warning('Playback', 'Watchdog detected stuck position stream (last update: ${timeSinceLastUpdate.inSeconds}s ago). Reconnecting listeners.');
+          StabilityLogger.warning('Playback', 'Watchdog detected stuck UI stream listeners (last update: ${timeSinceLastUpdate.inSeconds}s ago). Reconnecting listeners and triggering recovery.');
+
+          // Reset status flags to prevent stale deadlock
+          _isBuffering = false;
+          _isSwitchingSource = false;
+          _isQualitySwitching = false;
+
+          // Re-subscribe UI listeners
           reconnectListeners();
+
+          // Trigger service-level playback recovery
+          unawaited(PlayerService.recoverPlayback());
         }
       }
     });
@@ -343,12 +357,12 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
     if (_hydrationInProgress) return;
 
     final hasSong = currentSong != null;
-    final playerState = PlayerService.player.playerState;
+    final playerState = PlayerService.playerState;
     final hasActiveSession =
-        PlayerService.player.playing ||
+        PlayerService.isPlaying ||
         playerState.processingState != ProcessingState.idle ||
-        PlayerService.player.currentIndex != null ||
-        (PlayerService.player.duration?.inMilliseconds ?? 0) > 0;
+        PlayerService.playerCurrentIndex != null ||
+        (PlayerService.duration?.inMilliseconds ?? 0) > 0;
 
     if (!force && (hasSong || !hasActiveSession)) return;
 
@@ -365,10 +379,10 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   void _syncRuntimeSnapshot({bool notify = true}) {
-    _isPlaying = PlayerService.player.playing;
-    _position = PlayerService.player.position;
-    _bufferedPosition = PlayerService.player.bufferedPosition;
-    final dur = PlayerService.player.duration;
+    _isPlaying = PlayerService.isPlaying;
+    _position = PlayerService.position;
+    _bufferedPosition = PlayerService.bufferedPosition;
+    final dur = PlayerService.duration;
     if (dur != null && dur > Duration.zero) {
       _duration = dur;
     } else {
@@ -379,7 +393,7 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
         _duration = Duration.zero;
       }
     }
-    final state = PlayerService.player.playerState.processingState;
+    final state = PlayerService.processingState;
     _isBuffering =
         state == ProcessingState.buffering || state == ProcessingState.loading;
     _isQualitySwitching = PlayerService.isQualitySwitching;
@@ -428,7 +442,7 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
       // Keep playback state stable after final seek position is applied.
       await PlayerService.endSeekGesture();
       // Refresh to actual player position when drag ends.
-      _position = PlayerService.player.position;
+      _position = PlayerService.position;
       notifyListeners();
     }
   }
@@ -481,6 +495,9 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
       _isOffline = status == ConnectionStatus.disconnected;
       if (wasOffline != _isOffline) {
         notifyListeners();
+        if (wasOffline && !_isOffline) {
+          reconnectListeners();
+        }
       }
     }));
   }

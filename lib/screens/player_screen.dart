@@ -42,7 +42,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   final ValueNotifier<Duration> _positionNotifier = ValueNotifier<Duration>(Duration.zero);
   final ValueNotifier<int> _activeLyricIndexNotifier = ValueNotifier<int>(-1);
 
-  static const double _lyricLineExtent = 58.0;
+  static const double _lyricLineExtent = 46.0;
 
   String _formatDuration(Duration d) {
     final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
@@ -1626,35 +1626,52 @@ class LyricLineWidget extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final double targetOpacity = isActive ? 1.0 : 0.42;
-    final double targetScale = isActive ? 1.06 : 1.0;
+    final double targetOpacity = isActive
+        ? 1.0
+        : isPast
+            ? 0.38
+            : distance == 1
+                ? 0.88
+                : distance == 2
+                    ? 0.74
+                    : 0.58;
+
+    final double targetScale = isActive ? 1.12 : 1.0;
+    final Offset targetOffset = isActive ? const Offset(0, -0.05) : Offset.zero;
 
     return GestureDetector(
       onTap: onTap,
       behavior: HitTestBehavior.opaque,
-      child: AnimatedOpacity(
-        duration: const Duration(milliseconds: 180),
+      child: AnimatedSlide(
+        offset: targetOffset,
+        duration: const Duration(milliseconds: 150),
         curve: Curves.easeOut,
-        opacity: targetOpacity,
-        child: Align(
-          alignment: Alignment.centerLeft,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 24),
-            child: AnimatedScale(
-              scale: targetScale,
-              alignment: Alignment.centerLeft,
-              duration: const Duration(milliseconds: 180),
-              curve: Curves.easeOut,
-              child: Text(
-                text,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                textAlign: TextAlign.left,
-                style: TextStyle(
-                  color: isActive ? Colors.white : Colors.white70,
-                  fontWeight: FontWeight.w800,
-                  fontSize: isActive ? 20 : 17,
-                  height: 1.3,
+        child: AnimatedOpacity(
+          duration: const Duration(milliseconds: 150),
+          curve: Curves.easeOut,
+          opacity: targetOpacity,
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 24),
+              child: AnimatedScale(
+                scale: targetScale,
+                duration: const Duration(milliseconds: 150),
+                curve: Curves.easeOut,
+                child: Text(
+                  text,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: isActive
+                        ? AppTheme.textPrimary
+                        : isPast
+                            ? AppTheme.textMuted.withValues(alpha: 0.95)
+                            : Colors.white.withValues(alpha: 0.82),
+                    fontWeight: isActive ? FontWeight.w800 : FontWeight.w500,
+                    fontSize: isActive ? 18 : 15,
+                    height: 1.2,
+                  ),
                 ),
               ),
             ),

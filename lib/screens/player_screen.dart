@@ -785,9 +785,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
               child: _buildAlbumArt(song),
             ),
 
+            const SizedBox(height: 32),
+
             // Song Info
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 40),
+              padding: const EdgeInsets.symmetric(horizontal: 24),
               child: Column(
                 children: [
                   Text(
@@ -801,7 +803,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                   ),
-                  const SizedBox(height: 6),
+                  const SizedBox(height: 8),
                   Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     mainAxisSize: MainAxisSize.min,
@@ -902,11 +904,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
               ),
             ),
 
-            const SizedBox(height: 24),
+            const SizedBox(height: 28),
 
             // Progress Bar (using localized ValueListenableBuilder for progress updates)
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 32),
+              padding: const EdgeInsets.symmetric(horizontal: 24),
               child: Column(
                 children: [
                   ValueListenableBuilder<double?>(
@@ -939,164 +941,174 @@ class _PlayerScreenState extends State<PlayerScreen> {
                       );
                     },
                   ),
-                  Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 16,
+                  const SizedBox(height: 10),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      ValueListenableBuilder<double?>(
+                        valueListenable: _scrubNotifier,
+                        builder: (context, scrubValue, _) {
+                          return ValueListenableBuilder<Duration>(
+                            valueListenable: _positionNotifier,
+                            builder: (context, currentPosition, _) {
+                              final visualPosition = scrubValue != null
+                                  ? Duration(milliseconds: (scrubValue * 1000).round())
+                                  : currentPosition;
+                              return Text(
+                                _formatDuration(visualPosition),
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  color: AppTheme.textMuted,
+                                ),
+                              );
+                            },
+                          );
+                        },
+                      ),
+                      Text(
+                        (isLoadingNew && player.duration == Duration.zero)
+                            ? '--:--'
+                            : _formatDuration(player.duration),
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: AppTheme.textMuted,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+
+            const SizedBox(height: 28),
+
+            // Controls Row (24px horizontal padding, equal expanded width, same baseline, same 28px size)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 24),
+              child: Row(
+                children: [
+                  // Shuffle button
+                  Expanded(
+                    child: Center(
+                      child: IconButton(
+                        iconSize: 28,
+                        icon: Icon(
+                          Icons.shuffle_rounded,
+                          color: player.shuffleModeEnabled
+                              ? AppTheme.accentPurple
+                              : Colors.white54,
+                        ),
+                        onPressed: () => player.toggleShuffleMode(),
+                      ),
                     ),
-                    child: Row(
-                      mainAxisAlignment:
-                          MainAxisAlignment.spaceBetween,
-                      children: [
-                        ValueListenableBuilder<double?>(
-                          valueListenable: _scrubNotifier,
-                          builder: (context, scrubValue, _) {
-                            return ValueListenableBuilder<Duration>(
-                              valueListenable: _positionNotifier,
-                              builder: (context, currentPosition, _) {
-                                final visualPosition = scrubValue != null
-                                    ? Duration(milliseconds: (scrubValue * 1000).round())
-                                    : currentPosition;
-                                return Text(
-                                  _formatDuration(visualPosition),
-                                  style: const TextStyle(
-                                    fontSize: 12,
-                                    color: AppTheme.textMuted,
-                                  ),
-                                );
-                              },
-                            );
-                          },
+                  ),
+                  // Previous button
+                  Expanded(
+                    child: Center(
+                      child: IconButton(
+                        iconSize: 28,
+                        icon: const Icon(
+                          Icons.skip_previous_rounded,
+                          color: AppTheme.textPrimary,
                         ),
-                        Text(
-                          (isLoadingNew && player.duration == Duration.zero)
-                              ? '--:--'
-                              : _formatDuration(player.duration),
-                          style: const TextStyle(
-                            fontSize: 12,
-                            color: AppTheme.textMuted,
-                          ),
+                        onPressed: () => player.skipPrevious(),
+                      ),
+                    ),
+                  ),
+                  // Play/Pause button
+                  Expanded(
+                    child: Center(
+                      child: IconButton(
+                        iconSize: 32, // Play/Pause slightly larger for hierarchy
+                        icon: Icon(
+                          player.isPlaying
+                              ? Icons.pause_rounded
+                              : Icons.play_arrow_rounded,
+                          color: AppTheme.textPrimary,
                         ),
-                      ],
+                        onPressed: () => player.togglePlayPause(),
+                      ),
+                    ),
+                  ),
+                  // Next button
+                  Expanded(
+                    child: Center(
+                      child: IconButton(
+                        iconSize: 28,
+                        icon: const Icon(
+                          Icons.skip_next_rounded,
+                          color: AppTheme.textPrimary,
+                        ),
+                        onPressed: player.canSkipNext
+                            ? () => player.skipNext()
+                            : null,
+                      ),
+                    ),
+                  ),
+                  // Repeat button
+                  Expanded(
+                    child: Center(
+                      child: IconButton(
+                        iconSize: 28,
+                        icon: Icon(
+                          player.loopMode == LoopMode.one
+                              ? Icons.repeat_one_rounded
+                              : Icons.repeat_rounded,
+                          color: player.loopMode == LoopMode.off
+                              ? Colors.white54
+                              : AppTheme.accentPurple,
+                        ),
+                        onPressed: () => player.toggleRepeatMode(),
+                      ),
+                    ),
+                  ),
+                  // Queue/Playlist Add button
+                  Expanded(
+                    child: Center(
+                      child: IconButton(
+                        iconSize: 28,
+                        icon: const Icon(
+                          Icons.playlist_add_rounded,
+                          color: AppTheme.textSecondary,
+                        ),
+                        onPressed: () => _showAddToPlaylistSheet(song),
+                      ),
+                    ),
+                  ),
+                  // Download button
+                  Expanded(
+                    child: Center(
+                      child: IconButton(
+                        iconSize: 28,
+                        icon: isDownloading
+                            ? SizedBox(
+                                width: 22,
+                                height: 22,
+                                child: CircularProgressIndicator(
+                                  value: downloads.progress[song.id],
+                                  strokeWidth: 2,
+                                  color: AppTheme.accentPurple,
+                                ),
+                              )
+                            : Icon(
+                                isDownloaded
+                                    ? Icons.download_done
+                                    : Icons.download_rounded,
+                                color: isDownloaded
+                                    ? Colors.green
+                                    : AppTheme.textSecondary,
+                              ),
+                        onPressed: isDownloaded || isDownloading
+                            ? null
+                            : () => downloads.download(song),
+                      ),
                     ),
                   ),
                 ],
               ),
             ),
 
-            const SizedBox(height: 8),
-
-            // Controls
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                // Shuffle button
-                IconButton(
-                  icon: Icon(
-                    Icons.shuffle_rounded,
-                    color: player.shuffleModeEnabled
-                        ? AppTheme.accentPurple
-                        : Colors.white54,
-                  ),
-                  onPressed: () => player.toggleShuffleMode(),
-                ),
-                const SizedBox(width: 4),
-                IconButton(
-                  iconSize: 40,
-                  icon: const Icon(
-                    Icons.skip_previous_rounded,
-                    color: AppTheme.textPrimary,
-                  ),
-                  onPressed: () => player.skipPrevious(),
-                ),
-                const SizedBox(width: 4),
-                Container(
-                  width: 70,
-                  height: 70,
-                  decoration: BoxDecoration(
-                    gradient: AppTheme.primaryGradient,
-                    shape: BoxShape.circle,
-                    boxShadow: [
-                      BoxShadow(
-                        color: AppTheme.accentPurple.withValues(
-                          alpha: 0.4,
-                        ),
-                        blurRadius: 20,
-                        spreadRadius: 2,
-                      ),
-                    ],
-                  ),
-                  child: IconButton(
-                    iconSize: 36,
-                    icon: Icon(
-                      player.isPlaying
-                          ? Icons.pause_rounded
-                          : Icons.play_arrow_rounded,
-                      color: Colors.white,
-                    ),
-                    onPressed: () => player.togglePlayPause(),
-                  ),
-                ),
-                const SizedBox(width: 4),
-                IconButton(
-                  iconSize: 40,
-                  icon: const Icon(
-                    Icons.skip_next_rounded,
-                    color: AppTheme.textPrimary,
-                  ),
-                  onPressed: player.canSkipNext
-                      ? () => player.skipNext()
-                      : null,
-                ),
-                const SizedBox(width: 4),
-                // Repeat button
-                IconButton(
-                  icon: Icon(
-                    player.loopMode == LoopMode.one
-                        ? Icons.repeat_one_rounded
-                        : Icons.repeat_rounded,
-                    color: player.loopMode == LoopMode.off
-                        ? Colors.white54
-                        : AppTheme.accentPurple,
-                  ),
-                  onPressed: () => player.toggleRepeatMode(),
-                ),
-                const SizedBox(width: 4),
-                IconButton(
-                  icon: const Icon(
-                    Icons.playlist_add_rounded,
-                    color: AppTheme.textSecondary,
-                  ),
-                  onPressed: () => _showAddToPlaylistSheet(song),
-                ),
-                const SizedBox(width: 4),
-                // Download button (moved next to playlist add button)
-                IconButton(
-                  icon: isDownloading
-                      ? SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: CircularProgressIndicator(
-                            value: downloads.progress[song.id],
-                            strokeWidth: 2,
-                            color: AppTheme.accentPurple,
-                          ),
-                        )
-                      : Icon(
-                          isDownloaded
-                              ? Icons.download_done
-                              : Icons.download_rounded,
-                          color: isDownloaded
-                              ? Colors.green
-                              : AppTheme.textSecondary,
-                        ),
-                  onPressed: isDownloaded || isDownloading
-                      ? null
-                      : () => downloads.download(song),
-                ),
-              ],
-            ),
-
-            const SizedBox(height: 8),
+            const SizedBox(height: 32),
 
             // Preview Lyrics Card
             _buildLyricsPreviewCard(song),
@@ -1188,8 +1200,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
     if (lyricsManager.state == LyricsLoadState.unavailable || lyricsManager.payload == null) {
       return Container(
-        margin: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
+        margin: const EdgeInsets.only(left: 24, right: 24, bottom: 24),
+        padding: const EdgeInsets.fromLTRB(24, 20, 24, 24),
         decoration: BoxDecoration(
           color: AppTheme.surfaceDark.withValues(alpha: 0.45),
           borderRadius: BorderRadius.circular(16),
@@ -1213,8 +1225,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
       final plain = _plainLyricsForCurrentMode();
       if (plain == null || plain.trim().isEmpty) {
         return Container(
-          margin: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
+          margin: const EdgeInsets.only(left: 24, right: 24, bottom: 24),
+          padding: const EdgeInsets.fromLTRB(24, 20, 24, 24),
           decoration: BoxDecoration(
             color: AppTheme.surfaceDark.withValues(alpha: 0.45),
             borderRadius: BorderRadius.circular(16),
@@ -1247,8 +1259,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
           });
         },
         child: Container(
-          margin: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
+          margin: const EdgeInsets.only(left: 24, right: 24, bottom: 24),
+          padding: const EdgeInsets.fromLTRB(24, 20, 24, 24),
           decoration: BoxDecoration(
             color: AppTheme.surfaceDark.withValues(alpha: 0.45),
             borderRadius: BorderRadius.circular(16),
@@ -1294,8 +1306,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
         });
       },
       child: Container(
-        margin: const EdgeInsets.fromLTRB(24, 8, 24, 16),
-        padding: const EdgeInsets.all(20),
+        margin: const EdgeInsets.only(left: 24, right: 24, bottom: 24),
+        padding: const EdgeInsets.fromLTRB(24, 20, 24, 24),
         decoration: BoxDecoration(
           gradient: LinearGradient(
             colors: [

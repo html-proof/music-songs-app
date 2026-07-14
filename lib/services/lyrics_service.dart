@@ -329,6 +329,8 @@ class LyricsService {
     final album = (song.sourceAlbumName ?? song.album ?? '').trim();
     final duration = song.duration ?? 0;
     final isrc = (song.isrc ?? '').trim();
+    final cleanTitle = _cleanTitle(title);
+    final cleanArtist = _cleanArtist(artist);
 
     StabilityLogger.info('Lyrics', 'Starting progressive layered search for: $title (ID: $songId)');
 
@@ -337,8 +339,6 @@ class LyricsService {
     _activeClient = client;
 
     try {
-      final cleanTitle = _cleanTitle(title);
-      final cleanArtist = _cleanArtist(artist);
       final primaryArtist = _getPrimaryArtist(artist);
       final cleanPrimaryArtist = _cleanArtist(primaryArtist);
       final cleanAlbum = _cleanTitle(album);
@@ -538,6 +538,17 @@ class LyricsService {
 
     } catch (e) {
       debugPrint('[LyricsService] Layered progressive search failed: $e');
+      _logDetailedLyricsFailure(
+        songId: songId,
+        title: title,
+        artist: artist,
+        album: album,
+        duration: duration,
+        cleanTitle: cleanTitle,
+        cleanArtist: cleanArtist,
+        isrc: isrc,
+        reason: 'Exception thrown during pipeline: $e',
+      );
     } finally {
       if (_activeClient == client) {
         _activeClient = null;
@@ -545,7 +556,44 @@ class LyricsService {
       client.close();
     }
 
+    _logDetailedLyricsFailure(
+      songId: songId,
+      title: title,
+      artist: artist,
+      album: album,
+      duration: duration,
+      cleanTitle: cleanTitle,
+      cleanArtist: cleanArtist,
+      isrc: isrc,
+      reason: 'All search stages exhausted with no verified matches.',
+    );
     return null;
+  }
+
+  static void _logDetailedLyricsFailure({
+    required String songId,
+    required String title,
+    required String artist,
+    required String album,
+    required int duration,
+    required String cleanTitle,
+    required String cleanArtist,
+    required String isrc,
+    required String reason,
+  }) {
+    StabilityLogger.warning('Lyrics',
+      '=== LYRICS RESOLUTION FAILURE ===\n'
+      'Song ID: $songId\n'
+      'Title: $title\n'
+      'Artist: $artist\n'
+      'Album: $album\n'
+      'Duration: ${duration}s\n'
+      'Normalized Title: $cleanTitle\n'
+      'Normalized Artist: $cleanArtist\n'
+      'ISRC: $isrc\n'
+      'Failure Reason: $reason\n'
+      '================================='
+    );
   }
 
   static String decodeHtmlEntities(String text) {
@@ -639,9 +687,14 @@ class LyricsService {
 
           // Try DuckDuckGo first
           try {
-            final searchResponse = await client.get(Uri.parse(ddgUrl), headers: {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            }).timeout(const Duration(seconds: 4));
+            final searchResponse = await _getWithRetry(
+              Uri.parse(ddgUrl),
+              headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+              },
+              client: client,
+              timeout: const Duration(seconds: 4),
+            );
 
             if (searchResponse.statusCode == 200) {
               final html = searchResponse.body;
@@ -669,9 +722,14 @@ class LyricsService {
             try {
               final googleUrl = 'https://www.google.com/search?q=$query';
               StabilityLogger.info('Lyrics', 'Scraping Google search fallback with query: $queryStr');
-              final googleResponse = await client.get(Uri.parse(googleUrl), headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-              }).timeout(const Duration(seconds: 4));
+              final googleResponse = await _getWithRetry(
+                Uri.parse(googleUrl),
+                headers: {
+                  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                },
+                client: client,
+                timeout: const Duration(seconds: 4),
+              );
 
               if (googleResponse.statusCode == 200) {
                 final html = googleResponse.body;
@@ -706,9 +764,14 @@ class LyricsService {
           for (final url in targetUrls) {
             try {
               StabilityLogger.info('Lyrics', 'Scraping target URL: $url');
-              final response = await client.get(Uri.parse(url), headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-              }).timeout(const Duration(seconds: 4));
+              final response = await _getWithRetry(
+                Uri.parse(url),
+                headers: {
+                  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                },
+                client: client,
+                timeout: const Duration(seconds: 4),
+              );
 
               if (response.statusCode != 200) continue;
 
@@ -768,17 +831,17 @@ class LyricsService {
       final slug = segments[1];
       final id = segments[2];
       final lyricsUrl = 'https://www.jiosaavn.com/lyrics/$slug-lyrics/$id';
-
-      final res = await clientToUse.get(
+      final res = await _getWithRetry(
         Uri.parse(lyricsUrl),
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
           'Accept-Language': 'en-US,en;q=0.9',
         },
-      ).timeout(const Duration(seconds: 4));
+        client: clientToUse,
+        timeout: const Duration(seconds: 4),
+      );
 
       if (res.statusCode != 200) return null;
-
       final html = res.body;
       final lyricsMatch = RegExp(
         r'<p class="u-margin-bottom-none[^"]*">(.*?)</p>',
@@ -993,6 +1056,35 @@ class LyricsService {
     return candidates;
   }
 
+  static Future<http.Response> _getWithRetry(
+    Uri uri, {
+    Map<String, String>? headers,
+    required http.Client client,
+    Duration timeout = const Duration(seconds: 4),
+    int maxRetries = 2,
+  }) async {
+    int attempt = 0;
+    while (true) {
+      attempt++;
+      try {
+        final res = await client.get(uri, headers: headers).timeout(timeout);
+        final status = res.statusCode;
+        if (status == 200 || status == 404 || status == 400 || status == 401 || status == 403) {
+          return res;
+        }
+        if (attempt >= maxRetries + 1) {
+          return res;
+        }
+      } catch (e) {
+        if (attempt >= maxRetries + 1) {
+          rethrow;
+        }
+      }
+      final sleepMs = math.pow(2, attempt) * 200;
+      await Future.delayed(Duration(milliseconds: sleepMs.toInt()));
+    }
+  }
+
   static Future<Map<String, dynamic>?> _lrclibGetEntry({
     required String artist,
     required String title,
@@ -1015,12 +1107,12 @@ class LyricsService {
         '$_lrclibBaseUrl/get',
       ).replace(queryParameters: query);
 
-      final res = await clientToUse
-          .get(
-            uri,
-            headers: {'User-Agent': 'MusicHub/2.0 (https://github.com)'},
-          )
-          .timeout(_requestTimeout);
+      final res = await _getWithRetry(
+        uri,
+        headers: {'User-Agent': 'MusicHub/2.0 (https://github.com)'},
+        client: clientToUse,
+        timeout: _requestTimeout,
+      );
 
       if (res.statusCode != 200) return null;
       final decoded = jsonDecode(res.body);
@@ -1046,12 +1138,12 @@ class LyricsService {
         '$_lrclibBaseUrl/search',
       ).replace(queryParameters: {'q': query});
 
-      final res = await clientToUse
-          .get(
-            uri,
-            headers: {'User-Agent': 'MusicHub/2.0 (https://github.com)'},
-          )
-          .timeout(_requestTimeout);
+      final res = await _getWithRetry(
+        uri,
+        headers: {'User-Agent': 'MusicHub/2.0 (https://github.com)'},
+        client: clientToUse,
+        timeout: _requestTimeout,
+      );
 
       if (res.statusCode != 200) return const <Map<String, dynamic>>[];
       final decoded = jsonDecode(res.body);
@@ -1084,10 +1176,12 @@ class LyricsService {
     final clientToUse = client ?? ApiService.createSecureHttpClient(pinCertificates: false);
     try {
       final uri = Uri.parse('${ApiService.baseUrl}/api/songs/$trackId/lyrics');
-      final res = await clientToUse.get(
+      final res = await _getWithRetry(
         uri,
         headers: {'User-Agent': 'MusicHub/2.0'},
-      ).timeout(_requestTimeout);
+        client: clientToUse,
+        timeout: _requestTimeout,
+      );
 
       if (res.statusCode != 200) return null;
       final body = jsonDecode(res.body);

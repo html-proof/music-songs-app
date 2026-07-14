@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 import '../models/song.dart';
+import '../models/playback_state.dart';
 import 'lyrics_alignment_engine.dart';
 import 'lyrics_cache.dart';
 import 'lyrics_service.dart';
@@ -87,8 +88,7 @@ class LyricsManager extends ChangeNotifier {
 
 
   // ── Subscriptions ─────────────────────────────────────────
-  StreamSubscription<Song?>? _resolvingSongSub;
-  StreamSubscription<int?>? _currentIndexSub;
+  StreamSubscription<PlaybackState>? _playbackStateSub;
 
   StreamSubscription<ConnectivityEvent>? _connectivitySub;
 
@@ -97,26 +97,17 @@ class LyricsManager extends ChangeNotifier {
   }
 
   void _listenToPlayerService() {
-    // When a new song starts resolving (user tapped play), start search immediately
-    _resolvingSongSub = PlayerService.resolvingSongStream.listen((song) {
-      if (song != null) {
-        if (_currentSong?.id == song.id) {
-          return;
+    // Lock identity and search only after playback starts (Playback Ready -> Metadata Verified -> Duration Verified)
+    _playbackStateSub = PlayerService.playbackStateStream.listen((state) {
+      if (state == PlaybackState.ready || state == PlaybackState.playing || state == PlaybackState.paused) {
+        final song = PlayerService.currentSong;
+        if (song != null) {
+          if (_currentSong?.id == song.id) {
+            return;
+          }
+          _onSongChanging(song);
+          _scheduleFetch(song);
         }
-        _onSongChanging(song);
-        _scheduleFetch(song);
-      }
-    });
-
-    // When the queue index changes (skip next/prev, queue navigation)
-    _currentIndexSub = PlayerService.player.currentIndexStream.listen((_) {
-      final song = PlayerService.currentSong;
-      if (song != null) {
-        if (_currentSong?.id == song.id) {
-          return;
-        }
-        _onSongChanging(song);
-        _scheduleFetch(song);
       }
     });
   }
@@ -611,8 +602,7 @@ class LyricsManager extends ChangeNotifier {
 
   @override
   void dispose() {
-    _resolvingSongSub?.cancel();
-    _currentIndexSub?.cancel();
+    _playbackStateSub?.cancel();
     _connectivitySub?.cancel();
     _cancelTimers();
     super.dispose();

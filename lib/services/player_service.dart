@@ -1591,21 +1591,10 @@ class PlayerService {
       _networkDropGraceTimer?.cancel();
       _cachedNetworkSpeedMbps = null;
       _lastNetworkSpeedProbeAt = null;
-
-      final prefs = await _getOfflinePlaybackPreferences();
-      final offlinePlaybackEnabled = prefs['offlinePlaybackEnabled'] ?? true;
-      if (offlinePlaybackEnabled) {
-        await _handleNetworkDropDuringPlayback();
-      } else {
-        final wasPlaying = _player.playing;
-        if (wasPlaying) {
-          _pausedByNetworkLoss = true;
-          _userPausedOrStoppedPlayback = true;
-          await _player.pause();
-          _savePlaybackState();
-          _qualityAdjustmentMsgController.add('No internet. Playback paused.');
-        }
-      }
+      // Playback is buffer-first. We do NOT pause playback or trigger offline fallback
+      // immediately upon losing network. The player will continue playing already buffered
+      // audio. If and when the buffer is exhausted, ExoPlayer transitions to buffering,
+      // which will trigger the offline fallback or pause as needed.
       return;
     }
 
@@ -3559,6 +3548,19 @@ class PlayerService {
       return;
     }
     final normalized = position < Duration.zero ? Duration.zero : position;
+
+    // Buffer-first offline seek restriction: remote tracks cannot seek past buffered data offline.
+    final activeSong = _currentSong;
+    if (activeSong != null && !_isSongUsingLocalSource(activeSong) && !_isNetworkAvailable) {
+      final buffered = _player.bufferedPosition;
+      if (normalized > buffered) {
+        _showThrottledToast(
+          "This part of the song hasn't been buffered yet. Reconnect to continue.",
+          toastLength: Toast.LENGTH_LONG,
+        );
+        return;
+      }
+    }
 
     // Cancel any previous pending seek: only the latest drag position matters.
     _pendingSeekTimer?.cancel();
@@ -6184,8 +6186,10 @@ class CustomAudioPlayer extends AudioPlayer {
   CustomAudioPlayer() : super(
     audioLoadConfiguration: const AudioLoadConfiguration(
       androidLoadControl: AndroidLoadControl(
-        minBufferDuration: Duration(seconds: 15),
-        maxBufferDuration: Duration(seconds: 30),
+        minBufferDuration: Duration(seconds: 20),
+        maxBufferDuration: Duration(seconds: 90),
+        bufferForPlaybackDuration: Duration(seconds: 3),
+        bufferForPlaybackAfterRebufferDuration: Duration(seconds: 6),
         backBufferDuration: Duration(seconds: 10),
       ),
     ),

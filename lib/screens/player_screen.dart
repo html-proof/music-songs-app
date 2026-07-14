@@ -3,7 +3,6 @@ import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:just_audio/just_audio.dart';
 import '../models/album.dart';
 import '../models/song.dart';
 import '../providers/download_provider.dart';
@@ -982,26 +981,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
             const SizedBox(height: 28),
 
-            // Controls Row (24px horizontal padding, equal expanded width, same baseline, same 28px size)
+            // Controls Row — clean 5-button Spotify layout
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 24),
               child: Row(
                 children: [
-                  // Shuffle button
-                  Expanded(
-                    child: Center(
-                      child: IconButton(
-                        iconSize: 28,
-                        icon: Icon(
-                          Icons.shuffle_rounded,
-                          color: player.shuffleModeEnabled
-                              ? AppTheme.accentPurple
-                              : Colors.white54,
-                        ),
-                        onPressed: () => player.toggleShuffleMode(),
-                      ),
-                    ),
-                  ),
                   // Previous button
                   Expanded(
                     child: Center(
@@ -1015,19 +999,30 @@ class _PlayerScreenState extends State<PlayerScreen> {
                       ),
                     ),
                   ),
-                  // Play/Pause button
-                  Expanded(
-                    child: Center(
-                      child: IconButton(
-                        iconSize: 32, // Play/Pause slightly larger for hierarchy
-                        icon: Icon(
-                          player.isPlaying
-                              ? Icons.pause_rounded
-                              : Icons.play_arrow_rounded,
-                          color: AppTheme.textPrimary,
+                  // Play/Pause button — large gradient circle
+                  Container(
+                    width: 68,
+                    height: 68,
+                    decoration: BoxDecoration(
+                      gradient: AppTheme.primaryGradient,
+                      shape: BoxShape.circle,
+                      boxShadow: [
+                        BoxShadow(
+                          color: AppTheme.accentPurple.withValues(alpha: 0.4),
+                          blurRadius: 20,
+                          spreadRadius: 2,
                         ),
-                        onPressed: () => player.togglePlayPause(),
+                      ],
+                    ),
+                    child: IconButton(
+                      iconSize: 36,
+                      icon: Icon(
+                        player.isPlaying
+                            ? Icons.pause_rounded
+                            : Icons.play_arrow_rounded,
+                        color: Colors.white,
                       ),
+                      onPressed: () => player.togglePlayPause(),
                     ),
                   ),
                   // Next button
@@ -1045,24 +1040,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                       ),
                     ),
                   ),
-                  // Repeat button
-                  Expanded(
-                    child: Center(
-                      child: IconButton(
-                        iconSize: 28,
-                        icon: Icon(
-                          player.loopMode == LoopMode.one
-                              ? Icons.repeat_one_rounded
-                              : Icons.repeat_rounded,
-                          color: player.loopMode == LoopMode.off
-                              ? Colors.white54
-                              : AppTheme.accentPurple,
-                        ),
-                        onPressed: () => player.toggleRepeatMode(),
-                      ),
-                    ),
-                  ),
-                  // Queue/Playlist Add button
+                  // Queue / Playlist Add button
                   Expanded(
                     child: Center(
                       child: IconButton(

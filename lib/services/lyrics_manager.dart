@@ -105,6 +105,20 @@ class LyricsManager extends ChangeNotifier {
         }
         _onSongChanging(song);
         _scheduleFetch(song);
+      } else {
+        // Resolving finished (playable song is loaded in PlayerService)
+        final resolvedSong = PlayerService.currentSong;
+        if (resolvedSong != null && _currentSong?.id == resolvedSong.id) {
+          final wasUnresolved = _currentSong?.duration == null || _currentSong?.duration == 0;
+          final isResolved = resolvedSong.duration != null && resolvedSong.duration! > 0;
+          
+          if (wasUnresolved && isResolved && _state != LyricsLoadState.ready) {
+            debugPrint('[LyricsManager] Song resolved! Upgrading lyrics search with complete metadata.');
+            _generation++; // Invalidate pending unresolved fetch tasks
+            _currentSong = resolvedSong;
+            _scheduleFetch(resolvedSong);
+          }
+        }
       }
     });
 
@@ -215,6 +229,18 @@ class LyricsManager extends ChangeNotifier {
     final isSameSong = _currentSong?.id == song.id;
 
     if (isSameSong && !forceRetry) {
+      final wasUnresolved = _currentSong?.duration == null || _currentSong?.duration == 0;
+      final isResolved = song.duration != null && song.duration! > 0;
+
+      // If the song is now resolved and we haven't successfully loaded lyrics, upgrade search!
+      if (wasUnresolved && isResolved && _state != LyricsLoadState.ready) {
+        debugPrint('[LyricsManager] requestLyrics: Upgrading lyrics search to resolved metadata.');
+        _generation++; // Invalidate pending unresolved fetch tasks
+        _currentSong = song;
+        _scheduleFetch(song);
+        return;
+      }
+
       // Already loading, ready, or exhausted for this song — no-op
       if (_state == LyricsLoadState.ready ||
           _state == LyricsLoadState.searching ||

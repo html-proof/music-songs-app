@@ -634,10 +634,10 @@ class LyricsService {
       }
     });
 
-    // Time budget: hard timeout of 1800 ms
-    final timeoutFuture = Future.delayed(const Duration(milliseconds: 1800)).then((_) {
+    // Time budget: hard timeout of 5000 ms
+    final timeoutFuture = Future.delayed(const Duration(milliseconds: 5000)).then((_) {
       if (!completer.isCompleted) {
-        completer.complete(null);
+        completer.completeError(TimeoutException('Lyrics progressive search timed out after 5s'));
       }
     });
 

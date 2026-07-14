@@ -866,39 +866,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
                       ),
                     ],
                   ),
-                  AnimatedSwitcher(
-                    duration: const Duration(milliseconds: 180),
-                    child: (isLoadingNew && !player.isOffline)
-                        ? const Padding(
-                            key: ValueKey('player-buffering'),
-                            padding: EdgeInsets.only(top: 8),
-                            child: Row(
-                              mainAxisAlignment:
-                                  MainAxisAlignment.center,
-                              children: [
-                                SizedBox(
-                                  width: 14,
-                                  height: 14,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                    color: AppTheme.accentPurple,
-                                  ),
-                                ),
-                                SizedBox(width: 8),
-                                Text(
-                                  'Loading...',
-                                  style: TextStyle(
-                                    color: AppTheme.textSecondary,
-                                    fontSize: 12,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          )
-                        : const SizedBox(
-                            key: ValueKey('player-status-idle'),
-                          ),
-                  ),
                 ],
               ),
             ),
@@ -964,6 +931,26 @@ class _PlayerScreenState extends State<PlayerScreen> {
                           );
                         },
                       ),
+                      if (player.isLoadingNewSong)
+                        const Text(
+                          'Loading...',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: AppTheme.accentPurple,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        )
+                      else if (player.isBuffering)
+                        const Text(
+                          'Buffering...',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: AppTheme.accentPurple,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        )
+                      else
+                        const SizedBox(),
                       Text(
                         (isLoadingNew && player.duration == Duration.zero)
                             ? '--:--'

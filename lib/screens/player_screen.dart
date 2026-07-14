@@ -966,128 +966,122 @@ class _PlayerScreenState extends State<PlayerScreen> {
               ),
             ),
 
-            const SizedBox(height: 28),
+            const SizedBox(height: 20),
 
-            // Controls Row — Stacked Spotify/Apple Music layout with perfect centering
+            // Playback Controls Row (centered: Previous, Play/Pause, Next)
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 24),
-              child: Stack(
-                alignment: Alignment.center,
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  // Background row: Shuffle (left), Queue & Download (right)
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      // Shuffle button
-                      IconButton(
-                        iconSize: 28,
-                        icon: Icon(
-                          Icons.shuffle_rounded,
-                          color: player.shuffleModeEnabled
-                              ? AppTheme.accentPurple
-                              : Colors.white54,
-                        ),
-                        onPressed: () => player.toggleShuffleMode(),
-                      ),
-                      // Right side actions
-                      Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          IconButton(
-                            iconSize: 28,
-                            icon: const Icon(
-                              Icons.playlist_add_rounded,
-                              color: AppTheme.textSecondary,
-                            ),
-                            onPressed: () => _showAddToPlaylistSheet(song),
-                          ),
-                          const SizedBox(width: 20),
-                          IconButton(
-                            iconSize: 28,
-                            icon: isDownloading
-                                ? SizedBox(
-                                    width: 22,
-                                    height: 22,
-                                    child: CircularProgressIndicator(
-                                      value: downloads.progress[song.id],
-                                      strokeWidth: 2,
-                                      color: AppTheme.accentPurple,
-                                    ),
-                                  )
-                                : Icon(
-                                    isDownloaded
-                                        ? Icons.download_done
-                                        : Icons.download_rounded,
-                                    color: isDownloaded
-                                        ? Colors.green
-                                        : AppTheme.textSecondary,
-                                  ),
-                            onPressed: isDownloaded || isDownloading
-                                ? null
-                                : () => downloads.download(song),
-                          ),
-                        ],
-                      ),
-                    ],
+                  IconButton(
+                    iconSize: 28,
+                    icon: const Icon(
+                      Icons.skip_previous_rounded,
+                      color: AppTheme.textPrimary,
+                    ),
+                    onPressed: () => player.skipPrevious(),
                   ),
-
-                  // Foreground row: Center playback controls (Previous, Play/Pause, Next)
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      IconButton(
-                        iconSize: 28,
-                        icon: const Icon(
-                          Icons.skip_previous_rounded,
-                          color: AppTheme.textPrimary,
+                  const SizedBox(width: 32),
+                  // Play/Pause button — large gradient circle
+                  Container(
+                    width: 68,
+                    height: 68,
+                    decoration: BoxDecoration(
+                      gradient: AppTheme.primaryGradient,
+                      shape: BoxShape.circle,
+                      boxShadow: [
+                        BoxShadow(
+                          color: AppTheme.accentPurple.withValues(alpha: 0.4),
+                          blurRadius: 20,
+                          spreadRadius: 2,
                         ),
-                        onPressed: () => player.skipPrevious(),
+                      ],
+                    ),
+                    child: IconButton(
+                      iconSize: 36,
+                      icon: Icon(
+                        player.isPlaying
+                            ? Icons.pause_rounded
+                            : Icons.play_arrow_rounded,
+                        color: Colors.white,
                       ),
-                      const SizedBox(width: 28),
-                      // Play/Pause button — large gradient circle
-                      Container(
-                        width: 68,
-                        height: 68,
-                        decoration: BoxDecoration(
-                          gradient: AppTheme.primaryGradient,
-                          shape: BoxShape.circle,
-                          boxShadow: [
-                            BoxShadow(
-                              color: AppTheme.accentPurple.withValues(alpha: 0.4),
-                              blurRadius: 20,
-                              spreadRadius: 2,
-                            ),
-                          ],
-                        ),
-                        child: IconButton(
-                          iconSize: 36,
-                          icon: Icon(
-                            player.isPlaying
-                                ? Icons.pause_rounded
-                                : Icons.play_arrow_rounded,
-                            color: Colors.white,
-                          ),
-                          onPressed: () => player.togglePlayPause(),
-                        ),
-                      ),
-                      const SizedBox(width: 28),
-                      IconButton(
-                        iconSize: 28,
-                        icon: const Icon(
-                          Icons.skip_next_rounded,
-                          color: AppTheme.textPrimary,
-                        ),
-                        onPressed: player.canSkipNext
-                            ? () => player.skipNext()
-                            : null,
-                      ),
-                    ],
+                      onPressed: () => player.togglePlayPause(),
+                    ),
+                  ),
+                  const SizedBox(width: 32),
+                  IconButton(
+                    iconSize: 28,
+                    icon: const Icon(
+                      Icons.skip_next_rounded,
+                      color: AppTheme.textPrimary,
+                    ),
+                    onPressed: player.canSkipNext
+                        ? () => player.skipNext()
+                        : null,
                   ),
                 ],
               ),
             ),
 
-            const SizedBox(height: 32),
+            const SizedBox(height: 20),
+
+            // Secondary Actions Row (Shuffle, Queue/Playlist Add, Download)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 24),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  // Shuffle button
+                  IconButton(
+                    iconSize: 28,
+                    icon: Icon(
+                      Icons.shuffle_rounded,
+                      color: player.shuffleModeEnabled
+                          ? AppTheme.accentPurple
+                          : Colors.white54,
+                    ),
+                    onPressed: () => player.toggleShuffleMode(),
+                  ),
+                  // Playlist Add (centered)
+                  IconButton(
+                    iconSize: 28,
+                    icon: const Icon(
+                      Icons.playlist_add_rounded,
+                      color: AppTheme.textSecondary,
+                    ),
+                    onPressed: () => _showAddToPlaylistSheet(song),
+                  ),
+                  // Download button
+                  IconButton(
+                    iconSize: 28,
+                    icon: isDownloading
+                        ? SizedBox(
+                            width: 22,
+                            height: 22,
+                            child: CircularProgressIndicator(
+                              value: downloads.progress[song.id],
+                              strokeWidth: 2,
+                              color: AppTheme.accentPurple,
+                            ),
+                          )
+                        : Icon(
+                            isDownloaded
+                                ? Icons.download_done
+                                : Icons.download_rounded,
+                            color: isDownloaded
+                                ? Colors.green
+                                : AppTheme.textSecondary,
+                          ),
+                    onPressed: isDownloaded || isDownloading
+                        ? null
+                        : () => downloads.download(song),
+                  ),
+                ],
+              ),
+            ),
+
+            const SizedBox(height: 24),
 
             // Preview Lyrics Card
             _buildLyricsPreviewCard(song),

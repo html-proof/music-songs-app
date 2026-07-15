@@ -4376,7 +4376,6 @@ class PlayerService {
           final replacementSource =
               resolvedTargets[normalizedIndex].audioSource;
           await _player.insertAudioSource(normalizedIndex, replacementSource);
-          await _player.removeAudioSourceAt(normalizedIndex + 1);
           try {
             await _player.seek(position, index: normalizedIndex).timeout(const Duration(seconds: 4));
             // Wait for player to be ready before returning, so `play()` works correctly.
@@ -4386,6 +4385,7 @@ class PlayerService {
           } catch (e) {
             debugPrint('Replace Source Seek Error: $e');
           }
+          await _player.removeAudioSourceAt(normalizedIndex + 1);
           return;
         }
 
@@ -4404,12 +4404,16 @@ class PlayerService {
       await _runSerializedSourceMutation(() async {
         final replacementSource = resolvedTargets[normalizedIndex].audioSource;
         await _player.insertAudioSource(0, replacementSource);
-        await _player.removeAudioSourceAt(1);
         try {
           await _player.seek(position, index: 0).timeout(const Duration(seconds: 4));
+          // Wait for player to be ready before returning, so `play()` works correctly.
+          await _player.processingStateStream.firstWhere(
+            (state) => state == ProcessingState.ready || state == ProcessingState.idle,
+          ).timeout(const Duration(seconds: 4));
         } catch (e) {
           debugPrint('Replace Single Source Seek Error: $e');
         }
+        await _player.removeAudioSourceAt(1);
       });
       _updateTrackedPlaybackSourceKeys(resolvedTargets);
       return;

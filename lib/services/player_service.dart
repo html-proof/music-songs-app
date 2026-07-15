@@ -3370,7 +3370,23 @@ class PlayerService {
     final localClient = client ?? ApiService.createSecureHttpClient(pinCertificates: false);
     try {
       debugPrint('Parallel searches initiated for variants: $queries');
-      final searchFutures = queries.map((query) => _searchSongsWithClient(query, localClient));
+      final searchFutures = queries.map((query) => _searchSongsWithClient(query, localClient)).toList();
+      
+      if (song.albumId != null && song.albumId!.trim().isNotEmpty) {
+        searchFutures.add(() async {
+          try {
+            final albumDetails = await ApiService.getAlbums(id: song.albumId!.trim());
+            final songs = albumDetails['data']?['songs'];
+            if (songs is List) {
+              return songs.whereType<Map>().map((m) => Map<String, dynamic>.from(m)).toList();
+            }
+          } catch (e) {
+            debugPrint('Fallback album fetch error: $e');
+          }
+          return [];
+        }());
+      }
+
       final allResults = await Future.wait(searchFutures);
       
       if (_isSessionStale(requestId, song.id)) return null;
@@ -6093,14 +6109,23 @@ class PlayerService {
     final cAlbum = (candidate.album ?? '').toLowerCase();
     final tAlbum = (target.album ?? '').toLowerCase();
 
-    // 1. Title Match
+    // 1. Title Match (Highest priority)
     if (cName == tName) {
-      score += 50;
+      score += 100;
     } else if (cName.contains(tName) || tName.contains(cName)) {
-      score += 30;
+      score += 60;
     }
 
-    // 2. Artist Match
+    // 2. Album Match (Second priority)
+    if (tAlbum.isNotEmpty && cAlbum.isNotEmpty) {
+      if (cAlbum == tAlbum) {
+        score += 50;
+      } else if (cAlbum.contains(tAlbum) || tAlbum.contains(cAlbum)) {
+        score += 30;
+      }
+    }
+
+    // 3. Artist Match (Third priority)
     if (tArtist.isNotEmpty) {
       final tArtists = tArtist.split(',').map((e) => e.trim()).toList();
       final cArtists = cArtist.split(',').map((e) => e.trim()).toList();
@@ -6113,15 +6138,6 @@ class PlayerService {
       }
       if (match) {
         score += 30;
-      }
-    }
-
-    // 3. Album Match
-    if (tAlbum.isNotEmpty && cAlbum.isNotEmpty) {
-      if (cAlbum == tAlbum) {
-        score += 20;
-      } else if (cAlbum.contains(tAlbum) || tAlbum.contains(cAlbum)) {
-        score += 10;
       }
     }
 

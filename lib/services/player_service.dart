@@ -3343,6 +3343,11 @@ class PlayerService {
       if (cleanTitle.isNotEmpty) cleanTitle, // Clean Title
       if (cleanTitleNoFeat.isNotEmpty) cleanTitleNoFeat, // Title without feat.
       if (cleanTitleNoBrackets.isNotEmpty) cleanTitleNoBrackets, // Title without brackets
+      
+      // Advanced Combinations
+      if (cleanTitle.isNotEmpty && artistQuery.isNotEmpty) '$cleanTitle $artistQuery',
+      if (cleanTitle.isNotEmpty && movieQuery != null && movieQuery.isNotEmpty) '$cleanTitle $movieQuery',
+      if (cleanTitle.isNotEmpty && movieQuery != null && movieQuery.isNotEmpty && artistQuery.isNotEmpty) '$cleanTitle $movieQuery $artistQuery',
     ];
 
     // Normalize and de-duplicate queries

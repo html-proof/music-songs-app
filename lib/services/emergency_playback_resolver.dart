@@ -144,6 +144,16 @@ class EmergencyPlaybackResolver {
 
     String album = (song.album ?? '').trim();
 
+    String? movieQuery;
+    final movieMatch = RegExp(r'(?:\([Ff]rom\s+([^)]+)\)|\[[Ff]rom\s+([^\]]+)\])').firstMatch(name);
+    if (movieMatch != null) {
+      final rawMovie = (movieMatch.group(1) ?? movieMatch.group(2))?.trim() ?? '';
+      var cleanMovie = rawMovie;
+      if (cleanMovie.startsWith('"') || cleanMovie.startsWith("'")) cleanMovie = cleanMovie.substring(1);
+      if (cleanMovie.endsWith('"') || cleanMovie.endsWith("'")) cleanMovie = cleanMovie.substring(0, cleanMovie.length - 1);
+      movieQuery = cleanMovie.trim();
+    }
+
     // 1. Title
     if (name.isNotEmpty) queries.add(name);
     // 2. Artist
@@ -152,11 +162,17 @@ class EmergencyPlaybackResolver {
     if (album.isNotEmpty) queries.add(album);
     // 4. Title + Artist
     if (cleanName.isNotEmpty && artist.isNotEmpty) queries.add('$cleanName $artist');
-    // 5. Title + Album (or Movie)
+    // 5. Title + Album
     if (cleanName.isNotEmpty && album.isNotEmpty) queries.add('$cleanName $album');
-    // 6. Cleaned Title
+    // 6. Title + Movie
+    if (cleanName.isNotEmpty && movieQuery != null && movieQuery.isNotEmpty) {
+      queries.add('$cleanName $movieQuery');
+      // 7. Title + Movie + Artist
+      if (artist.isNotEmpty) queries.add('$cleanName $movieQuery $artist');
+    }
+    // 8. Cleaned Title
     if (cleanName.isNotEmpty && cleanName != name) queries.add(cleanName);
-    // 7. Short Title
+    // 9. Short Title
     if (shortName.isNotEmpty && shortName != cleanName) queries.add(shortName);
 
     return queries;

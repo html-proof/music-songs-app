@@ -254,6 +254,7 @@ class PlayerService {
   static Timer? _watchdogTimer;
   static int _frozenCounter = 0;
   static Duration _lastWatchdogPosition = Duration.zero;
+  static Duration? _offlineSeekPosition;
 
   static bool get isPlaying => _player.playing;
   static Duration get position => _player.position;
@@ -1826,7 +1827,9 @@ class PlayerService {
 
         final current = _currentSong;
         if (current != null && !_isSongUsingLocalSource(current)) {
-          final lastPosition = _player.position;
+          final lastPosition = _offlineSeekPosition ?? _player.position;
+          _offlineSeekPosition = null; // Clear it after reading
+
           final String? currentRequestId = PlaybackCoordinator.currentRequestId;
           final resolved = await _resolveSongForPlayback(current, forceRefresh: true, requestId: currentRequestId);
 
@@ -2486,6 +2489,7 @@ class PlayerService {
       );
 
       try {
+        final lastPosition = _lastKnownPosition > Duration.zero ? _lastKnownPosition : _player.position;
         await _player.pause(); // Spotify-like: pause, do not stop
         await Future.delayed(Duration(seconds: delaySeconds));
 
@@ -2509,7 +2513,7 @@ class PlayerService {
           _rateLimitRetryCount,
         );
 
-        final retryInitialPos = Duration.zero; // Always start retry songs at 0:00
+        final retryInitialPos = lastPosition; // Preserve user's position on error recovery
         await _replaceCurrentAudioSource(
           updatedSong: retrySong,
           index: _currentIndex,
@@ -2571,7 +2575,7 @@ class PlayerService {
       );
 
       try {
-        final lastPosition = _player.position;
+        final lastPosition = _lastKnownPosition > Duration.zero ? _lastKnownPosition : _player.position;
         final shouldAutoPlayAfterRetry = true;
         await _player.pause(); // Spotify-like: pause, do not stop
 
@@ -3774,6 +3778,7 @@ class PlayerService {
     if (activeSong != null && !_isSongUsingLocalSource(activeSong) && !_isNetworkAvailable) {
       final buffered = _player.bufferedPosition;
       if (normalized > buffered) {
+        _offlineSeekPosition = normalized; // Store intended position
         _showThrottledToast(
           "This part of the song hasn't been buffered yet. Reconnect to continue.",
           toastLength: Toast.LENGTH_LONG,
@@ -3788,7 +3793,7 @@ class PlayerService {
     Future<void> applySeek() async {
       try {
         final wasPlaying = _player.playing;
-        await _player.seek(normalized);
+        await _player.seek(normalized).timeout(const Duration(seconds: 4));
         if (_externalSeeking &&
             _wasPlayingBeforeSeek &&
             !_player.playing &&
@@ -4343,22 +4348,14 @@ class PlayerService {
         if (activeIndex == normalizedIndex && _player.audioSource != null) {
           final replacementSource =
               resolvedTargets[normalizedIndex].audioSource;
-          var inserted = false;
+          await _player.insertAudioSource(normalizedIndex, replacementSource);
+          await _player.removeAudioSourceAt(normalizedIndex + 1);
           try {
-            await _player.insertAudioSource(normalizedIndex, replacementSource);
-            inserted = true;
-            await _player.seek(position, index: normalizedIndex);
-            await _player.removeAudioSourceAt(normalizedIndex + 1);
-            return;
-          } catch (_) {
-            if (inserted) {
-              try {
-                await _player.removeAudioSourceAt(normalizedIndex);
-              } catch (_) {
-                // Fall back to rebuilding the queue below.
-              }
-            }
+            await _player.seek(position, index: normalizedIndex).timeout(const Duration(seconds: 4));
+          } catch (e) {
+            debugPrint('Replace Source Seek Error: $e');
           }
+          return;
         }
 
         await _player.setAudioSources(
@@ -4374,10 +4371,14 @@ class PlayerService {
     // If it's a single-song queue, we just set the audio source directly.
     if (_queue.length == 1) {
       await _runSerializedSourceMutation(() async {
-        await _player.setAudioSource(
-          resolvedTargets[normalizedIndex].audioSource,
-          initialPosition: position,
-        );
+        final replacementSource = resolvedTargets[normalizedIndex].audioSource;
+        await _player.insertAudioSource(0, replacementSource);
+        await _player.removeAudioSourceAt(1);
+        try {
+          await _player.seek(position, index: 0).timeout(const Duration(seconds: 4));
+        } catch (e) {
+          debugPrint('Replace Single Source Seek Error: $e');
+        }
       });
       _updateTrackedPlaybackSourceKeys(resolvedTargets);
       return;
@@ -5333,7 +5334,7 @@ class PlayerService {
     // ─── Step 1: Try a seamless switch to a local file. ───────────────────
     // Capture state before any async work so snapshots are always fresh.
     final wasPlaying = _player.playing;
-    final lastPosition = _player.position;
+    final lastPosition = _lastKnownPosition > Duration.zero ? _lastKnownPosition : _player.position;
 
     var localPath = OfflineService.getLocalPath(song.id);
     localPath ??= await DownloadService.getLocalPath(song.id);
@@ -5468,7 +5469,7 @@ class PlayerService {
     final song = _currentSong;
     if (song == null) return false;
     // Capture position before async resolution so it doesn't drift.
-    final lastPosition = _player.position;
+    final lastPosition = _lastKnownPosition > Duration.zero ? _lastKnownPosition : _player.position;
 
     // Prefer offline cache.
     var localPath = OfflineService.getLocalPath(song.id);

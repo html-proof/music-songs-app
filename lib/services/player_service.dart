@@ -30,6 +30,7 @@ import 'session_state_service.dart';
 import 'verification_engine.dart';
 import 'background_learning_service.dart';
 import 'playback_coordinator.dart';
+import 'emergency_playback_resolver.dart';
 
 enum PlaybackResumeResult {
   resumed,
@@ -1846,6 +1847,9 @@ class PlayerService {
             if (_queue.isNotEmpty && _currentIndex >= 0 && _currentIndex < _queue.length) {
               _queue[_currentIndex] = resolved;
             }
+            
+            _reestablishPlayerSubscriptions();
+
             await _replaceCurrentAudioSource(
               updatedSong: resolved,
               index: _currentIndex,
@@ -3038,6 +3042,9 @@ class PlayerService {
     return bitrate;
   }
 
+  static Future<Song?> fetchSongDetailsForPlaybackWithClientPublic(Song song, http.Client client) =>
+      _fetchSongDetailsForPlaybackWithClient(song, client);
+
   static Future<Song?> _resolveSongForPlayback(Song song, {bool forceRefresh = false, String? requestId, http.Client? client}) async {
     if (_isSessionStale(requestId, song.id)) return null;
 
@@ -3266,6 +3273,12 @@ class PlayerService {
 
       final fallback = await _searchFallbackForSong(candidateSong, requestId: requestId, client: localClient);
       if (fallback != null) return fallback;
+
+      if (hasNetwork) {
+        final emergency = await EmergencyPlaybackResolver.resolve(candidateSong, client: localClient);
+        if (emergency != null) return emergency;
+      }
+
       return null;
     } finally {
       if (client == null) {
@@ -3714,7 +3727,11 @@ class PlayerService {
         !_pausedByAudioInterruption &&
         !_pausedByOutputDisconnect &&
         !_pausedByVideoPlayback &&
+        (!_pausedByNetworkLoss || _isNetworkAvailable) &&
         _player.processingState != ProcessingState.completed) {
+      if (_pausedByNetworkLoss && _isNetworkAvailable) {
+        _pausedByNetworkLoss = false;
+      }
       await _playEnsuringAudioFocus();
     }
     _wasPlayingBeforeSeek = false;
@@ -6116,11 +6133,15 @@ class PlayerService {
     _isNetworkConnected().then((hasNetwork) {
       if (!hasNetwork) return;
 
+      final indicesToPreload = <int>[];
+      if (currentIndex > 0) indicesToPreload.add(currentIndex - 1);
       for (int i = 1; i <= 3; i++) {
         final nextIndex = currentIndex + i;
-        if (nextIndex >= _queue.length) break;
+        if (nextIndex < _queue.length) indicesToPreload.add(nextIndex);
+      }
 
-        final song = _queue[nextIndex];
+      for (final indexToPreload in indicesToPreload) {
+        final song = _queue[indexToPreload];
         final songId = song.id.trim();
         if (songId.isEmpty) continue;
 
@@ -6135,19 +6156,19 @@ class PlayerService {
         unawaited(_resolveSongForPlayback(song).then((resolvedSong) async {
           if (resolvedSong != null && _hasStreamUrl(resolvedSong) && resolvedSong.streamUrl != song.streamUrl) {
             // Update in the queue list
-            if (nextIndex < _queue.length && _queue[nextIndex].id == songId) {
-              _queue[nextIndex] = resolvedSong;
+            if (indexToPreload < _queue.length && _queue[indexToPreload].id == songId) {
+              _queue[indexToPreload] = resolvedSong;
               
               // Now rebuild/update the source in the player if it's still correct
               final resolvedTarget = _resolvePlaybackTarget(resolvedSong);
               await _runSerializedSourceMutation(() async {
                 final currentSequence = _player.sequence;
-                if (_player.audioSource != null && nextIndex < currentSequence.length) {
-                  final currentItem = currentSequence[nextIndex].tag;
+                if (_player.audioSource != null && indexToPreload < currentSequence.length) {
+                  final currentItem = currentSequence[indexToPreload].tag;
                   if (currentItem is MediaItem && currentItem.id == songId) {
-                    debugPrint('Preloading completed: replacing source at index $nextIndex for ${resolvedSong.name}');
-                    await _player.insertAudioSource(nextIndex, resolvedTarget.audioSource);
-                    await _player.removeAudioSourceAt(nextIndex + 1);
+                    debugPrint('Preloading completed: replacing source at index $indexToPreload for ${resolvedSong.name}');
+                    await _player.insertAudioSource(indexToPreload, resolvedTarget.audioSource);
+                    await _player.removeAudioSourceAt(indexToPreload + 1);
                   }
                 }
               });

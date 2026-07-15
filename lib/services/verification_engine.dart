@@ -56,10 +56,10 @@ class VerificationEngine {
       if (matches > 0) {
         artistScore = 35.0 * (matches / tArtists.length);
       } else {
-        return 0.0; // Hard reject: complete artist mismatch
+        artistScore = 0.0; // Complete artist mismatch, give 0 points instead of hard reject
       }
     } else if (tArtist.isNotEmpty || cArtist.isNotEmpty) {
-      return 0.0; // Hard reject: mismatch between empty and non-empty artists
+      artistScore = 0.0; // Mismatch between empty and non-empty artists, give 0 points instead of hard reject
     } else {
       artistScore = 35.0; // Both empty (fallback case)
     }
@@ -80,10 +80,12 @@ class VerificationEngine {
     // 6. Duration Check (10%)
     if (candidate.duration != null && target.duration != null && candidate.duration! > 0 && target.duration! > 0) {
       final diff = (candidate.duration! - target.duration!).abs();
-      if (diff <= 3) {
+      if (diff <= 5) {
         durationScore = 10.0;
+      } else if (diff <= 15) {
+        durationScore = 5.0;
       } else {
-        return 0.0; // Hard reject: duration differs by more than 3 seconds
+        return 0.0; // Hard reject: duration differs by more than 15 seconds
       }
     } else {
       durationScore = 10.0; // Accept if duration info is missing from source metadata
@@ -96,7 +98,7 @@ class VerificationEngine {
       if (cLang == tLang) {
         languageScore = 5.0;
       } else {
-        return 0.0; // Hard reject: language mismatch
+        languageScore = 0.0; // Give 0 points on language mismatch instead of hard reject
       }
     } else {
       languageScore = 5.0;

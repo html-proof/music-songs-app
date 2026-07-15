@@ -181,16 +181,15 @@ class EmergencyPlaybackResolver {
   static Future<List<Song>> _searchWithRetry(String query, http.Client client) async {
     try {
       return await _intelligentRetry(() async {
-        final encodedQuery = Uri.encodeComponent(query);
-        final url = Uri.parse('${ApiService.baseUrl}/api/search/songs?query=$encodedQuery&limit=5');
-        final response = await client.get(url).timeout(const Duration(seconds: 4));
-        
-        if (response.statusCode == 200) {
-          final data = _parseJsonMap(response.body);
-          if (data['success'] == true && data['data'] != null && data['data']['results'] != null) {
-            final results = data['data']['results'] as List;
-            return results.map((e) => Song.fromJson(Map<String, dynamic>.from(e))).toList();
-          }
+        final searchResults = await ApiService.globalSearch(query, limit: 5);
+        final resultsList = searchResults['songs'];
+        if (resultsList != null && resultsList is List) {
+          return resultsList.map((e) {
+            try {
+              if (e is Map) return Song.fromJson(Map<String, dynamic>.from(e));
+            } catch (_) {}
+            return null;
+          }).whereType<Song>().toList();
         }
         return <Song>[];
       });

@@ -3198,7 +3198,9 @@ class PlayerService {
       if (!hasNetwork) {
         if (_hasStreamUrl(candidateSong)) return candidateSong;
         final fallback = await _searchFallbackForSong(candidateSong, requestId: requestId, client: localClient);
-        if (fallback != null) return fallback;
+        if (fallback != null) {
+          return _mergeSongWithResolvedStream(base: candidateSong, resolved: fallback);
+        }
         return null;
       }
 
@@ -3250,7 +3252,9 @@ class PlayerService {
             if (forceRefresh && newUrl.isNotEmpty && newUrl == existingStreamUrl) {
               debugPrint('Resolved stream URL is identical to failed URL. Triggering search fallback...');
               final fallback = await _searchFallbackForSong(candidateSong, requestId: requestId, client: localClient);
-              if (fallback != null) return fallback;
+              if (fallback != null) {
+                return _mergeSongWithResolvedStream(base: candidateSong, resolved: fallback);
+              }
             }
 
             _setCachedSongUrl(candidateSong, newUrl);
@@ -3274,7 +3278,9 @@ class PlayerService {
           if (isValid) {
             if (forceRefresh) {
               final fallback = await _searchFallbackForSong(candidateSong, requestId: requestId, client: localClient);
-              if (fallback != null) return fallback;
+              if (fallback != null) {
+                return _mergeSongWithResolvedStream(base: candidateSong, resolved: fallback);
+              }
             }
             return candidateSong;
           }
@@ -3282,11 +3288,15 @@ class PlayerService {
       }
 
       final fallback = await _searchFallbackForSong(candidateSong, requestId: requestId, client: localClient);
-      if (fallback != null) return fallback;
+      if (fallback != null) {
+        return _mergeSongWithResolvedStream(base: candidateSong, resolved: fallback);
+      }
 
       if (hasNetwork) {
         final emergency = await EmergencyPlaybackResolver.resolve(candidateSong, client: localClient);
-        if (emergency != null) return emergency;
+        if (emergency != null) {
+          return _mergeSongWithResolvedStream(base: candidateSong, resolved: emergency);
+        }
       }
 
       return null;

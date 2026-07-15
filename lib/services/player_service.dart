@@ -2451,6 +2451,12 @@ class PlayerService {
     _lastErrorSongId = errorKey;
     _lastErrorTime = now;
 
+    // Cancel any active watchdogs so they don't interrupt our recovery
+    _loadingWatchdogTimer?.cancel();
+    _loadingWatchdogTimer = null;
+    _bufferingWatchdogTimer?.cancel();
+    _bufferingWatchdogTimer = null;
+
     _activeLogger?.logStep('Playback error triggered', false, detail: error.message);
 
     // Try recovering from offline cache first (if local downloaded file exists)
@@ -4357,6 +4363,10 @@ class PlayerService {
           await _player.removeAudioSourceAt(normalizedIndex + 1);
           try {
             await _player.seek(position, index: normalizedIndex).timeout(const Duration(seconds: 4));
+            // Wait for player to be ready before returning, so `play()` works correctly.
+            await _player.processingStateStream.firstWhere(
+              (state) => state == ProcessingState.ready || state == ProcessingState.idle,
+            ).timeout(const Duration(seconds: 4));
           } catch (e) {
             debugPrint('Replace Source Seek Error: $e');
           }

@@ -3380,115 +3380,110 @@ class PlayerService {
     final localClient = client ?? ApiService.createSecureHttpClient(pinCertificates: false);
     try {
       debugPrint('Parallel searches initiated for variants: $queries');
-      final searchFutures = queries.map((query) => _searchSongsWithClient(query, localClient)).toList();
-      
-      if (song.albumId != null && song.albumId!.trim().isNotEmpty) {
-        searchFutures.add(() async {
-          try {
-            final albumDetails = await ApiService.getAlbums(id: song.albumId!.trim());
-            final songs = albumDetails['data']?['songs'];
-            if (songs is List) {
-              return songs.whereType<Map>().map((m) => Map<String, dynamic>.from(m)).toList();
-            }
-          } catch (e) {
-            debugPrint('Fallback album fetch error: $e');
+      final completer = Completer<Song?>();
+      int pendingTasks = queries.length;
+      bool isFinished = false;
+
+      void checkCompletion() {
+        if (!isFinished && pendingTasks == 0) {
+          isFinished = true;
+          if (!completer.isCompleted) completer.complete(null);
+        }
+      }
+
+      Future<void> processCandidate(Song candidateSong) async {
+        if (isFinished) return;
+        if (candidateSong.id == song.id) return;
+        
+        final confidence = VerificationEngine.calculateConfidence(candidateSong, song);
+        if (confidence < VerificationEngine.threshold) return;
+
+        var resolvedCandidate = candidateSong;
+        if (!_hasStreamUrl(resolvedCandidate)) {
+          resolvedCandidate = await _fetchSongDetailsForPlaybackWithClient(candidateSong, localClient) ?? candidateSong;
+        }
+
+        if (isFinished || !_hasStreamUrl(resolvedCandidate)) return;
+
+        final isValid = await _validateStreamUrl(resolvedCandidate.streamUrl!, localClient);
+        
+        if (isFinished) return;
+        
+        if (isValid) {
+          isFinished = true;
+          if (!completer.isCompleted) {
+            _setCachedSongUrl(song, resolvedCandidate.streamUrl!);
+            _fallbackSongResolved = true;
+            completer.complete(song.copyWith(
+              streamUrl: resolvedCandidate.streamUrl,
+              duration: resolvedCandidate.duration != null && resolvedCandidate.duration! > 0
+                  ? resolvedCandidate.duration
+                  : song.duration,
+            ));
           }
-          return [];
-        }());
+        }
       }
 
-      final allResults = await Future.wait(searchFutures);
-      
-      if (_isSessionStale(requestId, song.id)) return null;
-
-      // Flatten all results and remove duplicates
-      final Map<String, Song> uniqueCandidates = {};
-      for (final resultList in allResults) {
-        for (final item in resultList) {
-          final candidateMap = Map<String, dynamic>.from(item);
-          final candidateSong = Song.fromJson(candidateMap);
-          if (candidateSong.id == song.id) continue; // Exclude failed original song
+      for (final query in queries) {
+        _searchSongsWithClient(query, localClient).then((results) async {
+          if (isFinished) return;
           
-          uniqueCandidates[candidateSong.id] = candidateSong;
-        }
+          final candidates = results.map((item) => Song.fromJson(Map<String, dynamic>.from(item)))
+              .where((c) => c.id != song.id)
+              .toList();
+              
+          candidates.sort((a, b) => 
+            VerificationEngine.calculateConfidence(b, song)
+            .compareTo(VerificationEngine.calculateConfidence(a, song))
+          );
+          
+          for (final candidateSong in candidates) {
+            if (isFinished) break;
+            await processCandidate(candidateSong);
+          }
+        }).catchError((_) {}).whenComplete(() {
+          pendingTasks--;
+          checkCompletion();
+        });
       }
 
-      if (uniqueCandidates.isEmpty) return null;
+      if (song.albumId != null && song.albumId!.trim().isNotEmpty) {
+        pendingTasks++;
+        ApiService.getAlbums(id: song.albumId!.trim()).then((albumDetails) async {
+          if (isFinished) return;
+          final songs = albumDetails['data']?['songs'];
+          if (songs is List) {
+            final candidates = songs.whereType<Map>().map((m) => Song.fromJson(Map<String, dynamic>.from(m)))
+                .where((c) => c.id != song.id).toList();
+            candidates.sort((a, b) => 
+               VerificationEngine.calculateConfidence(b, song).compareTo(VerificationEngine.calculateConfidence(a, song))
+            );
+            for (final candidateSong in candidates) {
+              if (isFinished) break;
+              await processCandidate(candidateSong);
+            }
+          }
+        }).catchError((_) {}).whenComplete(() {
+          pendingTasks--;
+          checkCompletion();
+        });
+      }
 
-      // Score and rank candidates using VerificationEngine and BackgroundLearningService telemetry
-      final scoredCandidates = uniqueCandidates.values.map((candidate) {
-        final confidence = VerificationEngine.calculateConfidence(candidate, song);
-        final baseScore = _scoreCandidate(candidate, song).toDouble();
-        final bias = BackgroundLearningService.getBiasBoost(candidate.id, query: song.name);
-        final finalScore = confidence >= VerificationEngine.threshold
-            ? (confidence + baseScore + bias)
-            : -1.0;
-        return MapEntry(candidate, finalScore);
-      }).where((entry) => entry.value >= 0.0).toList();
+      if (pendingTasks == 0) {
+        checkCompletion();
+      }
 
-      if (scoredCandidates.isEmpty) return null;
-
-      scoredCandidates.sort((a, b) => b.value.compareTo(a.value));
-
-      // Resolve detail payloads for candidates that don't have stream URL (take top 8)
-      final topRanked = scoredCandidates.map((e) => e.key).take(8).toList();
-      final resolvedFutures = topRanked.map((c) async {
-        if (_hasStreamUrl(c)) return c;
-        try {
-          final details = await _fetchSongDetailsForPlaybackWithClient(c, localClient);
-          return details ?? c;
-        } catch (_) {
-          return c;
-        }
-      }).toList();
-
-      final resolvedCandidates = await Future.wait(resolvedFutures);
+      final winner = await completer.future;
       if (_isSessionStale(requestId, song.id)) return null;
 
-      final playCandidates = resolvedCandidates.where((c) => _hasStreamUrl(c)).toList();
-
-      if (playCandidates.isEmpty) return null;
-
-      // Validate stream URLs in parallel (for the top candidates)
-      final validationFutures = playCandidates.map((c) async {
-        final isValid = await _validateStreamUrl(c.streamUrl ?? '', localClient);
-        return MapEntry(c, isValid);
-      }).toList();
-
-      final validationResults = await Future.wait(validationFutures);
-      if (_isSessionStale(requestId, song.id)) return null;
-
-      final validatedSongs = validationResults
-          .where((e) => e.value)
-          .map((e) => e.key)
-          .toList();
-
-      final hasMatch = validatedSongs.isNotEmpty;
       if (PlaybackCoordinator.isValid(requestId)) {
-        _activeLogger?.logStep('Parallel search', hasMatch, detail: hasMatch ? 'SUCCESS' : 'NO MATCH');
+        _activeLogger?.logStep('Parallel search (First Valid)', winner != null, detail: winner != null ? 'SUCCESS' : 'NO MATCH');
       }
 
-      if (validatedSongs.isEmpty) return null;
-
-      // Primary result wins
-      final winner = validatedSongs.first;
-      _setCachedSongUrl(song, winner.streamUrl ?? '');
-
-      // Store remaining validated options in backup recovery list
-      _backupPlayableSongs.clear();
-      if (validatedSongs.length > 1) {
-        _backupPlayableSongs.addAll(validatedSongs.sublist(1));
-        debugPrint('Saved ${_backupPlayableSongs.length} validated backup results for recovery.');
+      if (winner != null) {
+         debugPrint('Found winning parallel search result: ${winner.name} (${winner.id})');
       }
-
-      debugPrint('Found winning parallel search result: ${winner.name} (${winner.id})');
-      _fallbackSongResolved = true;
-      return song.copyWith(
-        streamUrl: winner.streamUrl,
-        duration: winner.duration != null && winner.duration! > 0
-            ? winner.duration
-            : song.duration,
-      );
+      return winner;
     } catch (e) {
       debugPrint('Parallel search fallback failed: $e');
     } finally {
@@ -6189,6 +6184,25 @@ class PlayerService {
         if (nextIndex < _queue.length) indicesToPreload.add(nextIndex);
       }
 
+      Future<void> updatePreloadedSource(int indexToPreload, Song resolvedSong, String songId) async {
+        if (indexToPreload < _queue.length && _queue[indexToPreload].id == songId) {
+          _queue[indexToPreload] = resolvedSong;
+          
+          final resolvedTarget = _resolvePlaybackTarget(resolvedSong);
+          await _runSerializedSourceMutation(() async {
+            final currentSequence = _player.sequence;
+            if (_player.audioSource != null && indexToPreload < currentSequence.length) {
+              final currentItem = currentSequence[indexToPreload].tag;
+              if (currentItem is MediaItem && currentItem.id == songId) {
+                debugPrint('Preloading completed: replacing source at index $indexToPreload for ${resolvedSong.name}');
+                await _player.insertAudioSource(indexToPreload, resolvedTarget.audioSource);
+                await _player.removeAudioSourceAt(indexToPreload + 1);
+              }
+            }
+          });
+        }
+      }
+
       for (final indexToPreload in indicesToPreload) {
         final song = _queue[indexToPreload];
         final songId = song.id.trim();
@@ -6199,29 +6213,17 @@ class PlayerService {
 
         // Check if we already have it cached
         final cached = _getCachedSongUrl(songId);
-        if (cached != null && _hasStreamUrl(cached)) continue;
+        if (cached != null && _hasStreamUrl(cached)) {
+          if (cached.streamUrl != song.streamUrl) {
+             unawaited(updatePreloadedSource(indexToPreload, cached, songId));
+          }
+          continue;
+        }
 
         // Resolve in background (unawaited)
         unawaited(_resolveSongForPlayback(song).then((resolvedSong) async {
           if (resolvedSong != null && _hasStreamUrl(resolvedSong) && resolvedSong.streamUrl != song.streamUrl) {
-            // Update in the queue list
-            if (indexToPreload < _queue.length && _queue[indexToPreload].id == songId) {
-              _queue[indexToPreload] = resolvedSong;
-              
-              // Now rebuild/update the source in the player if it's still correct
-              final resolvedTarget = _resolvePlaybackTarget(resolvedSong);
-              await _runSerializedSourceMutation(() async {
-                final currentSequence = _player.sequence;
-                if (_player.audioSource != null && indexToPreload < currentSequence.length) {
-                  final currentItem = currentSequence[indexToPreload].tag;
-                  if (currentItem is MediaItem && currentItem.id == songId) {
-                    debugPrint('Preloading completed: replacing source at index $indexToPreload for ${resolvedSong.name}');
-                    await _player.insertAudioSource(indexToPreload, resolvedTarget.audioSource);
-                    await _player.removeAudioSourceAt(indexToPreload + 1);
-                  }
-                }
-              });
-            }
+            await updatePreloadedSource(indexToPreload, resolvedSong, songId);
           }
         }).catchError((e) {
           debugPrint('Preload failed for song ${song.name}: $e');

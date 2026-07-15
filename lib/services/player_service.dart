@@ -5285,7 +5285,8 @@ class PlayerService {
         debugPrint('Found offline copy for ${song.id}. Switching seamlessly.');
         // Capture state before the async write so the snapshot is always fresh.
         final wasPlaying = _player.playing;
-        final position = _player.position;
+        final position = _offlineSeekPosition ?? _player.position;
+        _offlineSeekPosition = null;
         final index = _player.currentIndex ?? _currentIndex;
 
         _setSourceSwitching(true);
@@ -5474,7 +5475,8 @@ class PlayerService {
     final song = _currentSong;
     if (song == null) return false;
     // Capture position before async resolution so it doesn't drift.
-    final lastPosition = _lastKnownPosition > Duration.zero ? _lastKnownPosition : _player.position;
+    final lastPosition = _offlineSeekPosition ?? (_lastKnownPosition > Duration.zero ? _lastKnownPosition : _player.position);
+    _offlineSeekPosition = null; // Clear it after reading
 
     // Prefer offline cache.
     var localPath = OfflineService.getLocalPath(song.id);
@@ -5551,7 +5553,8 @@ class PlayerService {
     try {
       if (index == _currentIndex) {
         final wasPlaying = _player.playing;
-        final currentPosition = _player.position;
+        final currentPosition = _offlineSeekPosition ?? _player.position;
+        _offlineSeekPosition = null;
         await _replaceCurrentAudioSource(
           updatedSong: offlineSong,
           index: index,

@@ -739,11 +739,13 @@ class LyricsService {
     // Time budget: hard timeout of 5000 ms
     final timeoutFuture = Future.delayed(const Duration(milliseconds: 5000)).then((_) {
       if (!completer.isCompleted) {
-        completer.completeError(TimeoutException('Lyrics progressive search timed out after 5s'));
+        completer.complete(null); // Do not complete with error, allow processing of found results
       }
     });
 
-    await Future.any([completer.future, timeoutFuture]);
+    try {
+      await Future.any([completer.future, timeoutFuture]);
+    } catch (_) {}
 
     if (_activeClient == client) {
       _activeClient = null;

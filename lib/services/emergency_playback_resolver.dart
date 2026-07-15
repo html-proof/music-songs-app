@@ -227,13 +227,20 @@ class EmergencyPlaybackResolver {
         }
       }
       
-      if (score > bestScore && score >= VerificationEngine.threshold) {
+      debugPrint('EMERGENCY RESOLVER: Candidate ${candidate.id} (${candidate.name}) score: $score');
+      
+      // We use a lower threshold (65.0) for emergency fallback because finding *something*
+      // similar is better than failing completely, and metadata across APIs is messy.
+      if (score > bestScore && score >= 65.0) {
         bestScore = score;
         bestCandidate = candidate;
       }
     }
     
     debugPrint('EMERGENCY RESOLVER: Best match score: $bestScore');
+    if (bestCandidate == null) {
+      debugPrint('EMERGENCY RESOLVER: No candidate met the similarity threshold.');
+    }
     return bestCandidate;
   }
 

@@ -1044,9 +1044,9 @@ class LyricsService {
       if (segments.length < 3 || segments[0] != 'song') {
         return null;
       }
-      final slug = segments[1];
       final id = segments[2];
-      final lyricsUrl = 'https://www.jiosaavn.com/lyrics/$slug-lyrics/$id';
+      final lyricsUrl = 'https://www.jiosaavn.com/api.php?__call=lyrics.getLyrics&lyrics_id=$id&ctx=web6dot0&api_version=4&_format=json';
+      
       final res = await _getWithRetry(
         Uri.parse(lyricsUrl),
         headers: {
@@ -1058,21 +1058,15 @@ class LyricsService {
       );
 
       if (res.statusCode != 200) return null;
-      final html = res.body;
-      final lyricsMatch = RegExp(
-        r'<p class="u-margin-bottom-none[^"]*">(.*?)</p>',
-        caseSensitive: false,
-        dotAll: true,
-      ).firstMatch(html);
-
-      if (lyricsMatch == null) {
+      
+      final data = jsonDecode(res.body);
+      if (data == null || data is! Map || data['status'] == 'failure' || data['lyrics'] == null) {
         return null;
       }
 
-      var rawLyrics = lyricsMatch.group(1) ?? '';
+      var rawLyrics = data['lyrics'].toString();
       if (rawLyrics.isEmpty) return null;
 
-      rawLyrics = rawLyrics.replaceAll(RegExp(r'</?span>'), '');
       rawLyrics = rawLyrics.replaceAll(RegExp(r'</?br/?>'), '\n');
       rawLyrics = rawLyrics.replaceAll(RegExp(r'<[^>]*>'), '');
       
@@ -1090,7 +1084,7 @@ class LyricsService {
       return LyricsPayload(
         plainLyrics: cleaned,
         syncedLyrics: null,
-        provider: 'jiosaavn',
+        provider: 'jiosaavn API',
       );
     } catch (e) {
       debugPrint('[LyricsService] JioSaavn scrape failed: $e');

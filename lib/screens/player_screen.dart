@@ -909,6 +909,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                             onChanged: (dragPos) {
                               _scrubNotifier.value = dragPos.inMilliseconds / 1000.0;
                               player.setSeeking(true);
+                              player.seek(dragPos, immediate: false);
                             },
                             onChangeEnd: (seekPos) async {
                               await player.seek(seekPos, immediate: true);

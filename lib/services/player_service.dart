@@ -392,7 +392,7 @@ class PlayerService {
     }
 
     // 3. Seek and play
-    await _player.seek(savePosition);
+    await _player.seek(savePosition, index: _currentIndex);
     await _playEnsuringAudioFocus();
     _savePlaybackState();
     
@@ -2694,7 +2694,7 @@ class PlayerService {
       }
 
       if (lastPosition > Duration.zero) {
-        await _player.seek(lastPosition);
+        await _player.seek(lastPosition, index: _currentIndex);
       }
       if (shouldResume) {
         await _playEnsuringAudioFocus();
@@ -3798,7 +3798,7 @@ class PlayerService {
     Future<void> applySeek() async {
       try {
         final wasPlaying = _player.playing;
-        await _player.seek(normalized).timeout(const Duration(seconds: 4));
+        await _player.seek(normalized, index: _currentIndex).timeout(const Duration(seconds: 4));
         if (_externalSeeking &&
             _wasPlayingBeforeSeek &&
             !_player.playing &&
@@ -5371,7 +5371,7 @@ class PlayerService {
         }
 
         if (lastPosition > Duration.zero) {
-          await _player.seek(lastPosition);
+          await _player.seek(lastPosition, index: _currentIndex);
         }
         if (wasPlaying) {
           await _playEnsuringAudioFocus();
@@ -5523,7 +5523,7 @@ class PlayerService {
       }
 
       if (!_fallbackSongResolved && lastPosition > Duration.zero) {
-        await _player.seek(lastPosition);
+        await _player.seek(lastPosition, index: _currentIndex);
       }
       return true;
     } catch (e) {

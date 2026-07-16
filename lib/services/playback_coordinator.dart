@@ -1,10 +1,13 @@
 import 'dart:async';
 import '../models/song.dart';
 import '../models/playback_identity.dart';
+import 'search_coordinator.dart';
+import 'stability_logger.dart';
 
 class PlaybackCoordinator {
   static String? _currentRequestId;
   static PlaybackIdentity? _currentIdentity;
+  static int _lastPreResolvedIndex = -1;
 
   static final StreamController<String?> _requestController = StreamController<String?>.broadcast();
   static final StreamController<PlaybackIdentity?> _identityController = StreamController<PlaybackIdentity?>.broadcast();
@@ -18,6 +21,9 @@ class PlaybackCoordinator {
   /// Generates a new unique request ID, cancels any previous requests,
   /// and locks the playback identity to the target song.
   static String newRequest(Song song) {
+    // Immediately cancel any pending background searches!
+    SearchCoordinator.cancelAll();
+
     final requestId = '${song.id}_${DateTime.now().microsecondsSinceEpoch}';
     _currentRequestId = requestId;
     _requestController.add(requestId);
@@ -36,6 +42,20 @@ class PlaybackCoordinator {
     return requestId == _currentRequestId;
   }
 
+  /// Pre-resolves the next few songs in the queue to ensure instant transitions.
+  static Future<void> preResolveQueue(List<Song> queue, int currentIndex) async {
+    if (currentIndex == _lastPreResolvedIndex) return;
+    _lastPreResolvedIndex = currentIndex;
+
+    StabilityLogger.info('PlaybackCoordinator', 'Pre-resolving queue from index $currentIndex');
+
+    // Resolve the next 3 songs in the background
+    for (int i = currentIndex + 1; i <= currentIndex + 3 && i < queue.length; i++) {
+      final song = queue[i];
+      unawaited(SearchCoordinator.recoverSong(song, sessionId: 'pre-resolve-$i'));
+    }
+  }
+
   /// Locks a specific identity (e.g. during state hydration/restoration).
   static void lockIdentity(PlaybackIdentity identity) {
     _currentIdentity = identity;
@@ -48,5 +68,6 @@ class PlaybackCoordinator {
     _currentIdentity = null;
     _requestController.add(null);
     _identityController.add(null);
+    _lastPreResolvedIndex = -1;
   }
 }

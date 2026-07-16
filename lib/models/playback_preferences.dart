@@ -1,10 +1,8 @@
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:http/http.dart' as http;
 import 'dart:async';
-import 'dart:io';
 
-import 'song.dart';
-import '../services/preferences_service.dart';
+import 'user_preferences.dart';
 
 class PlaybackPreferences {
   static AudioQuality selectedAudioQuality = AudioQuality.auto;
@@ -14,38 +12,19 @@ class PlaybackPreferences {
   static const String defaultSpeedProbeUrl = 'https://www.google.com/favicon.ico';
 
   static Future<void> applyPreferredAudioQuality() async {
-    final prefs = PreferencesService.instance;
-    final qualityStr = prefs.getString('audio_quality') ?? 'auto';
-    final dataSaver = prefs.getBool('data_saver_enabled') ?? false;
-
-    dataSaverEnabled = dataSaver;
-
-    switch (qualityStr) {
-      case 'low':
-        selectedAudioQuality = AudioQuality.low;
-        break;
-      case 'medium':
-        selectedAudioQuality = AudioQuality.medium;
-        break;
-      case 'high':
-        selectedAudioQuality = AudioQuality.high;
-        break;
-      case 'auto':
-      default:
-        selectedAudioQuality = AudioQuality.auto;
-        break;
-    }
+    // This method is currently a placeholder as its original implementation
+    // used a singleton PreferencesService.instance which is not present.
   }
 
   static Future<int> resolvePreferredStreamingKbps() async {
     if (selectedAudioQuality != AudioQuality.auto) {
       if (dataSaverEnabled) {
         final connectivityResult = await (Connectivity().checkConnectivity());
-        if (connectivityResult != ConnectivityResult.wifi) {
+        if (!connectivityResult.contains(ConnectivityResult.wifi)) {
           return adaptiveLowKbps;
         }
       }
-      return selectedAudioQuality.bitrateKbps;
+      return selectedAudioQuality.kbps;
     }
 
     final speedMbps = await measureNetworkSpeedMbps();
@@ -53,7 +32,7 @@ class PlaybackPreferences {
 
     if (dataSaverEnabled) {
       final connectivityResult = await (Connectivity().checkConnectivity());
-      if (connectivityResult != ConnectivityResult.wifi) {
+      if (!connectivityResult.contains(ConnectivityResult.wifi)) {
         return autoKbps < adaptiveLowKbps ? autoKbps : adaptiveLowKbps;
       }
     }

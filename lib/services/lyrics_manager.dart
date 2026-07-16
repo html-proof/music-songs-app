@@ -4,6 +4,7 @@ import '../models/song.dart';
 import 'lyrics_alignment_engine.dart';
 import 'lyrics_cache.dart';
 import 'lyrics_service.dart';
+import '../models/lyrics_payload.dart';
 import 'player_service.dart';
 import 'connectivity_manager.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -284,7 +285,7 @@ class LyricsManager extends ChangeNotifier {
     if (dataSaverEnabled || !lyricsAutoFetch) return;
 
     // Fire-and-forget into LyricsService cache without affecting LyricsManager state
-    LyricsService.prefetchLyricsForSong(song);
+    LyricsService.prefetchLyricsForSong(song.toLyricsMetadata());
   }
 
   // ─────────────────────────────────────────────────────────
@@ -387,7 +388,7 @@ class LyricsManager extends ChangeNotifier {
     }
 
     try {
-      final found = await LyricsService.progressiveLyricsSearch(song).timeout(
+      final found = await LyricsService.progressiveLyricsSearch(song.toLyricsMetadata()).timeout(
         const Duration(seconds: 10),
       );
 

@@ -8,76 +8,13 @@ import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 
 import '../models/song.dart';
+import '../models/lyrics_metadata.dart';
+import '../models/lyrics_payload.dart';
 import 'api_service.dart';
 import 'lyrics_alignment_engine.dart';
 import 'lyrics_cache.dart';
 import 'stability_logger.dart';
 
-@immutable
-class LyricsLine {
-  final Duration timestamp;
-  final String text;
-
-  const LyricsLine({required this.timestamp, required this.text});
-
-  @override
-  String toString() => '[${timestamp.inMinutes.toString().padLeft(2, '0')}:${(timestamp.inSeconds % 60).toString().padLeft(2, '0')}.${(timestamp.inMilliseconds % 1000).toString().padLeft(3, '0')}] $text';
-}
-
-@immutable
-class LyricsPayload {
-  final String? plainLyrics;
-  final String? syncedLyrics;
-  final String? translationPlainLyrics;
-  final String? translationSyncedLyrics;
-  final String? provider;
-  final double? confidence;
-
-  const LyricsPayload({
-    required this.plainLyrics,
-    required this.syncedLyrics,
-    this.translationPlainLyrics,
-    this.translationSyncedLyrics,
-    this.provider,
-    this.confidence,
-  });
-
-  bool get hasPlain => plainLyrics != null && plainLyrics!.trim().isNotEmpty;
-  bool get hasSynced => syncedLyrics != null && syncedLyrics!.trim().isNotEmpty;
-  bool get hasTranslationPlain =>
-      translationPlainLyrics != null &&
-      translationPlainLyrics!.trim().isNotEmpty;
-  bool get hasTranslationSynced =>
-      translationSyncedLyrics != null &&
-      translationSyncedLyrics!.trim().isNotEmpty;
-  bool get hasTranslation => hasTranslationPlain || hasTranslationSynced;
-  bool get hasAny => hasPlain || hasSynced || hasTranslation;
-
-  Map<String, dynamic> toJson() {
-    return <String, dynamic>{
-      'plainLyrics': plainLyrics,
-      'syncedLyrics': syncedLyrics,
-      'translationPlainLyrics': translationPlainLyrics,
-      'translationSyncedLyrics': translationSyncedLyrics,
-      'provider': provider,
-      'confidence': confidence,
-    };
-  }
-
-  factory LyricsPayload.fromJson(Map<String, dynamic> json) {
-    final plainLyrics = json['plainLyrics'] ?? json['originalPlainLyrics'];
-    final syncedLyrics = json['syncedLyrics'] ?? json['originalSyncedLyrics'];
-
-    return LyricsPayload(
-      plainLyrics: plainLyrics?.toString(),
-      syncedLyrics: syncedLyrics?.toString(),
-      translationPlainLyrics: json['translationPlainLyrics']?.toString(),
-      translationSyncedLyrics: json['translationSyncedLyrics']?.toString(),
-      provider: json['provider']?.toString(),
-      confidence: json['confidence'] != null ? (double.tryParse(json['confidence'].toString()) ?? 1.0) : null,
-    );
-  }
-}
 
 enum _TrackVersionType { original, remix, live, remaster, acoustic }
 
@@ -105,22 +42,22 @@ class _LyricsLookup {
     this.isExplicit = false,
   });
 
-  factory _LyricsLookup.fromSong(Song song) {
-    final sourceAlbum = (song.sourceAlbumName ?? '').trim();
-    final album = sourceAlbum.isNotEmpty
-        ? sourceAlbum
-        : (song.album ?? '').trim();
-
+  factory _LyricsLookup.fromMetadata(LyricsMetadata song) {
+    final album = (song.album ?? '').trim();
     return _LyricsLookup(
-      trackId: song.id.trim(),
-      title: song.name.trim(),
-      artist: (song.artist ?? '').trim(),
+      trackId: (song.songId ?? '').trim(),
+      title: song.title.trim(),
+      artist: song.artist.trim(),
       album: album,
-      language: song.language?.toString().trim(),
+      language: song.language?.trim(),
       durationSeconds: song.duration,
       isrc: song.isrc?.trim(),
-      isExplicit: song.isExplicit,
+      isExplicit: false,
     );
+  }
+
+  factory _LyricsLookup.fromSong(Song song) {
+    return _LyricsLookup.fromMetadata(song.toLyricsMetadata());
   }
 }
 
@@ -134,6 +71,7 @@ class _LyricsCandidate {
   final int? durationSeconds;
   final String? language;
   final String? isrc;
+  final String? songId;
 
   const _LyricsCandidate({
     required this.plainLyrics,
@@ -144,6 +82,7 @@ class _LyricsCandidate {
     required this.durationSeconds,
     required this.language,
     this.isrc,
+    this.songId,
   });
 }
 
@@ -307,108 +246,9 @@ class LyricsService {
     return _selectBestPayload(lookup, candidates);
   }
 
-  static LyricsPayload? _getHardcodedLyricsForNaanumRowdyDhaan(Song song) {
-    final title = song.name.toLowerCase();
-    final artist = (song.artist ?? '').toLowerCase();
-    if (title.contains('naanum rowdy dhaan') &&
-        (artist.contains('benny') || artist.contains('anirudh') || artist.contains('vignesh'))) {
-      return const LyricsPayload(
-        plainLyrics: """Good boy'ம் இல்ல bad boy'ம் இல்ல
-ரெண்டோட combo நம்ப புள்ள
-நம்மாலு Weight'ah சே சே சே இல்ல
-தவ்லூண்டு fight கூட போட்டதில்ல
-பாஷா போல mass'ah
-எதுவும் செஞ்சதில்ல
-ரங்கா போல wrong'ah
-ஒன்னும் கிழிச்சதில்ல
-கத்தியில்ல ரத்தமில்ல Rowdy தான்
-காதலிக்க நேரமுள்ள Rowdy தான்
-வெட்டு குத்து வேணாம் சொல்லும் Rowdy தான்
-வெள்ள உள்ளம் கொண்ட நல்ல Rowdy தான்
-கத்தியில்ல ரத்தமில்ல Rowdy தான்
-காதலிக்க நேரமுள்ள Rowdy தான்
-வெட்டு குத்து வேணாம் சொல்லும் Rowdy தான்
-வெள்ள உள்ளம் கொண்ட நல்ல Rowdy தான்
-நானும் Rowdy தான்... தான்... தான்...
-நானும் Rowdy தான்... தான்... தான்...
-நானும் Rowdy தான்... தான்... தான்...
-நானும் Rowdy தான்... தான்... தான்... தான்...
-ஒரு கல்லுல பத்து மாங்கா ஒன்னா அடிப்பானே(நம்ம புள்ள)
-ஒரு வெட்டுல நூறு துண்டு போட்டுப் பிரிப்பானே(நல்ல புள்ள)
-சின்ன சண்ட வந்தா, கொஞ்சம் தள்ளி நிப்பான்
-பெரிய சண்ட வந்தா, பேசி புறிய வெப்பான்
-ஒரு உண்மையால நீ நொந்து போனா
-ஒரு பொய்ய சொல்லி நல்லா சிரிக்க வெப்பான்
-பாஷா போல mass'ah
-எதுவும் செஞ்சதில்ல
-ரங்கா போல wrong'ah
-ஒன்னும் கிழிச்சதில்ல (chorus,start)
-தம் அடிச்சு மூஞ்சி மேல ஊத மாட்டான்
-தண்ணி போட்டு தொல்லையேதும் பண்ண மாட்டான்(பலே பலே பலே)
-பொண்ணுங்கள கிண்டல் பண்ணி கொல்ல மாட்டான்
-ஆனா சாமி மேல சத்தியமா Rowdy தான் (Super ஜி Super ஜி)
-கத்தியில்ல ரத்தமில்ல Rowdy தான்
-காதலிக்க நேரமுள்ள Rowdy தான் (ப்பா)
-வெட்டு குத்து வேணாம் சொல்லும் Rowdy தான்
-வெள்ள உள்ளம் கொண்ட நல்ல Rowdy தான்
-நானும் Rowdy தான்... தான்... தான்...
-நானும் Rowdy தான்... தான்... தான்...
-நானும் Rowdy தான்... தான்... தான்...
-நானும் Rowdy தான்... தான்... தான்...""",
-        syncedLyrics: """[00:11.28] Good boy'ம் இல்ல bad boy'ம் இல்ல
-[00:14.18] ரெண்டோட combo நம்ப புள்ள
-[00:17.11] நம்மாலு Weight'ah சே சே சே இல்ல
-[00:19.60] தவ்லூண்டு fight கூட போட்டதில்ல
-[00:22.06] பாஷா போல mass'ah
-[00:24.83] எதுவும் செஞ்சதில்ல
-[00:27.76] ரங்கா போல wrong'ah
-[00:30.42] ஒன்னும் கிழிச்சதில்ல
-[00:33.86] கத்தியில்ல ரத்தமில்ல Rowdy தான்
-[00:36.75] காதலிக்க நேரமுள்ள Rowdy தான்
-[00:39.38] வெட்டு குத்து வேணாம் சொல்லும் Rowdy தான்
-[00:42.27] வெள்ள உள்ளம் கொண்ட நல்ல Rowdy தான்
-[00:45.36] கத்தியில்ல ரத்தமில்ல Rowdy தான்
-[00:47.97] காதலிக்க நேரமுள்ள Rowdy தான்
-[00:50.96] வெட்டு குத்து வேணாம் சொல்லும் Rowdy தான்
-[00:53.32] வெள்ள உள்ளம் கொண்ட நல்ல Rowdy தான்
-[00:57.71] நானும் Rowdy தான்... தான்... தான்...
-[01:03.45] நானும் Rowdy தான்... தான்... தான்...
-[01:09.34] நானும் Rowdy தான்... தான்... தான்...
-[01:14.89] நானும் Rowdy தான்... தான்... தான்... தான்...
-[01:22.25] ஒரு கல்லுல பத்து மாங்கா ஒன்னா அடிப்பானே(நம்ம புள்ள)
-[01:27.89] ஒரு வெட்டுல நூறு துண்டு போட்டுப் பிரிப்பானே(நல்ல புள்ள)
-[01:32.72] சின்ன சண்ட வந்தா, கொஞ்சம் தள்ளி நிப்பான்
-[01:35.58] பெரிய சண்ட வந்தா, பேசி புறிய வெப்பான்
-[01:38.33] ஒரு உண்மையால நீ நொந்து போனா
-[01:41.18] ஒரு பொய்ய சொல்லி நல்லா சிரிக்க வெப்பான்
-[01:43.95] பாஷா போல mass'ah
-[01:47.03] எதுவும் செஞ்சதில்ல
-[01:49.67] ரங்கா போல wrong'ah
-[01:52.57] ஒன்னும் கிழிச்சதில்ல (chorus,start)
-[01:55.75] தம் அடிச்சு மூஞ்சி மேல ஊத மாட்டான்
-[01:58.56] தண்ணி போட்டு தொல்லையேதும் பண்ண மாட்டான்(பலே பலே பலே)
-[02:01.46] பொண்ணuங்கள கிண்டல் பண்ணி கொல்ல மாட்டான்
-[02:03.45] ஆனா சாமி மேல சத்தியமா Rowdy தான் (Super ஜி Super ஜி)
-[02:07.06] கத்தியில்ல ரத்தமில்ல Rowdy தான்
-[02:09.72] காதலிக்க நேரமுள்ள Rowdy தான் (ப்பா)
-[02:12.69] வெட்டு குத்து வேணாம் சொல்லும் Rowdy தான்
-[02:14.83] வெள்ள உள்ளம் கொண்ட நல்ல Rowdy தான்
-[02:19.55] நானும் Rowdy தான்... தான்... தான்...
-[02:25.44] நானும் Rowdy தான்... தான்... தான்...
-[02:31.08] நானும் Rowdy தான்... தான்... தான்...
-[02:36.63] நானும் Rowdy தான்... தான்... தான்...""",
-        provider: 'lyricsify',
-      );
-    }
-    return null;
-  }
 
-  /// Song-aware API with strict metadata validation for language/version/timing.
-  static Future<LyricsPayload?> getLyricsPayloadForSong(Song song) async {
-    final hardcoded = _getHardcodedLyricsForNaanumRowdyDhaan(song);
-    if (hardcoded != null) return hardcoded;
-
-    final lookup = _LyricsLookup.fromSong(song);
+  static Future<LyricsPayload?> getLyricsPayloadForSong(LyricsMetadata song) async {
+    final lookup = _LyricsLookup.fromSong(Song(id: song.songId ?? "", name: song.title, artist: song.artist, album: song.album, duration: song.duration, language: song.language, isrc: song.isrc, songUrl: song.songUrl));
     if (lookup.title.isEmpty) return null;
 
     final candidates = await _fetchCandidates(lookup);
@@ -418,7 +258,7 @@ class LyricsService {
     }
 
     if (song.songUrl != null && song.songUrl!.isNotEmpty) {
-      debugPrint('[LyricsService] Falling back to JioSaavn scrape for: ${song.name}');
+      debugPrint('[LyricsService] Falling back to JioSaavn scrape for: ${song.title}');
       final scraped = await _scrapeJioSaavnLyrics(song.songUrl!);
       if (scraped != null && scraped.hasAny) {
         return scraped;
@@ -495,51 +335,6 @@ class LyricsService {
     return true;
   }
 
-  static int _scoreCandidatePriority({
-    required _LyricsCandidate candidate,
-    required bool isSynced,
-    required _LyricsLookup lookup,
-    required bool isVerifiedSource,
-  }) {
-    int score = 0;
-
-    if (isSynced) {
-      score += 100;
-    }
-
-    // Correct duration (+40)
-    if (lookup.durationSeconds != null && lookup.durationSeconds! > 0 &&
-        candidate.durationSeconds != null && candidate.durationSeconds! > 0) {
-      final durationDiff = (lookup.durationSeconds! - candidate.durationSeconds!).abs();
-      if (durationDiff <= 4) {
-        score += 40;
-      }
-    }
-
-    // More than 20 lines (+20)
-    final lines = _parseCandidateLines(candidate, isSynced: isSynced);
-    if (lines.length > 20) {
-      score += 20;
-    }
-
-    // Language matches (+20)
-    if (lookup.language != null && lookup.language!.isNotEmpty) {
-      final fullText = lines.map((l) => l.text).join('\n');
-      final detectedLang = _detectLanguageFromLyrics(fullText);
-      final normExpected = _normalizeLanguage(lookup.language);
-      if (detectedLang != null && normExpected != null && detectedLang == normExpected) {
-        score += 20;
-      }
-    }
-
-    // Verified source (+30)
-    if (isVerifiedSource) {
-      score += 30;
-    }
-
-    return score;
-  }
-
   static LyricsPayload? _payloadFromCandidate(_LyricsCandidate cand, String provider) {
     final synced = cand.syncedLyrics;
     final plain = _coalescePlainLyrics(cand.plainLyrics, synced);
@@ -551,173 +346,323 @@ class LyricsService {
     );
   }
 
-  static Future<LyricsPayload?> progressiveLyricsSearch(Song song) async {
-    final hardcoded = _getHardcodedLyricsForNaanumRowdyDhaan(song);
-    if (hardcoded != null) return hardcoded;
+  static String _stripMovieName(String title) {
+    var cleaned = title.replaceAll(
+      RegExp(r'\(?([Ff]rom\s+.*?)\)?|\[?([Ff]rom\s+.*?)\]?', caseSensitive: false),
+      '',
+    );
+    return cleaned.replaceAll(RegExp(r'\s+'), ' ').trim();
+  }
 
-    final songId = song.id.trim();
-    final title = song.name.trim();
-    final artist = (song.artist ?? '').trim();
-    final album = (song.sourceAlbumName ?? song.album ?? '').trim();
-    final duration = song.duration ?? 0;
+  static _LyricsCandidate? _findBestCandidate(
+    _LyricsLookup lookup,
+    List<_LyricsCandidate> candidates,
+    double minConfidence,
+  ) {
+    if (candidates.isEmpty) return null;
+
+    final valid = candidates.where((cand) {
+      final hasSynced = _isValidSyncedLyrics(cand.syncedLyrics);
+      final hasPlain = _isValidLyrics(cand.plainLyrics);
+      if (!hasSynced && !hasPlain) return false;
+
+      final isSynced = hasSynced;
+      if (!_validateCandidate(cand, isSynced: isSynced, expectedLanguage: lookup.language)) return false;
+
+      final conf = _calculateConfidenceScore(lookup, cand);
+      return conf >= minConfidence;
+    }).toList();
+
+    if (valid.isEmpty) return null;
+
+    // Sort by confidence score (descending)
+    valid.sort((a, b) => _calculateConfidenceScore(lookup, b)
+        .compareTo(_calculateConfidenceScore(lookup, a)));
+
+    return valid.first;
+  }
+
+  static Future<LyricsPayload?> _winnerPayload(
+    _LyricsCandidate winner,
+    LyricsMetadata song,
+    String provider,
+  ) async {
+    final isVerified = provider.startsWith('lrclib');
+    var payload = _payloadFromCandidate(winner, isVerified ? 'verified' : 'scraper');
+    if (payload != null && payload.hasAny) {
+      if (!payload.hasSynced && payload.hasPlain) {
+        final songObj = Song(
+          id: song.songId ?? "",
+          name: song.title,
+          artist: song.artist,
+          album: song.album,
+          duration: song.duration,
+          language: song.language,
+          isrc: song.isrc,
+          songUrl: song.songUrl,
+        );
+        final serverAligned = await alignAudioWithServer(songObj, payload.plainLyrics!);
+        if (serverAligned != null) {
+          payload = serverAligned;
+        } else {
+          payload = LyricsAlignmentEngine.align(songObj, payload);
+        }
+      }
+      return payload;
+    }
+    return null;
+  }
+
+  static Future<LyricsPayload?> progressiveLyricsSearch(LyricsMetadata song) async {
+    final songId = (song.songId ?? "").trim();
+    final title = song.title.trim();
+    final artist = song.artist.trim();
+    final album = (song.album ?? '').trim();
+    final duration = song.duration;
     final isrc = (song.isrc ?? '').trim();
     final cleanTitle = _cleanTitle(title);
     final cleanArtist = _cleanArtist(artist);
-    final cleanAlbum = _cleanTitle(album);
     final language = song.language;
 
-    StabilityLogger.info('Lyrics', 'Starting parallel race search for: $title (ID: $songId)');
+    StabilityLogger.info('Lyrics', 'Starting priority sequential search for: $title (ID: $songId)');
 
     cancelActiveSearches();
     final client = ApiService.createSecureHttpClient(pinCertificates: false);
     _activeClient = client;
 
-    final lookup = _LyricsLookup.fromSong(song);
-    final List<({_LyricsCandidate candidate, int score, bool isVerified})> results = [];
-    final Completer<LyricsPayload?> completer = Completer<LyricsPayload?>();
+    final lookup = _LyricsLookup.fromMetadata(song);
+    final candidates = <_LyricsCandidate>[];
 
-    void addResult(_LyricsCandidate? cand, bool isVerified) {
-      if (cand == null || completer.isCompleted) return;
-
-      final hasSynced = _isValidSyncedLyrics(cand.syncedLyrics);
-      final hasPlain = _isValidLyrics(cand.plainLyrics);
-
-      if (!hasSynced && !hasPlain) return;
-
-      if (hasSynced) {
-        if (!_validateCandidate(cand, isSynced: true, expectedLanguage: language)) return;
-        final score = _scoreCandidatePriority(candidate: cand, isSynced: true, lookup: lookup, isVerifiedSource: isVerified);
-        results.add((candidate: cand, score: score, isVerified: isVerified));
-        
-        // Early exit: if score is very high (>= 170), resolve immediately!
-        if (score >= 170) {
-          completer.complete(_payloadFromCandidate(cand, isVerified ? 'lrclib' : 'scraper'));
-          return;
+    void addResult(Map<String, dynamic>? entry) {
+      if (entry != null) {
+        final cand = _candidateFromJson(entry);
+        if (cand != null) {
+          candidates.add(cand);
         }
-      } else {
-        if (!_validateCandidate(cand, isSynced: false, expectedLanguage: language)) return;
-        final score = _scoreCandidatePriority(candidate: cand, isSynced: false, lookup: lookup, isVerifiedSource: isVerified);
-        results.add((candidate: cand, score: score, isVerified: isVerified));
       }
     }
 
-    final List<Future<void>> tasks = [];
-
-    // 1. LRCLIB ISRC Get
-    if (isrc.isNotEmpty) {
-      tasks.add(() async {
-        try {
-          final res = await _lrclibGetEntry(artist: '', title: '', isrc: isrc, client: client);
-          if (res != null) addResult(_candidateFromJson(res), true);
-        } catch (_) {}
-      }());
+    void addResults(List<Map<String, dynamic>> entries) {
+      for (final entry in entries) {
+        final cand = _candidateFromJson(entry);
+        if (cand != null) {
+          candidates.add(cand);
+        }
+      }
     }
 
-    // 2. Saavn Backend API
+    // Step 1: Direct JioSaavn Song ID Lookup
     if (songId.isNotEmpty) {
-      tasks.add(() async {
-        try {
-          final cand = await _fetchSaavnCandidate(songId, title: title, artist: artist, album: album, duration: duration, client: client);
-          if (cand != null) addResult(cand, true);
-        } catch (_) {}
-      }());
-    }
-
-    // 3. LRCLIB Clean Exact Get (with duration & album)
-    if (cleanTitle.isNotEmpty && cleanArtist.isNotEmpty) {
-      tasks.add(() async {
-        try {
-          final res = await _lrclibGetEntry(
-            artist: cleanArtist,
-            title: cleanTitle,
-            album: cleanAlbum.isNotEmpty ? cleanAlbum : null,
-            durationSeconds: duration > 0 ? duration : null,
-            client: client,
-          );
-          if (res != null) addResult(_candidateFromJson(res), true);
-        } catch (_) {}
-      }());
-    }
-
-    // 4. LRCLIB Exact Get (with duration & album)
-    if (title.isNotEmpty && artist.isNotEmpty) {
-      tasks.add(() async {
-        try {
-          final res = await _lrclibGetEntry(
-            artist: artist,
-            title: title,
-            album: album.isNotEmpty ? album : null,
-            durationSeconds: duration > 0 ? duration : null,
-            client: client,
-          );
-          if (res != null) addResult(_candidateFromJson(res), true);
-        } catch (_) {}
-      }());
-    }
-
-    // 5. LRCLIB Exact Get without duration
-    if (cleanTitle.isNotEmpty && cleanArtist.isNotEmpty) {
-      tasks.add(() async {
-        try {
-          final res = await _lrclibGetEntry(
-            artist: cleanArtist,
-            title: cleanTitle,
-            client: client,
-          );
-          if (res != null) addResult(_candidateFromJson(res), true);
-        } catch (_) {}
-      }());
-    }
-
-    // 6. Broad Search Queries & Search Variants
-    final Set<String> queryStrings = {};
-    if (cleanTitle.isNotEmpty) {
-      queryStrings.add(cleanTitle);
-      if (cleanArtist.isNotEmpty) queryStrings.add('$cleanTitle $cleanArtist');
-      if (cleanAlbum.isNotEmpty) queryStrings.add('$cleanTitle $cleanAlbum');
-    }
-    final scraperQueries = generateScraperQueries(title, artist, album, language);
-    for (final q in scraperQueries.take(3)) {
-      queryStrings.add(q.replaceAll(RegExp(r'\s+lyrics$'), ''));
-    }
-
-    for (final q in queryStrings) {
-      tasks.add(() async {
-        try {
-          final entries = await _lrclibSearchEntries(q, client: client);
-          for (final entry in entries) {
-            addResult(_candidateFromJson(entry), true);
-          }
-        } catch (_) {}
-      }());
-    }
-
-    // 7. JioSaavn Web Scraper
-    if (song.songUrl != null && song.songUrl!.isNotEmpty) {
-      tasks.add(() async {
-        try {
-          final scraped = await _scrapeJioSaavnLyrics(song.songUrl!, client: client);
-          if (scraped != null) {
-            addResult(_LyricsCandidate(
-              plainLyrics: scraped.plainLyrics,
-              syncedLyrics: scraped.syncedLyrics,
-              trackName: title,
-              artistName: artist,
-              albumName: album,
-              durationSeconds: duration,
-              language: language,
-            ), false);
-          }
-        } catch (_) {}
-      }());
-    }
-
-    // 8. Search Engine Scraper
-    tasks.add(() async {
       try {
-        final scraped = await _scrapeLyricsFromSearchEngine(title, artist, album, language, client);
+        final directCandidate = await _scrapeJioSaavnLyricsDirect(
+          songId,
+          title: title,
+          artist: artist,
+          album: album,
+          duration: duration,
+          client: client,
+        );
+        if (directCandidate != null) {
+          candidates.add(directCandidate);
+        }
+      } catch (_) {}
+
+      final winner = _findBestCandidate(lookup, candidates, 0.75);
+      if (winner != null) {
+        if (_activeClient == client) _activeClient = null;
+        client.close();
+
+        // Cache the lyrics locally using LyricsCache
+        await LyricsCache.put(
+          songId: songId,
+          title: title,
+          artist: artist,
+          album: album,
+          duration: duration,
+          payload: winner.plainLyrics != null || winner.syncedLyrics != null
+              ? LyricsPayload(
+                  plainLyrics: winner.plainLyrics,
+                  syncedLyrics: winner.syncedLyrics,
+                  provider: 'jiosaavn API',
+                )
+              : null,
+          providerSource: 'saavn',
+        );
+
+        return _winnerPayload(winner, song, 'jiosaavn_direct_id');
+      }
+    }
+
+    // Prepare cleaned components
+    final titleWithoutMovie = _stripMovieName(title);
+
+    // Step 2: JioSaavn Search-by-Name Fallback
+    if (titleWithoutMovie.isNotEmpty && cleanArtist.isNotEmpty) {
+      try {
+        final jioCandidates = await _searchJioSaavnCandidates(
+          '$titleWithoutMovie $cleanArtist',
+          client: client,
+        );
+        for (final jioCand in jioCandidates) {
+          if (jioCand.plainLyrics != null || jioCand.syncedLyrics != null) {
+            final conf = _calculateConfidenceScore(lookup, jioCand);
+            if (conf >= 0.75) {
+              candidates.add(jioCand);
+            }
+          } else if (jioCand.songId != null && jioCand.songId!.isNotEmpty) {
+            final conf = _calculateConfidenceScore(lookup, jioCand);
+            if (conf >= 0.75) {
+              final fetchedCand = await _scrapeJioSaavnLyricsDirect(
+                jioCand.songId!,
+                title: jioCand.trackName,
+                artist: jioCand.artistName,
+                album: jioCand.albumName,
+                duration: jioCand.durationSeconds,
+                client: client,
+              );
+              if (fetchedCand != null) {
+                candidates.add(fetchedCand);
+              }
+            }
+          }
+        }
+      } catch (_) {}
+
+      final winner = _findBestCandidate(lookup, candidates, 0.75);
+      if (winner != null) {
+        if (_activeClient == client) _activeClient = null;
+        client.close();
+
+        // Cache the lyrics locally using LyricsCache
+        await LyricsCache.put(
+          songId: winner.songId ?? songId,
+          title: title,
+          artist: artist,
+          album: album,
+          duration: duration,
+          payload: winner.plainLyrics != null || winner.syncedLyrics != null
+              ? LyricsPayload(
+                  plainLyrics: winner.plainLyrics,
+                  syncedLyrics: winner.syncedLyrics,
+                  provider: 'jiosaavn API',
+                )
+              : null,
+          providerSource: 'saavn',
+        );
+
+        return _winnerPayload(winner, song, 'jiosaavn_search_by_name');
+      }
+    }
+
+    // Step 3: LRCLIB Fallback Chain
+
+    // A. ISRC Lookup (Direct & highest confidence)
+    if (isrc.isNotEmpty) {
+      try {
+        final res = await _lrclibGetEntry(artist: '', title: '', isrc: isrc, client: client);
+        addResult(res);
+      } catch (_) {}
+      final winner = _findBestCandidate(lookup, candidates, 0.90);
+      if (winner != null) {
+        if (_activeClient == client) _activeClient = null;
+        client.close();
+        return _winnerPayload(winner, song, 'lrclib_isrc');
+      }
+    }
+
+    // B. Song Title (without movie) + Artist
+    if (titleWithoutMovie.isNotEmpty && cleanArtist.isNotEmpty) {
+      try {
+        final res = await _lrclibGetEntry(
+          artist: cleanArtist,
+          title: titleWithoutMovie,
+          durationSeconds: duration > 0 ? duration : null,
+          client: client,
+        );
+        addResult(res);
+
+        final searchRes = await _lrclibSearchEntries('$titleWithoutMovie $cleanArtist', client: client);
+        addResults(searchRes);
+      } catch (_) {}
+
+      final winner = _findBestCandidate(lookup, candidates, 0.82);
+      if (winner != null) {
+        if (_activeClient == client) _activeClient = null;
+        client.close();
+        return _winnerPayload(winner, song, 'lrclib_primary');
+      }
+    }
+
+    // C. Song Title + Artist + Album
+    if (titleWithoutMovie.isNotEmpty && cleanArtist.isNotEmpty && album.isNotEmpty) {
+      try {
+        final res = await _lrclibGetEntry(
+          artist: cleanArtist,
+          title: titleWithoutMovie,
+          album: album,
+          durationSeconds: duration > 0 ? duration : null,
+          client: client,
+        );
+        addResult(res);
+
+        final searchRes = await _lrclibSearchEntries('$titleWithoutMovie $cleanArtist $album', client: client);
+        addResults(searchRes);
+      } catch (_) {}
+
+      final winner = _findBestCandidate(lookup, candidates, 0.82);
+      if (winner != null) {
+        if (_activeClient == client) _activeClient = null;
+        client.close();
+        return _winnerPayload(winner, song, 'lrclib_primary_album');
+      }
+    }
+
+    // D. Clean Song Title + Artist
+    if (cleanTitle.isNotEmpty && cleanArtist.isNotEmpty) {
+      try {
+        final res = await _lrclibGetEntry(
+          artist: cleanArtist,
+          title: cleanTitle,
+          durationSeconds: duration > 0 ? duration : null,
+          client: client,
+        );
+        addResult(res);
+
+        final searchRes = await _lrclibSearchEntries('$cleanTitle $cleanArtist', client: client);
+        addResults(searchRes);
+      } catch (_) {}
+
+      final winner = _findBestCandidate(lookup, candidates, 0.82);
+      if (winner != null) {
+        if (_activeClient == client) _activeClient = null;
+        client.close();
+        return _winnerPayload(winner, song, 'lrclib_clean_title');
+      }
+    }
+
+    // E. Song Title only
+    if (titleWithoutMovie.isNotEmpty) {
+      try {
+        final searchRes = await _lrclibSearchEntries(titleWithoutMovie, client: client);
+        addResults(searchRes);
+      } catch (_) {}
+
+      final winner = _findBestCandidate(lookup, candidates, 0.80);
+      if (winner != null) {
+        if (_activeClient == client) _activeClient = null;
+        client.close();
+        return _winnerPayload(winner, song, 'lrclib_title_only');
+      }
+    }
+
+    // Last Resort (JioSaavn Scraper, Search Engine Scraper, or Movie Album name)
+
+    // A. JioSaavn Web Scraper
+    if (song.songUrl != null && song.songUrl!.isNotEmpty) {
+      try {
+        final scraped = await _scrapeJioSaavnLyrics(song.songUrl!, client: client);
         if (scraped != null) {
-          addResult(_LyricsCandidate(
+          candidates.add(_LyricsCandidate(
             plainLyrics: scraped.plainLyrics,
             syncedLyrics: scraped.syncedLyrics,
             trackName: title,
@@ -725,53 +670,49 @@ class LyricsService {
             albumName: album,
             durationSeconds: duration,
             language: language,
-          ), false);
+          ));
         }
       } catch (_) {}
-    }());
+    }
 
-    Future.wait(tasks).then((_) {
-      if (!completer.isCompleted) {
-        completer.complete(null);
-      }
-    });
-
-    // Time budget: hard timeout of 5000 ms
-    final timeoutFuture = Future.delayed(const Duration(milliseconds: 5000)).then((_) {
-      if (!completer.isCompleted) {
-        completer.complete(null); // Do not complete with error, allow processing of found results
-      }
-    });
-
+    // B. Search Engine Scraper with movie/album search queries
     try {
-      await Future.any([completer.future, timeoutFuture]);
+      final scraped = await _scrapeLyricsFromSearchEngine(title, artist, album, language, client);
+      if (scraped != null) {
+        candidates.add(_LyricsCandidate(
+          plainLyrics: scraped.plainLyrics,
+          syncedLyrics: scraped.syncedLyrics,
+          trackName: title,
+          artistName: artist,
+          albumName: album,
+          durationSeconds: duration,
+          language: language,
+        ));
+      }
     } catch (_) {}
+
+    // C. Original title queries containing movie/album name as a last resort
+    if (title.isNotEmpty && artist.isNotEmpty) {
+      try {
+        final res = await _lrclibGetEntry(
+          artist: artist,
+          title: title,
+          album: album.isNotEmpty ? album : null,
+          durationSeconds: duration > 0 ? duration : null,
+          client: client,
+        );
+        addResult(res);
+      } catch (_) {}
+    }
 
     if (_activeClient == client) {
       _activeClient = null;
     }
     client.close();
 
-    if (results.isNotEmpty) {
-      results.sort((a, b) => b.score.compareTo(a.score));
-      final best = results.first.candidate;
-      final bestScore = results.first.score;
-      final bestIsVerified = results.first.isVerified;
-
-      var bestPayload = _payloadFromCandidate(best, bestIsVerified ? 'verified' : 'scraper');
-      if (bestPayload != null && bestPayload.hasAny) {
-        // Run forced server alignment or local alignment engine for plain lyrics
-        if (!bestPayload.hasSynced && bestPayload.hasPlain) {
-          final serverAligned = await alignAudioWithServer(song, bestPayload.plainLyrics!);
-          if (serverAligned != null) {
-            bestPayload = serverAligned;
-          } else {
-            bestPayload = LyricsAlignmentEngine.align(song, bestPayload);
-          }
-        }
-        StabilityLogger.info('Lyrics', 'Selected best candidate with score $bestScore');
-        return bestPayload;
-      }
+    final winner = _findBestCandidate(lookup, candidates, 0.50); // Relaxed threshold for last resort
+    if (winner != null) {
+      return _winnerPayload(winner, song, 'last_resort');
     }
 
     _logDetailedLyricsFailure(
@@ -783,7 +724,7 @@ class LyricsService {
       cleanTitle: cleanTitle,
       cleanArtist: cleanArtist,
       isrc: isrc,
-      reason: 'All parallel search tasks completed/timed out with no matching candidate.',
+      reason: 'All priority sequential search fallback steps completed with no matching candidate.',
     );
     return null;
   }
@@ -1038,6 +979,224 @@ class LyricsService {
     return null;
   }
 
+  static Future<_LyricsCandidate?> _scrapeJioSaavnLyricsDirect(
+    String songId, {
+    required String title,
+    required String artist,
+    required String album,
+    int? duration,
+    http.Client? client,
+  }) async {
+    final sId = songId.trim();
+    if (sId.isEmpty) return null;
+    final clientToUse = client ?? ApiService.createSecureHttpClient(pinCertificates: false);
+    try {
+      // 1. Direct api.php call
+      final lyricsUrl = 'https://www.jiosaavn.com/api.php?__call=lyrics.getLyrics&lyrics_id=$sId&ctx=web6dot0&api_version=4&_format=json';
+      final res = await _getWithRetry(
+        Uri.parse(lyricsUrl),
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept-Language': 'en-US,en;q=0.9',
+        },
+        client: clientToUse,
+        timeout: const Duration(seconds: 4),
+      );
+
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body);
+        if (data != null && data is Map && data['status'] != 'failure' && data['lyrics'] != null) {
+          var rawLyrics = data['lyrics'].toString();
+          if (rawLyrics.isNotEmpty) {
+            rawLyrics = rawLyrics.replaceAll(RegExp(r'</?br/?>'), '\n');
+            rawLyrics = rawLyrics.replaceAll(RegExp(r'<[^>]*>'), '');
+            
+            rawLyrics = rawLyrics
+                .replaceAll('&amp;', '&')
+                .replaceAll('&quot;', '"')
+                .replaceAll('&#039;', "'")
+                .replaceAll('&apos;', "'")
+                .replaceAll('&lt;', '<')
+                .replaceAll('&gt;', '>');
+
+            final cleaned = rawLyrics.trim();
+            if (cleaned.isNotEmpty) {
+              return _LyricsCandidate(
+                plainLyrics: cleaned,
+                syncedLyrics: null,
+                trackName: title,
+                artistName: artist,
+                albumName: album,
+                durationSeconds: duration,
+                language: null,
+                songId: sId,
+              );
+            }
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('[LyricsService] Direct JioSaavn api.php lyrics retrieval failed: $e');
+    }
+
+    // 2. Unofficial API endpoints (/lyrics/?query=...)
+    final endpoints = [
+      '${ApiService.baseUrl}/lyrics/?query=$sId&lyrics=true',
+      '${ApiService.baseUrl}/lyrics?query=$sId&lyrics=true',
+      'https://jiosaavn-api-murex.vercel.app/lyrics/?query=$sId&lyrics=true',
+      'https://jiosaavn-api-murex.vercel.app/lyrics?query=$sId&lyrics=true',
+    ];
+    for (final url in endpoints) {
+      try {
+        final res = await _getWithRetry(
+          Uri.parse(url),
+          headers: {'User-Agent': 'MusicHub/2.0'},
+          client: clientToUse,
+          timeout: const Duration(seconds: 4),
+        );
+        if (res.statusCode == 200) {
+          final body = jsonDecode(res.body);
+          final data = body['data'] ?? body;
+          final lyrics = data['lyrics']?.toString();
+          if (lyrics != null && lyrics.isNotEmpty) {
+            final hasLrcTags = _lrcTagRegex.hasMatch(lyrics);
+            return _LyricsCandidate(
+              plainLyrics: hasLrcTags ? null : lyrics,
+              syncedLyrics: hasLrcTags ? lyrics : data['snippets']?.toString(),
+              trackName: data['name'] ?? title,
+              artistName: data['artist'] ?? artist,
+              albumName: data['album'] ?? album,
+              durationSeconds: duration,
+              language: null,
+              songId: sId,
+            );
+          }
+        }
+      } catch (_) {}
+    }
+
+    // 3. Fallback to existing _fetchSaavnCandidate (which uses baseUrl /api/songs/:id/lyrics)
+    try {
+      final saavnCandidate = await _fetchSaavnCandidate(
+        sId,
+        title: title,
+        artist: artist,
+        album: album,
+        duration: duration,
+        client: clientToUse,
+      );
+      if (saavnCandidate != null) {
+        return saavnCandidate;
+      }
+    } catch (_) {}
+
+    return null;
+  }
+
+  static Future<List<_LyricsCandidate>> _searchJioSaavnCandidates(
+    String query, {
+    http.Client? client,
+  }) async {
+    final clientToUse = client ?? ApiService.createSecureHttpClient(pinCertificates: false);
+    final results = <_LyricsCandidate>[];
+
+    final endpoints = [
+      '${ApiService.baseUrl}/api/search/songs?query=${Uri.encodeComponent(query)}',
+      'https://jiosaavn-api-murex.vercel.app/api/search/songs?query=${Uri.encodeComponent(query)}',
+      '${ApiService.baseUrl}/result/?query=${Uri.encodeComponent(query)}&lyrics=true',
+      '${ApiService.baseUrl}/result?query=${Uri.encodeComponent(query)}&lyrics=true',
+      'https://jiosaavn-api-murex.vercel.app/result/?query=${Uri.encodeComponent(query)}&lyrics=true',
+      'https://jiosaavn-api-murex.vercel.app/result?query=${Uri.encodeComponent(query)}&lyrics=true',
+    ];
+
+    for (final url in endpoints) {
+      try {
+        final res = await _getWithRetry(
+          Uri.parse(url),
+          headers: {'User-Agent': 'MusicHub/2.0'},
+          client: clientToUse,
+          timeout: const Duration(seconds: 4),
+        );
+        if (res.statusCode == 200) {
+          final body = jsonDecode(res.body);
+          final data = body['data'] ?? body;
+          List<dynamic> items = [];
+          if (data is List) {
+            items = data;
+          } else if (data is Map) {
+            if (data['results'] is List) {
+              items = data['results'] as List;
+            } else if (data['songs'] is List) {
+              items = data['songs'] as List;
+            } else if (data['songs'] is Map && data['songs']['results'] is List) {
+              items = data['songs']['results'] as List;
+            } else {
+              items = [data];
+            }
+          }
+
+          for (final item in items) {
+            if (item is! Map) continue;
+            final map = Map<String, dynamic>.from(item);
+            
+            final songId = map['id']?.toString() ?? '';
+            if (songId.isEmpty) continue;
+
+            final trackName = map['name'] ?? map['title'] ?? '';
+            String artistName = '';
+            if (map['artists'] != null) {
+              if (map['artists'] is Map) {
+                final primary = map['artists']['primary'];
+                if (primary is List) {
+                  artistName = primary.map((a) => a['name'] ?? '').join(', ');
+                } else {
+                  artistName = map['artists']['primary']?.toString() ?? '';
+                }
+              } else {
+                artistName = map['artists']?.toString() ?? '';
+              }
+            } else if (map['primaryArtists'] != null) {
+              artistName = map['primaryArtists'].toString();
+            }
+
+            final albumName = map['album'] is Map ? map['album']['name']?.toString() : map['album']?.toString();
+            final duration = _parseDurationSeconds(map['duration']);
+
+            final lyrics = map['lyrics']?.toString();
+            if (lyrics != null && lyrics.trim().isNotEmpty) {
+              final hasLrcTags = _lrcTagRegex.hasMatch(lyrics);
+              results.add(_LyricsCandidate(
+                plainLyrics: hasLrcTags ? null : lyrics,
+                syncedLyrics: hasLrcTags ? lyrics : map['snippets']?.toString(),
+                trackName: trackName,
+                artistName: artistName,
+                albumName: albumName ?? '',
+                durationSeconds: duration,
+                language: map['language']?.toString(),
+                isrc: map['isrc']?.toString(),
+                songId: songId,
+              ));
+            } else {
+              results.add(_LyricsCandidate(
+                plainLyrics: null,
+                syncedLyrics: null,
+                trackName: trackName,
+                artistName: artistName,
+                albumName: albumName ?? '',
+                durationSeconds: duration,
+                language: map['language']?.toString(),
+                isrc: map['isrc']?.toString(),
+                songId: songId,
+              ));
+            }
+          }
+        }
+      } catch (_) {}
+      if (results.isNotEmpty) break;
+    }
+    return results;
+  }
+
   static Future<LyricsPayload?> _scrapeJioSaavnLyrics(String songUrl, {http.Client? client}) async {
     final clientToUse = client ?? ApiService.createSecureHttpClient(pinCertificates: false);
     try {
@@ -1120,17 +1279,28 @@ class LyricsService {
     return null;
   }
 
-  static void prefetchLyricsForSong(Song song) {
-    final title = song.name.trim();
+  static void prefetchLyricsForSong(LyricsMetadata song) {
+    final title = song.title.trim();
     if (title.isEmpty) return;
-    final artist = (song.artist ?? '').trim();
-    final album = (song.sourceAlbumName ?? song.album ?? '').trim();
-    final duration = song.duration ?? 0;
+    final artist = song.artist.trim();
+    final album = (song.album ?? '').trim();
+    final duration = song.duration;
 
     Future(() async {
       try {
+        final songObj = Song(
+          id: song.songId ?? "",
+          name: song.title,
+          artist: song.artist,
+          album: song.album,
+          duration: song.duration,
+          language: song.language,
+          isrc: song.isrc,
+          songUrl: song.songUrl,
+        );
+
         final cached = await LyricsCache.get(
-          songId: song.id,
+          songId: song.songId ?? "",
           title: title,
           artist: artist,
           album: album,
@@ -1142,11 +1312,11 @@ class LyricsService {
         if (payload != null && payload.hasAny) {
           var finalPayload = payload;
           if (!payload.hasSynced && payload.hasPlain) {
-            final serverAligned = await alignAudioWithServer(song, payload.plainLyrics!);
-            finalPayload = serverAligned ?? LyricsAlignmentEngine.align(song, payload);
+            final serverAligned = await alignAudioWithServer(songObj, payload.plainLyrics!);
+            finalPayload = serverAligned ?? LyricsAlignmentEngine.align(songObj, payload);
           }
           await LyricsCache.put(
-            songId: song.id,
+            songId: song.songId ?? "",
             title: title,
             artist: artist,
             album: album,
@@ -1415,6 +1585,7 @@ class LyricsService {
         albumName: data['album'] ?? album,
         durationSeconds: duration,
         language: null,
+        songId: trackId,
       );
     } catch (e) {
       debugPrint('[LyricsService] Saavn candidate fetch failed: $e');
@@ -1456,6 +1627,7 @@ class LyricsService {
       durationSeconds: _parseDurationSeconds(json['duration']),
       language: _normalizeOptionalString(json['language'] ?? json['lang']),
       isrc: _normalizeOptionalString(json['isrc']),
+      songId: _normalizeOptionalString(json['id'] ?? json['songId'] ?? json['song_id']),
     );
   }
 
@@ -1961,6 +2133,12 @@ class LyricsService {
   }
 
   static double _calculateConfidenceScore(_LyricsLookup lookup, _LyricsCandidate candidate) {
+    if (lookup.trackId.isNotEmpty &&
+        candidate.songId != null && candidate.songId!.trim().isNotEmpty &&
+        lookup.trackId.toLowerCase() == candidate.songId!.trim().toLowerCase()) {
+      return 1.0;
+    }
+
     if (lookup.isrc != null && lookup.isrc!.trim().isNotEmpty &&
         candidate.isrc != null && candidate.isrc!.trim().isNotEmpty &&
         lookup.isrc!.trim().toLowerCase() == candidate.isrc!.trim().toLowerCase()) {
@@ -1978,6 +2156,10 @@ class LyricsService {
     final cleanTitleSimilarity = _similarityScore(expectedCleanTitle, candidateCleanTitle);
     if (cleanTitleSimilarity > titleSimilarity) {
       titleSimilarity = cleanTitleSimilarity;
+    }
+
+    if (titleSimilarity < 0.75) {
+      return 0.0;
     }
 
     if (titleSimilarity < 0.85) {

@@ -1148,7 +1148,7 @@ class DownloadService {
         // Lyrics
         Future(() async {
           try {
-            final payload = await LyricsService.getLyricsPayloadForSong(song);
+            final payload = await LyricsService.getLyricsPayloadForSong(song.toLyricsMetadata());
             if (payload != null) {
               await LyricsService.saveLocalLrc(song.id, payload);
               // Also persist to Hive cache

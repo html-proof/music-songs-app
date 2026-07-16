@@ -1,5 +1,5 @@
 import '../models/song.dart';
-import 'lyrics_service.dart';
+import '../models/lyrics_payload.dart';
 
 class LyricsAlignmentEngine {
   /// Aligns plain text lyrics to the song's duration using character-length heuristics

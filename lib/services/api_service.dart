@@ -559,6 +559,7 @@ class ApiService {
     String query, {
     List<String> preferredLanguages = const [],
     int limit = 20,
+    raw_http.Client? client,
   }) async {
     final normalizedQuery = query.trim().replaceAll(RegExp(r'\s+'), ' ');
     if (normalizedQuery.isEmpty) {
@@ -590,6 +591,7 @@ class ApiService {
         normalizedQuery,
         normalizedLanguages: normalizedLanguages,
         safeLimit: safeLimit,
+        client: client,
       );
       if (result['songs']!.isNotEmpty || result['albums']!.isNotEmpty || result['artists']!.isNotEmpty) {
         await _writeCache(cacheKey, result);
@@ -602,6 +604,7 @@ class ApiService {
     String normalizedQuery, {
     required List<String> normalizedLanguages,
     required int safeLimit,
+    raw_http.Client? client,
   }) async {
     final queryParams = <String, String>{
       'query': normalizedQuery,
@@ -614,12 +617,9 @@ class ApiService {
     dynamic responseData;
     if (_shouldUsePrimaryApi) {
       try {
-        final res = await http
-            .get(
-              Uri.parse(
-                '$baseUrl/api/search',
-              ).replace(queryParameters: queryParams),
-            )
+        final res = await (client != null
+                ? client.get(Uri.parse('$baseUrl/api/search').replace(queryParameters: queryParams))
+                : http.get(Uri.parse('$baseUrl/api/search').replace(queryParameters: queryParams)))
             .timeout(_searchRequestTimeout);
         if (res.statusCode != 200) throw Exception('Search failed');
         responseData = jsonDecode(res.body);
@@ -638,12 +638,9 @@ class ApiService {
           'query': normalizedQuery,
           'limit': safeLimit.toString(),
         };
-        final retryRes = await http
-            .get(
-              Uri.parse(
-                '$baseUrl/api/search',
-              ).replace(queryParameters: retryParams),
-            )
+        final retryRes = await (client != null
+                ? client.get(Uri.parse('$baseUrl/api/search').replace(queryParameters: retryParams))
+                : http.get(Uri.parse('$baseUrl/api/search').replace(queryParameters: retryParams)))
             .timeout(_searchRequestTimeout);
         if (retryRes.statusCode == 200) {
           responseData = jsonDecode(retryRes.body);
@@ -658,7 +655,7 @@ class ApiService {
 
     if (responseData == null) {
       try {
-        final fallbackSongs = await _searchSongsFallback(normalizedQuery);
+        final fallbackSongs = await _searchSongsFallback(normalizedQuery, client: client);
         // Apply strict filtering to fallback results
         final filteredFallback = fallbackSongs.where((s) {
           if (s is! Map) return false;
@@ -767,6 +764,7 @@ class ApiService {
     int page = 1,
     List<String> preferredLanguages = const [],
     int limit = 20,
+    raw_http.Client? client,
   }) async {
     final normalizedQuery = query.trim().replaceAll(RegExp(r'\s+'), ' ');
     if (normalizedQuery.isEmpty) return const [];
@@ -785,12 +783,9 @@ class ApiService {
     dynamic responseData;
     if (_shouldUsePrimaryApi) {
       try {
-        final res = await http
-            .get(
-              Uri.parse(
-                '$baseUrl/api/search',
-              ).replace(queryParameters: queryParams),
-            )
+        final res = await (client != null
+                ? client.get(Uri.parse('$baseUrl/api/search').replace(queryParameters: queryParams))
+                : http.get(Uri.parse('$baseUrl/api/search').replace(queryParameters: queryParams)))
             .timeout(_searchRequestTimeout);
         if (res.statusCode != 200) throw Exception('Search failed');
         responseData = jsonDecode(res.body);
@@ -806,6 +801,7 @@ class ApiService {
           normalizedQuery,
           preferredLanguages: normalizedLanguages,
           limit: safeLimit,
+          client: client,
         );
         return (fallback['songs'] ?? const [])
             .take(safeLimit)
@@ -851,7 +847,7 @@ class ApiService {
     return songs.map((e) => e['song']).take(safeLimit).toList(growable: false);
   }
 
-  static Future<Map<String, dynamic>> getSong(String id, {bool forceRefresh = false}) async {
+  static Future<Map<String, dynamic>> getSong(String id, {bool forceRefresh = false, raw_http.Client? client}) async {
     final songCacheKey = _cacheKey('song', {'id': id});
     if (!forceRefresh) {
       final cached = await _readCache(songCacheKey, _songCacheTtl);
@@ -862,8 +858,9 @@ class ApiService {
 
     if (_shouldUsePrimaryApi) {
       try {
-        final res = await http
-            .get(Uri.parse('$baseUrl/api/songs/$id'))
+        final res = await (client != null
+                ? client.get(Uri.parse('$baseUrl/api/songs/$id'))
+                : http.get(Uri.parse('$baseUrl/api/songs/$id')))
             .timeout(const Duration(seconds: 3));
         if (res.statusCode == 200) {
           final parsed = jsonDecode(res.body);
@@ -881,8 +878,9 @@ class ApiService {
     // Fallback to Vercel API
     debugPrint('Using Vercel fallback for getSong...');
     try {
-      final res = await http
-          .get(Uri.parse('$_fallbackSearchBaseUrl/api/songs?ids=$id'))
+      final res = await (client != null
+              ? client.get(Uri.parse('$_fallbackSearchBaseUrl/api/songs?ids=$id'))
+              : http.get(Uri.parse('$_fallbackSearchBaseUrl/api/songs?ids=$id')))
           .timeout(const Duration(seconds: 3));
       if (res.statusCode == 200) {
         final parsed = jsonDecode(res.body);
@@ -915,6 +913,7 @@ class ApiService {
     String? id,
     String? query,
     List<String> preferredLanguages = const [],
+    raw_http.Client? client,
   }) async {
     final normalizedId = (id ?? '').trim();
     final normalizedQuery = (query ?? '').trim();
@@ -947,12 +946,9 @@ class ApiService {
     final requestKey = 'get_albums_${normalizedId}_${normalizedQuery}_${normalizedLanguages.join(",")}';
     return _deduplicateRequest<Map<String, dynamic>>(requestKey, () async {
       try {
-        final res = await http
-            .get(
-              Uri.parse(
-                '$baseUrl/api/albums',
-              ).replace(queryParameters: queryParams),
-            )
+        final res = await (client != null
+                ? client.get(Uri.parse('$baseUrl/api/albums').replace(queryParameters: queryParams))
+                : http.get(Uri.parse('$baseUrl/api/albums').replace(queryParameters: queryParams)))
             .timeout(_albumRequestTimeout);
 
         if (res.statusCode == 200) {
@@ -2266,14 +2262,11 @@ class ApiService {
     return merged;
   }
 
-  static Future<List<dynamic>> _searchSongsFallback(String query) async {
+  static Future<List<dynamic>> _searchSongsFallback(String query, {raw_http.Client? client}) async {
     try {
-      final res = await http
-          .get(
-            Uri.parse(
-              '$_fallbackSearchBaseUrl/api/search/songs?query=${Uri.encodeComponent(query)}',
-            ),
-          )
+      final res = await (client != null
+              ? client.get(Uri.parse('$_fallbackSearchBaseUrl/api/search/songs?query=${Uri.encodeComponent(query)}'))
+              : http.get(Uri.parse('$_fallbackSearchBaseUrl/api/search/songs?query=${Uri.encodeComponent(query)}')))
           .timeout(_fallbackSearchTimeout);
       if (res.statusCode != 200) return const [];
 

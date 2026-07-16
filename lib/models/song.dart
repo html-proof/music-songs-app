@@ -1,4 +1,8 @@
 import '../utils/text_cleaner.dart';
+import 'lyrics_metadata.dart';
+import 'stream_metadata.dart';
+import 'song_metadata.dart';
+
 
 class Song {
   static const Object _unset = Object();
@@ -551,5 +555,38 @@ class Song {
       }
     }
     return selected;
+  }
+}
+
+extension SongMetadataExtension on Song {
+  LyricsMetadata toLyricsMetadata() {
+    return LyricsMetadata(
+      title: name,
+      artist: artist ?? '',
+      duration: duration ?? 0,
+      language: language,
+      album: sourceAlbumName ?? album,
+      songId: id,
+      isrc: isrc,
+      songUrl: songUrl,
+    );
+  }
+
+  StreamMetadata toStreamMetadata() {
+    return StreamMetadata(
+      streamUrl: streamUrl ?? '',
+      provider: 'jiosaavn',
+    );
+  }
+
+  SongMetadata toSongMetadata() {
+    return SongMetadata(
+      title: name,
+      artist: artist ?? '',
+      album: sourceAlbumName ?? album,
+      movie: album,
+      artwork: imageUrl,
+      duration: duration,
+    );
   }
 }

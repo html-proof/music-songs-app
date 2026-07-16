@@ -65,14 +65,14 @@ class PlayerProvider extends ChangeNotifier with WidgetsBindingObserver {
   Timer? _loadingSafetyTimer;
 
   Song? get resolvingSong => _resolvingSong;
-  bool get isPlaying => _isPlaying;
+  bool get isPlaying => _isPlaying || playbackState == PlaybackState.buffering;
   bool get shuffleModeEnabled => _shuffleModeEnabled;
   LoopMode get loopMode => _loopMode;
   Duration get position => _position;
   Duration get duration => _duration;
   bool get isOffline => _isOffline;
   bool get isWeakConnection => ConnectivityManager.isWeak;
-  bool get isBuffering => _isBuffering;
+  bool get isBuffering => _isBuffering || playbackState == PlaybackState.buffering;
   bool get isQualitySwitching => _isQualitySwitching;
   bool get isSwitchingSource => _isSwitchingSource;
   bool get isInterruptionActive => _isInterruptionActive;

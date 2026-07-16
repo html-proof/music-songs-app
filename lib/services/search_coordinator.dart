@@ -1,0 +1,379 @@
+import 'dart:async';
+import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
+
+import '../models/song.dart';
+import 'api_service.dart';
+import 'stream_resolver.dart';
+import 'verification_engine.dart';
+
+class ResolvedStreamEntry {
+  final String songId;
+  final Song song;
+  final String streamUrl;
+  final bool isValidated;
+  final DateTime expiresAt;
+  final String provider;
+  final int bitrate;
+
+  ResolvedStreamEntry({
+    required this.songId,
+    required this.song,
+    required this.streamUrl,
+    required this.isValidated,
+    required this.expiresAt,
+    required this.provider,
+    required this.bitrate,
+  });
+
+  bool get isExpired => DateTime.now().isAfter(expiresAt);
+}
+
+class SearchCoordinator {
+  static final Map<String, List<http.Client>> _sessionClients = {};
+  static final Map<String, ResolvedStreamEntry> _resolvedCache = {};
+  static final Map<String, Future<Song?>> _activeRecoveryTasks = {};
+
+  static final List<String> _alternateCdns = [
+    'aac.saavncdn.com',
+    'jiosaavn.cdn.jio.com',
+    'snoidcdnems04.cdnsrv.jio.com',
+  ];
+
+  /// Registers a client to a specific session.
+  static void _registerClient(String sessionId, http.Client client) {
+    _sessionClients.putIfAbsent(sessionId, () => []).add(client);
+  }
+
+  /// Cancels all ongoing fallback searches and stream validations for a specific session.
+  static void cancelSession(String sessionId) {
+    debugPrint('[SearchCoordinator] Canceling active fallback tasks for session: $sessionId.');
+    final clients = _sessionClients.remove(sessionId);
+    if (clients != null) {
+      for (var client in clients) {
+        try {
+          client.close();
+        } catch (_) {}
+      }
+    }
+  }
+
+  /// Cancels all ongoing fallback searches and stream validations across all sessions.
+  static void cancelAll() {
+    debugPrint('[SearchCoordinator] Canceling all active fallback tasks across all sessions.');
+    final keys = List<String>.from(_sessionClients.keys);
+    for (var key in keys) {
+      cancelSession(key);
+    }
+    _sessionClients.clear();
+    _activeRecoveryTasks.clear();
+  }
+
+  /// Fast memory cache lookup. Expired entries must be refreshed automatically in the background.
+  static ResolvedStreamEntry? getCacheEntry(String songId, {Song? songFallback}) {
+    final entry = _resolvedCache[songId];
+    if (entry != null) {
+      if (entry.isExpired) {
+        if (songFallback != null) {
+          debugPrint('[SearchCoordinator] Cache entry expired for $songId. Triggering automatic background refresh.');
+          unawaited(recoverSong(songFallback, sessionId: 'auto-refresh-$songId'));
+        }
+        return entry;
+      }
+      if (entry.isValidated) {
+        return entry;
+      }
+    }
+    return null;
+  }
+
+  /// Consolidate caching of stream entries.
+  static void cacheStream({
+    required String songId,
+    required Song song,
+    required String streamUrl,
+    required bool isValidated,
+    required DateTime expiresAt,
+    required String provider,
+    required int bitrate,
+  }) {
+    _resolvedCache[songId] = ResolvedStreamEntry(
+      songId: songId,
+      song: song,
+      streamUrl: streamUrl,
+      isValidated: isValidated,
+      expiresAt: expiresAt,
+      provider: provider,
+      bitrate: bitrate,
+    );
+  }
+
+  /// Backward compatible helper to cache resolved streams.
+  static void cacheResolvedStream(String songId, String url, int bitrate, String provider) {
+    final existingEntry = _resolvedCache[songId];
+    final song = existingEntry?.song ?? Song(id: songId, streamUrl: url, name: '', artist: '');
+    cacheStream(
+      songId: songId,
+      song: song,
+      streamUrl: url,
+      isValidated: true,
+      expiresAt: DateTime.now().add(const Duration(hours: 24)),
+      provider: provider,
+      bitrate: bitrate,
+    );
+  }
+
+  /// Launch parallel search tasks for recovery.
+  /// Returns the first playable stream URL, or null if all fail.
+  static Future<Song?> recoverSong(Song song, {String? sessionId}) {
+    final songId = song.id.trim();
+    if (songId.isEmpty) return Future.value(null);
+
+    // Check if there is already an active recovery task running for this song
+    final activeTask = _activeRecoveryTasks[songId];
+    if (activeTask != null) {
+      debugPrint('[SearchCoordinator] Awaiting existing recovery task for $songId');
+      return activeTask;
+    }
+
+    // 0. Fast Memory Cache Lookup (occur before any network search)
+    final cached = getCacheEntry(song.id, songFallback: song);
+    if (cached != null) {
+      debugPrint('[SearchCoordinator] Memory cache hit for ${song.id}');
+      return Future.value(cached.song.copyWith(streamUrl: cached.streamUrl));
+    }
+
+    final sessionKey = sessionId ?? 'default_${DateTime.now().microsecondsSinceEpoch}';
+
+    final Future<Song?> recoveryFuture = _performRecoverSong(song, sessionKey);
+    _activeRecoveryTasks[songId] = recoveryFuture;
+
+    // Clean up from the active tasks map when completed
+    recoveryFuture.whenComplete(() {
+      _activeRecoveryTasks.remove(songId);
+    });
+
+    return recoveryFuture;
+  }
+
+  static Future<Song?> _performRecoverSong(Song song, String sessionKey) async {
+    // 1. Determine query variants based on metadata
+    String artistQuery = '';
+    final artist = song.artist ?? '';
+    if (artist.isNotEmpty) {
+      artistQuery = artist.split(',').first.trim();
+    }
+
+    String? movieQuery;
+    final movieMatch = RegExp(r'(?:\([Ff]rom\s+([^)]+)\)|\[[Ff]rom\s+([^\]]+)\])').firstMatch(song.name);
+    if (movieMatch != null) {
+      final rawMovie = (movieMatch.group(1) ?? movieMatch.group(2))?.trim() ?? '';
+      var cleanMovie = rawMovie;
+      if (cleanMovie.startsWith('"') || cleanMovie.startsWith("'")) {
+        cleanMovie = cleanMovie.substring(1);
+      }
+      if (cleanMovie.endsWith('"') || cleanMovie.endsWith("'")) {
+        cleanMovie = cleanMovie.substring(0, cleanMovie.length - 1);
+      }
+      movieQuery = cleanMovie.trim();
+    }
+
+    final albumQuery = (song.album ?? '').trim();
+
+    String cleanTitle = song.name.replaceAll(RegExp(r'\([Ff]rom.*?\)|\[[Ff]rom.*?\]'), '');
+    cleanTitle = cleanTitle.replaceAll(RegExp(r'\([Ff]eat.*?\)|\[[Ff]eat.*?\]'), '').trim();
+
+    // Exactly the 9 Parallel Search query variants matching system design
+    final rawQueries = <String>[
+      // 1. Song Title
+      song.name,
+      // 2. Artist
+      if (artistQuery.isNotEmpty) artistQuery,
+      // 3. Album
+      if (albumQuery.isNotEmpty) albumQuery,
+      // 4. Movie
+      if (movieQuery != null && movieQuery.isNotEmpty) movieQuery,
+      // 5. Title + Artist
+      if (artistQuery.isNotEmpty) '${song.name} $artistQuery',
+      // 6. Title + Album
+      if (albumQuery.isNotEmpty) '${song.name} $albumQuery',
+      // 7. Artist + Movie
+      if (artistQuery.isNotEmpty && movieQuery != null && movieQuery.isNotEmpty) '$artistQuery $movieQuery',
+      // 8. Artist + Song
+      if (artistQuery.isNotEmpty) '$artistQuery ${song.name}',
+      // 9. Clean Title
+      if (cleanTitle.isNotEmpty) cleanTitle,
+    ];
+
+    final queries = rawQueries
+        .map((q) => q.trim().replaceAll(RegExp(r'\s+'), ' '))
+        .where((q) => q.isNotEmpty)
+        .toSet()
+        .toList();
+
+    if (queries.isEmpty) return null;
+
+    final completer = Completer<Song?>();
+    int pendingTasks = queries.length;
+    bool isFinished = false;
+
+    debugPrint('[SearchCoordinator] Starting parallel search with ${queries.length} variants. Session: $sessionKey');
+
+    void checkCompletion() {
+      if (!isFinished && pendingTasks == 0) {
+        isFinished = true;
+        if (!completer.isCompleted) completer.complete(null);
+      }
+    }
+
+    Future<void> processCandidate(Song candidateSong, http.Client taskClient) async {
+      if (isFinished) return;
+      if (candidateSong.id == song.id) return;
+
+      final confidence = VerificationEngine.calculateConfidence(candidateSong, song);
+      if (confidence < VerificationEngine.threshold) return;
+
+      var resolvedCandidate = candidateSong;
+      if (!StreamResolver.hasStreamUrl(resolvedCandidate.toStreamMetadata())) {
+        try {
+           final details = await ApiService.getSong(candidateSong.id, client: taskClient);
+           resolvedCandidate = Song.fromJson(details);
+        } catch (_) {}
+      }
+
+      if (isFinished || !StreamResolver.hasStreamUrl(resolvedCandidate.toStreamMetadata())) return;
+
+      // VALIDATION WITH CDN FALLBACK
+      final validatedUrl = await _validateAndFallbackCdn(resolvedCandidate.streamUrl!, taskClient);
+
+      if (isFinished) return;
+
+      if (validatedUrl != null) {
+        isFinished = true;
+
+        final winnerSong = song.copyWith(
+          streamUrl: validatedUrl,
+          duration: resolvedCandidate.duration != null && resolvedCandidate.duration! > 0
+              ? resolvedCandidate.duration
+              : song.duration,
+        );
+
+        // Update Memory Cache (24 hour expiration)
+        cacheStream(
+          songId: song.id,
+          song: winnerSong,
+          streamUrl: validatedUrl,
+          isValidated: true,
+          expiresAt: DateTime.now().add(const Duration(hours: 24)),
+          provider: 'recovery_engine',
+          bitrate: resolvedCandidate.duration != null ? 320 : 160,
+        );
+
+        if (!completer.isCompleted) {
+          completer.complete(winnerSong);
+        }
+      }
+    }
+
+    // Launch all tasks concurrently
+    for (final query in queries) {
+      final taskClient = ApiService.createSecureHttpClient(pinCertificates: false);
+      _registerClient(sessionKey, taskClient);
+
+      ApiService.searchSongs(query, client: taskClient).then((results) async {
+        if (isFinished) return;
+
+        final candidates = results.map((item) => Song.fromJson(Map<String, dynamic>.from(item)))
+            .where((c) => c.id != song.id)
+            .toList();
+
+        candidates.sort((a, b) =>
+          VerificationEngine.calculateConfidence(b, song)
+          .compareTo(VerificationEngine.calculateConfidence(a, song))
+        );
+
+        for (final candidateSong in candidates) {
+          if (isFinished) break;
+          await processCandidate(candidateSong, taskClient);
+        }
+      }).catchError((_) {}).whenComplete(() {
+        pendingTasks--;
+        checkCompletion();
+      });
+    }
+
+    if (song.albumId != null && song.albumId!.trim().isNotEmpty) {
+      final taskClient = ApiService.createSecureHttpClient(pinCertificates: false);
+      _registerClient(sessionKey, taskClient);
+      pendingTasks++;
+
+      ApiService.getAlbums(id: song.albumId!.trim(), client: taskClient).then((albumDetails) async {
+        if (isFinished) return;
+        final songs = albumDetails['data']?['songs'];
+        if (songs is List) {
+          final candidates = songs.whereType<Map>().map((m) => Song.fromJson(Map<String, dynamic>.from(m)))
+              .where((c) => c.id != song.id).toList();
+          candidates.sort((a, b) =>
+             VerificationEngine.calculateConfidence(b, song).compareTo(VerificationEngine.calculateConfidence(a, song))
+          );
+          for (final candidateSong in candidates) {
+            if (isFinished) break;
+            await processCandidate(candidateSong, taskClient);
+          }
+        }
+      }).catchError((_) {}).whenComplete(() {
+        pendingTasks--;
+        checkCompletion();
+      });
+    }
+
+    if (pendingTasks == 0) {
+      checkCompletion();
+    }
+
+    final winner = await completer.future;
+
+    // Explicitly cancel all tasks of this session because we have a winner!
+    cancelSession(sessionKey);
+
+    return winner;
+  }
+
+  static Future<String?> _validateAndFallbackCdn(String urlStr, http.Client client) async {
+    Uri? originalUri = Uri.tryParse(urlStr);
+    if (originalUri == null) return null;
+
+    // 1. Try original
+    if (await _validateStream(originalUri, client)) {
+      return originalUri.toString();
+    }
+
+    // 2. Try alternate CDNs
+    final host = originalUri.host;
+    for (final cdn in _alternateCdns) {
+      if (cdn == host) continue;
+
+      final altUri = originalUri.replace(host: cdn);
+      if (await _validateStream(altUri, client)) {
+        return altUri.toString();
+      }
+    }
+
+    return null;
+  }
+
+  static Future<bool> _validateStream(Uri uri, http.Client client) async {
+    try {
+      final request = http.Request('HEAD', uri);
+      final response = await client.send(request).timeout(const Duration(milliseconds: 300));
+
+      if (response.statusCode == 200) {
+        final contentType = response.headers['content-type']?.toLowerCase() ?? '';
+        if (contentType.startsWith('audio/') || contentType == 'application/mp4' || contentType == 'video/mp4') {
+          return true;
+        }
+      }
+    } catch (_) {}
+    return false;
+  }
+}

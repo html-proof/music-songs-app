@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'lyrics_service.dart';
+import '../models/lyrics_payload.dart';
 
 class LyricsCacheEntry {
   final String songId;

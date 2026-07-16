@@ -16,6 +16,7 @@ import 'package:just_audio_background/just_audio_background.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/song.dart';
+import 'search_coordinator.dart';
 import '../models/playback_state.dart';
 import '../models/user_preferences.dart';
 import '../utils/content_filter.dart';
@@ -30,7 +31,6 @@ import 'session_state_service.dart';
 import 'verification_engine.dart';
 import 'background_learning_service.dart';
 import 'playback_coordinator.dart';
-import 'emergency_playback_resolver.dart';
 
 enum PlaybackResumeResult {
   resumed,
@@ -117,11 +117,13 @@ class PlayerService {
   static final List<Song> _queue = [];
   static List<Song> _originalQueue = [];
   static bool _shuffleModeEnabled = false;
-  static final StreamController<bool> _shuffleModeController = StreamController<bool>.broadcast();
+  static final StreamController<bool> _shuffleModeController =
+      StreamController<bool>.broadcast();
   static Stream<bool> get shuffleModeStream => _shuffleModeController.stream;
   static bool get shuffleModeEnabled => _shuffleModeEnabled;
   static final List<String> _queuePlaybackSourceKeys = <String>[];
   static int _currentIndex = -1;
+  static final Map<String, int> _songRecoveryAttempts = {};
   static final Set<String> _activeVideoSources = <String>{};
   static bool _pausedByVideoPlayback = false;
   static bool _pausedByAudioInterruption = false;
@@ -169,7 +171,8 @@ class PlayerService {
   static StreamSubscription<Duration>? _playerRawPositionSubscription;
   static StreamSubscription<Duration?>? _playerRawDurationSubscription;
   static StreamSubscription<bool>? _playerPlayingSubscription;
-  static StreamSubscription<ProcessingState>? _playerProcessingStateSubscription;
+  static StreamSubscription<ProcessingState>?
+  _playerProcessingStateSubscription;
   static StreamSubscription<Duration>? _playerBufferedPositionSubscription;
   static StreamSubscription<int?>? _indexSubscription;
   static StreamSubscription<double>? _volumeSubscription;
@@ -178,8 +181,7 @@ class PlayerService {
   static StreamSubscription<PlayerException>? _errorSubscription;
   static StreamSubscription<AudioOutputRouteState>? _outputDeviceSubscription;
   static StreamSubscription<int?>? _androidAudioSessionIdSubscription;
-  static StreamSubscription<ConnectivityEvent>?
-  _connectivitySubscription;
+  static StreamSubscription<ConnectivityEvent>? _connectivitySubscription;
   static Future<void> _sourceMutationTail = Future<void>.value();
   static int _sourceMutationDepth = 0;
 
@@ -218,7 +220,6 @@ class PlayerService {
       StreamController<bool>.broadcast();
 
   static final Map<String, _StreamUrlCacheEntry> _resolvedUrlCache = {};
-  static final List<Song> _backupPlayableSongs = [];
   static http.Client? _activeHttpClient;
   static DateTime? _songPlayStartedAt;
   static String? _songPlayStartedId;
@@ -226,7 +227,8 @@ class PlayerService {
   static PlaybackState _playbackState = PlaybackState.idle;
   static final StreamController<PlaybackState> _playbackStateController =
       StreamController<PlaybackState>.broadcast();
-  static Stream<PlaybackState> get playbackStateStream => _playbackStateController.stream;
+  static Stream<PlaybackState> get playbackStateStream =>
+      _playbackStateController.stream;
   static PlaybackState get playbackState => _playbackState;
 
   static void _updatePlaybackState(PlaybackState state) {
@@ -238,7 +240,8 @@ class PlayerService {
 
   static final StreamController<Song?> _resolvingSongController =
       StreamController<Song?>.broadcast();
-  static Stream<Song?> get resolvingSongStream => _resolvingSongController.stream;
+  static Stream<Song?> get resolvingSongStream =>
+      _resolvingSongController.stream;
 
   static final StreamController<Duration> _positionStreamController =
       StreamController<Duration>.broadcast();
@@ -246,7 +249,8 @@ class PlayerService {
       StreamController<Duration?>.broadcast();
   static final StreamController<Duration> _bufferedPositionStreamController =
       StreamController<Duration>.broadcast();
-  static Stream<Duration> get bufferedPositionStream => _bufferedPositionStreamController.stream;
+  static Stream<Duration> get bufferedPositionStream =>
+      _bufferedPositionStreamController.stream;
 
   static Timer? _progressTimer;
   static Duration _lastKnownPosition = Duration.zero;
@@ -263,7 +267,8 @@ class PlayerService {
   static ProcessingState get processingState => _player.processingState;
   static PlayerState get playerState => _player.playerState;
   static int? get playerCurrentIndex => _player.currentIndex;
-  static Stream<SequenceState?> get sequenceStateStream => _player.sequenceStateStream;
+  static Stream<SequenceState?> get sequenceStateStream =>
+      _player.sequenceStateStream;
   static Stream<int?> get currentIndexStream => _player.currentIndexStream;
 
   static void _updateProgressTimerState() {
@@ -275,7 +280,9 @@ class PlayerService {
     final isIdle = _player.processingState == ProcessingState.idle;
 
     if (isPlaying && !isCompleted && !isIdle) {
-      _progressTimer = Timer.periodic(const Duration(milliseconds: 40), (timer) {
+      _progressTimer = Timer.periodic(const Duration(milliseconds: 40), (
+        timer,
+      ) {
         _pollProgress();
       });
     }
@@ -299,7 +306,9 @@ class PlayerService {
 
     final activeTag = _player.sequenceState.currentSource?.tag;
     final String? activeId = activeTag is MediaItem ? activeTag.id : null;
-    if (activeId != null && _currentSong != null && activeId != _currentSong!.id) {
+    if (activeId != null &&
+        _currentSong != null &&
+        activeId != _currentSong!.id) {
       return;
     }
 
@@ -310,7 +319,8 @@ class PlayerService {
     _bufferedPositionStreamController.add(buf);
 
     final now = DateTime.now();
-    if (now.difference(_lastPersistedAt) >= _persistInterval && _currentSong != null) {
+    if (now.difference(_lastPersistedAt) >= _persistInterval &&
+        _currentSong != null) {
       _lastPersistedAt = now;
       StabilityLogger.debug('Playback', 'Position update (timer): $pos');
       unawaited(
@@ -339,13 +349,21 @@ class PlayerService {
     final isIdle = _player.processingState == ProcessingState.idle;
 
     if (isPlaying && !isCompleted && !isIdle && _progressTimer == null) {
-      debugPrint('Watchdog: Progress timer was null during active playback. Restarting it.');
+      debugPrint(
+        'Watchdog: Progress timer was null during active playback. Restarting it.',
+      );
       _updateProgressTimerState();
     }
 
-    if (isPlaying && isConnected && currentPos == _lastWatchdogPosition && !isCompleted && !isIdle) {
+    if (isPlaying &&
+        isConnected &&
+        currentPos == _lastWatchdogPosition &&
+        !isCompleted &&
+        !isIdle) {
       _frozenCounter++;
-      debugPrint('Watchdog: Position has not changed for $_frozenCounter seconds.');
+      debugPrint(
+        'Watchdog: Position has not changed for $_frozenCounter seconds.',
+      );
     } else {
       _frozenCounter = 0;
     }
@@ -353,7 +371,9 @@ class PlayerService {
     _lastWatchdogPosition = currentPos;
 
     if (_frozenCounter >= 3) {
-      debugPrint('Watchdog: Playback is frozen (stuck at $currentPos). Triggering recovery.');
+      debugPrint(
+        'Watchdog: Playback is frozen (stuck at $currentPos). Triggering recovery.',
+      );
       _frozenCounter = 0;
       unawaited(_recoverPlayback());
     }
@@ -363,22 +383,33 @@ class PlayerService {
     final song = _currentSong;
     if (song == null) return;
 
-    final savePosition = _lastKnownPosition > Duration.zero ? _lastKnownPosition : _player.position;
-    StabilityLogger.info('Playback', 'Recovering playback for ${song.name} at position $savePosition');
+    final savePosition = _lastKnownPosition > Duration.zero
+        ? _lastKnownPosition
+        : _player.position;
+    StabilityLogger.info(
+      'Playback',
+      'Recovering playback for ${song.name} at position $savePosition',
+    );
 
     // 1. Reestablish subscriptions
     _reestablishPlayerSubscriptions();
 
     // 2. Refresh stream URL
     final String? currentRequestId = PlaybackCoordinator.currentRequestId;
-    final resolved = await _resolveSongForPlayback(song, forceRefresh: true, requestId: currentRequestId);
+    final resolved = await _resolveSongForPlayback(
+      song,
+      forceRefresh: true,
+      requestId: currentRequestId,
+    );
 
     if (resolved != null) {
       _currentSong = resolved;
-      if (_queue.isNotEmpty && _currentIndex >= 0 && _currentIndex < _queue.length) {
+      if (_queue.isNotEmpty &&
+          _currentIndex >= 0 &&
+          _currentIndex < _queue.length) {
         _queue[_currentIndex] = resolved;
       }
-      
+
       _setSourceSwitching(true);
       try {
         await _replaceCurrentAudioSource(
@@ -395,9 +426,11 @@ class PlayerService {
     await _player.seek(savePosition, index: _currentIndex);
     await _playEnsuringAudioFocus();
     _savePlaybackState();
-    
+
     _positionStreamController.add(savePosition);
-    _playbackStateController.add(_player.playing ? PlaybackState.playing : PlaybackState.paused);
+    _playbackStateController.add(
+      _player.playing ? PlaybackState.playing : PlaybackState.paused,
+    );
   }
 
   static void _setupPlayerSubscriptions() {
@@ -430,7 +463,10 @@ class PlayerService {
       final now = DateTime.now();
       if (now.difference(_lastPersistedAt) >= _persistInterval) {
         _lastPersistedAt = now;
-        StabilityLogger.debug('Playback', 'Position update: ${_player.position}');
+        StabilityLogger.debug(
+          'Playback',
+          'Position update: ${_player.position}',
+        );
         unawaited(
           OfflineService.recordPlaybackProgress(
             _currentSong!,
@@ -442,12 +478,18 @@ class PlayerService {
       }
     });
 
-    _playerPlayingSubscription = _player.playingStream.listen((_) => _updateProgressTimerState());
-    _playerProcessingStateSubscription = _player.processingStateStream.listen((_) => _updateProgressTimerState());
+    _playerPlayingSubscription = _player.playingStream.listen(
+      (_) => _updateProgressTimerState(),
+    );
+    _playerProcessingStateSubscription = _player.processingStateStream.listen(
+      (_) => _updateProgressTimerState(),
+    );
 
-    _playerBufferedPositionSubscription = _player.bufferedPositionStream.listen((buf) {
-      _bufferedPositionStreamController.add(buf);
-    });
+    _playerBufferedPositionSubscription = _player.bufferedPositionStream.listen(
+      (buf) {
+        _bufferedPositionStreamController.add(buf);
+      },
+    );
 
     _indexSubscription = _player.currentIndexStream.listen((index) {
       if (index == null ||
@@ -460,9 +502,14 @@ class PlayerService {
       final nextSong = _queue[index];
 
       _positionStreamController.add(Duration.zero);
-      _durationStreamController.add(nextSong.duration != null ? Duration(seconds: nextSong.duration!) : Duration.zero);
+      _durationStreamController.add(
+        nextSong.duration != null
+            ? Duration(seconds: nextSong.duration!)
+            : Duration.zero,
+      );
 
-      final isSideEffectOfLoading = _isLoadingNewSong || _isSwitchingSource || _resolvingSong != null;
+      final isSideEffectOfLoading =
+          _isLoadingNewSong || _isSwitchingSource || _resolvingSong != null;
       if (!isSideEffectOfLoading) {
         PlaybackCoordinator.newRequest(nextSong);
         final newSessionId = PlaybackCoordinator.currentIdentity!.sessionId;
@@ -479,12 +526,18 @@ class PlayerService {
     });
 
     _playerStateSubscription = _player.playerStateStream.listen((state) {
-      StabilityLogger.info('Playback', 'PlayerState transition: playing=${state.playing}, processingState=${state.processingState}');
+      StabilityLogger.info(
+        'Playback',
+        'PlayerState transition: playing=${state.playing}, processingState=${state.processingState}',
+      );
       if (state.processingState == ProcessingState.completed) {
-        StabilityLogger.info('Playback', 'Playback completed for song: ${_currentSong?.name}');
+        StabilityLogger.info(
+          'Playback',
+          'Playback completed for song: ${_currentSong?.name}',
+        );
       }
 
-      if (_playbackState != PlaybackState.seeking) {
+      if (_playbackState != PlaybackState.seeking && _playbackState != PlaybackState.buffering) {
         switch (state.processingState) {
           case ProcessingState.idle:
             _updatePlaybackState(PlaybackState.idle);
@@ -528,7 +581,10 @@ class PlayerService {
 
     _errorSubscription = _player.errorStream.listen((error) {
       if (_isLoadingNewSong) {
-        StabilityLogger.debug('Playback', 'Ignoring player error stream event during song loading: ${error.message}');
+        StabilityLogger.debug(
+          'Playback',
+          'Ignoring player error stream event during song loading: ${error.message}',
+        );
         return;
       }
       unawaited(
@@ -551,7 +607,7 @@ class PlayerService {
     _playerProcessingStateSubscription?.cancel();
     _playerProcessingStateSubscription = null;
     _playerBufferedPositionSubscription?.cancel();
-         _playerBufferedPositionSubscription = null;
+    _playerBufferedPositionSubscription = null;
     _indexSubscription?.cancel();
     _indexSubscription = null;
     _playerStateSubscription?.cancel();
@@ -573,9 +629,6 @@ class PlayerService {
 
   static _PlaybackSessionLogger? _activeLogger;
 
-
-
-
   static const int _autoplayPrefetchThreshold = 1;
   static const int _autoplayBatchMin = 10;
   static const int _autoplayBatchMax = 20;
@@ -583,7 +636,7 @@ class PlayerService {
   static const int _queueHistoryLimit = 12;
   static Timer? _pendingSeekTimer;
   static bool _externalSeeking = false;
-  static bool _isSkipping = false;       // Re-entrancy guard for skip operations
+  static bool _isSkipping = false; // Re-entrancy guard for skip operations
   static bool _isLoadingNewSong = false; // True during URL resolution in play()
   static String? _lastCompletedSongId;
   static DateTime? _lastCompletedTime;
@@ -657,8 +710,10 @@ class PlayerService {
   static bool get hasAudioFocus => _hasAudioFocus;
   static bool get conversationModeActive => _conversationModeActive;
 
-  static Stream<Duration> get positionStream => _positionStreamController.stream;
-  static Stream<Duration?> get durationStream => _durationStreamController.stream;
+  static Stream<Duration> get positionStream =>
+      _positionStreamController.stream;
+  static Stream<Duration?> get durationStream =>
+      _durationStreamController.stream;
   static Stream<bool> get playingStream => _player.playingStream;
   static Stream<PlayerState> get playerStateStream => _player.playerStateStream;
 
@@ -679,6 +734,7 @@ class PlayerService {
   static Future<void> savePlaybackStateOnBackground() async {
     await _savePlaybackState();
   }
+
   static Stream<bool> get qualitySwitchingStream =>
       _qualitySwitchingController.stream;
   static bool get isQualitySwitching => _isQualitySwitching;
@@ -992,7 +1048,10 @@ class PlayerService {
     await _setupAudioFocusListener();
 
     if (_hasAudioFocus) {
-      StabilityLogger.debug('Playback', 'Already has audio focus, proceeding to play.');
+      StabilityLogger.debug(
+        'Playback',
+        'Already has audio focus, proceeding to play.',
+      );
       await _player.play();
       return true;
     }
@@ -1009,7 +1068,10 @@ class PlayerService {
     StabilityLogger.info('Playback', 'Requesting audio focus for playback.');
     final focusGranted = await _setAudioSessionActive(true);
     if (!focusGranted) {
-      StabilityLogger.warning('Playback', 'Audio focus denied. Skipping playback start/resume.');
+      StabilityLogger.warning(
+        'Playback',
+        'Audio focus denied. Skipping playback start/resume.',
+      );
       return false;
     }
     await _player.play();
@@ -1201,7 +1263,8 @@ class PlayerService {
       _shuffleModeEnabled = prefs.getBool('playback_shuffle_enabled') ?? false;
       _shuffleModeController.add(_shuffleModeEnabled);
 
-      final loopModeName = prefs.getString('playback_loop_mode') ?? LoopMode.off.name;
+      final loopModeName =
+          prefs.getString('playback_loop_mode') ?? LoopMode.off.name;
       final savedLoopMode = LoopMode.values.firstWhere(
         (m) => m.name == loopModeName,
         orElse: () => LoopMode.off,
@@ -1271,8 +1334,6 @@ class PlayerService {
         _savePlaybackState();
       });
     }
-
-
 
     _outputDeviceSubscription ??= ListeningSafetyService.outputDeviceStream.listen((
       outputState,
@@ -1368,7 +1429,9 @@ class PlayerService {
     await ConnectivityManager.init();
     _isNetworkAvailable = ConnectivityManager.isConnected;
 
-    _connectivitySubscription ??= ConnectivityManager.eventStream.listen((event) {
+    _connectivitySubscription ??= ConnectivityManager.eventStream.listen((
+      event,
+    ) {
       unawaited(_handleConnectivityChange(event));
     });
 
@@ -1785,9 +1848,7 @@ class PlayerService {
     }
   }
 
-  static Future<void> _handleConnectivityChange(
-    ConnectivityEvent event,
-  ) async {
+  static Future<void> _handleConnectivityChange(ConnectivityEvent event) async {
     final isConnected = event != ConnectivityEvent.disconnected;
     _isNetworkAvailable = isConnected;
 
@@ -1819,9 +1880,11 @@ class PlayerService {
         // condition: old request finishes → plays wrong song.
         // Only resume the paused song if no new request is in flight.
         if (_resolvingSong != null || _isLoadingNewSong) {
-          StabilityLogger.info('Playback',
-              'Network restored but a new playback request is active. '
-              'Skipping stale recovery for previous song.');
+          StabilityLogger.info(
+            'Playback',
+            'Network restored but a new playback request is active. '
+                'Skipping stale recovery for previous song.',
+          );
           return;
         }
 
@@ -1831,26 +1894,35 @@ class PlayerService {
           _offlineSeekPosition = null; // Clear it after reading
 
           final String? currentRequestId = PlaybackCoordinator.currentRequestId;
-          final resolved = await _resolveSongForPlayback(current, forceRefresh: true, requestId: currentRequestId);
+          final resolved = await _resolveSongForPlayback(
+            current,
+            forceRefresh: true,
+            requestId: currentRequestId,
+          );
 
           // Re-check after the async gap: another tap may have occurred
           // while we were resolving the old song's stream.
           if (_resolvingSong != null || _isLoadingNewSong) {
-            StabilityLogger.info('Playback',
-                'New playback request appeared during recovery resolve. '
-                'Aborting stale recovery.');
+            StabilityLogger.info(
+              'Playback',
+              'New playback request appeared during recovery resolve. '
+                  'Aborting stale recovery.',
+            );
             return;
           }
 
           if (resolved != null) {
-            if (currentRequestId != null && !PlaybackCoordinator.isValid(currentRequestId)) {
+            if (currentRequestId != null &&
+                !PlaybackCoordinator.isValid(currentRequestId)) {
               return;
             }
             _currentSong = resolved;
-            if (_queue.isNotEmpty && _currentIndex >= 0 && _currentIndex < _queue.length) {
+            if (_queue.isNotEmpty &&
+                _currentIndex >= 0 &&
+                _currentIndex < _queue.length) {
               _queue[_currentIndex] = resolved;
             }
-            
+
             _reestablishPlayerSubscriptions();
 
             await _replaceCurrentAudioSource(
@@ -1862,7 +1934,9 @@ class PlayerService {
         }
 
         await _playEnsuringAudioFocus();
-        _qualityAdjustmentMsgController.add('Connection restored. Resuming playback.');
+        _qualityAdjustmentMsgController.add(
+          'Connection restored. Resuming playback.',
+        );
       }
     }
 
@@ -1976,12 +2050,16 @@ class PlayerService {
 
   static Future<int> _resolvePreferredStreamingKbps() async {
     int resolvedKbps;
-    
+
     // Manual override: lock to selected bitrate, no auto-switching.
     if (_selectedAudioQuality != AudioQuality.auto) {
-      resolvedKbps = _selectedAudioQuality.kbps.clamp(1, Song.streamingMaxKbps).toInt();
+      resolvedKbps = _selectedAudioQuality.kbps
+          .clamp(1, Song.streamingMaxKbps)
+          .toInt();
     } else if (_temporaryAutoKbps != null) {
-      resolvedKbps = _temporaryAutoKbps!.clamp(1, Song.streamingMaxKbps).toInt();
+      resolvedKbps = _temporaryAutoKbps!
+          .clamp(1, Song.streamingMaxKbps)
+          .toInt();
     } else {
       final connectivity = await Connectivity().checkConnectivity();
       final hasConn = connectivity.any((r) => r != ConnectivityResult.none);
@@ -2165,8 +2243,14 @@ class PlayerService {
   }
 
   static bool _isSessionStale(String? requestId, String songId) {
-    if (requestId != null && !PlaybackCoordinator.isValid(requestId)) {
-      return true;
+    if (requestId != null) {
+      if (requestId.startsWith('pre-resolve')) {
+        // For background pre-resolution, only stale if the song is no longer in the queue
+        return !_queue.any((s) => s.id == songId);
+      }
+      if (!PlaybackCoordinator.isValid(requestId)) {
+        return true;
+      }
     }
     final identity = PlaybackCoordinator.currentIdentity;
     if (identity != null && songId != identity.songId) {
@@ -2177,11 +2261,7 @@ class PlayerService {
 
   static void _checkSession(String requestId) {
     if (!PlaybackCoordinator.isValid(requestId)) {
-      throw PlayerException(
-        0,
-        'interrupted by another call',
-        _currentIndex,
-      );
+      throw PlayerException(0, 'interrupted by another call', _currentIndex);
     }
   }
 
@@ -2190,21 +2270,33 @@ class PlayerService {
     List<Song>? playlist,
     int? index,
   }) async {
-    StabilityLogger.info('Playback', 'Play requested for song: ${song.name} (ID: ${song.id}). Playback initialization started.');
+    StabilityLogger.info(
+      'Playback',
+      'Play requested for song: ${song.name} (ID: ${song.id}). Playback initialization started.',
+    );
 
     // If the same song is actively resolving, ignore the duplicate request
     if (_resolvingSong?.id == song.id) {
-      StabilityLogger.debug('Playback', 'Play request ignored: Song ${song.name} is already resolving.');
+      StabilityLogger.debug(
+        'Playback',
+        'Play request ignored: Song ${song.name} is already resolving.',
+      );
       return;
     }
 
     // If the same song is already the current song
     if (_currentSong?.id == song.id) {
       if (_player.playing) {
-        StabilityLogger.debug('Playback', 'Play request ignored: Song ${song.name} is already playing.');
+        StabilityLogger.debug(
+          'Playback',
+          'Play request ignored: Song ${song.name} is already playing.',
+        );
         return;
       } else {
-        StabilityLogger.info('Playback', 'Play request: Song ${song.name} is paused. Resuming instead of restarting.');
+        StabilityLogger.info(
+          'Playback',
+          'Play request: Song ${song.name} is paused. Resuming instead of restarting.',
+        );
         await resume();
         return;
       }
@@ -2214,7 +2306,9 @@ class PlayerService {
     await init();
 
     _activeHttpClient?.close();
-    _activeHttpClient = ApiService.createSecureHttpClient(pinCertificates: false);
+    _activeHttpClient = ApiService.createSecureHttpClient(
+      pinCertificates: false,
+    );
 
     _updatePlaybackState(PlaybackState.resolvingSong);
     final String requestId = PlaybackCoordinator.newRequest(song);
@@ -2226,7 +2320,9 @@ class PlayerService {
 
     // Reset playback state immediately on play request to prevent previous song's state from leaking
     _positionStreamController.add(Duration.zero);
-    _durationStreamController.add(song.duration != null ? Duration(seconds: song.duration!) : Duration.zero);
+    _durationStreamController.add(
+      song.duration != null ? Duration(seconds: song.duration!) : Duration.zero,
+    );
 
     // Global loading timeout: if the entire play() pipeline doesn't complete
     // within 15 seconds, force-cancel the loading state to prevent infinite
@@ -2235,13 +2331,17 @@ class PlayerService {
     _playLoadingTimeoutTimer = Timer(const Duration(seconds: 15), () {
       if (!PlaybackCoordinator.isValid(requestId)) return;
       if (_resolvingSong == null && !_isLoadingNewSong) return;
-      StabilityLogger.warning('Playback', 'Global loading timeout (15s) triggered for: ${song.name}. Force-clearing loading state.');
+      StabilityLogger.warning(
+        'Playback',
+        'Global loading timeout (15s) triggered for: ${song.name}. Force-clearing loading state.',
+      );
       _resolvingSong = null;
       _resolvingSongController.add(null);
       _isLoadingNewSong = false;
       _updatePlaybackState(PlaybackState.idle);
       // Try to play if a source was loaded but focus acquisition hung
-      if (_player.processingState == ProcessingState.ready && !_player.playing) {
+      if (_player.processingState == ProcessingState.ready &&
+          !_player.playing) {
         unawaited(_player.play());
       }
     });
@@ -2254,7 +2354,11 @@ class PlayerService {
       _checkSession(requestId);
       _fallbackSongResolved = false;
       _updatePlaybackState(PlaybackState.verifyingIdentity);
-      final playableSong = await _resolveSongForPlayback(song, requestId: requestId, client: _activeHttpClient);
+      final playableSong = await _resolveSongForPlayback(
+        song,
+        requestId: requestId,
+        client: _activeHttpClient,
+      );
 
       _checkSession(requestId);
 
@@ -2267,10 +2371,16 @@ class PlayerService {
           _resolvingSong = null;
           _resolvingSongController.add(null);
           _isLoadingNewSong = false;
-          _activeLogger?.logStep('Playback started', false, detail: 'Resolution failed');
-          _activeLogger?.printReport('FAILED: Toast displayed, queue unchanged');
+          _activeLogger?.logStep(
+            'Playback started',
+            false,
+            detail: 'Resolution failed',
+          );
+          _activeLogger?.printReport(
+            'FAILED: Toast displayed, queue unchanged',
+          );
           _showThrottledToast(
-            "Unable to verify the requested recording. Please try again later.",
+            "Sorry, this song couldn't be played. Please try another version or search for it manually.",
             toastLength: Toast.LENGTH_LONG,
           );
         }
@@ -2279,8 +2389,15 @@ class PlayerService {
 
       _checkSession(requestId);
 
-      StabilityLogger.info('Playback', 'Source resolved for: ${playableSong.name}. Location: ${_isLocalFilePath(playableSong.streamUrl ?? "") ? "Local file" : "Remote stream URL"}.');
-      _activeLogger?.logStep('Source resolved', true, detail: playableSong.streamUrl);
+      StabilityLogger.info(
+        'Playback',
+        'Source resolved for: ${playableSong.name}. Location: ${_isLocalFilePath(playableSong.streamUrl ?? "") ? "Local file" : "Remote stream URL"}.',
+      );
+      _activeLogger?.logStep(
+        'Source resolved',
+        true,
+        detail: playableSong.streamUrl,
+      );
       _activeLogger?.logStep('Playback started', true);
       _activeLogger?.printReport('SUCCESS');
 
@@ -2302,7 +2419,10 @@ class PlayerService {
       _checkSession(requestId);
 
       final initialPos = null; // Always start fresh songs at 0:00
-      StabilityLogger.info('Playback', 'Preparing player for: ${playableSong.name}');
+      StabilityLogger.info(
+        'Playback',
+        'Preparing player for: ${playableSong.name}',
+      );
 
       if (playlist != null && playlist.isNotEmpty) {
         _originalQueue = List<Song>.from(playlist);
@@ -2352,13 +2472,19 @@ class PlayerService {
         _playLoadingTimeoutTimer = null;
       }
 
-      StabilityLogger.info('Playback', 'Player preparation completed. Starting playback.');
+      StabilityLogger.info(
+        'Playback',
+        'Player preparation completed. Starting playback.',
+      );
       final started = await _playEnsuringAudioFocus();
-      
+
       _checkSession(requestId);
 
       if (!started) {
-        StabilityLogger.warning('Playback', 'Playback failed to start for song: ${playableSong.name} (audio focus denied).');
+        StabilityLogger.warning(
+          'Playback',
+          'Playback failed to start for song: ${playableSong.name} (audio focus denied).',
+        );
         if (PlaybackCoordinator.isValid(requestId)) {
           _userPausedOrStoppedPlayback = true;
           _savePlaybackState(wasPlayingOverride: false);
@@ -2367,7 +2493,10 @@ class PlayerService {
       }
 
       if (PlaybackCoordinator.isValid(requestId)) {
-        StabilityLogger.info('Playback', 'Playback started successfully. Final status: PLAYING.');
+        StabilityLogger.info(
+          'Playback',
+          'Playback started successfully. Final status: PLAYING.',
+        );
         _songPlayStartedAt = DateTime.now();
         _songPlayStartedId = playableSong.id;
         _savePlaybackState();
@@ -2412,18 +2541,28 @@ class PlayerService {
       }
       if (_isLoadingInterruptedError(e)) return;
       debugPrint('Playback error: $e');
-      StabilityLogger.error('Playback', 'Playback failed for: ${song.name}. Initiating recovery flow.', e);
+      StabilityLogger.error(
+        'Playback',
+        'Playback failed for: ${song.name}. Initiating recovery flow.',
+        e,
+      );
 
       if (e is PlayerException) {
         unawaited(
           _handlePlayerError(e).catchError((Object err, StackTrace st) {
-            debugPrint('Player error handler failed during play error recovery: $err');
+            debugPrint(
+              'Player error handler failed during play error recovery: $err',
+            );
           }),
         );
       } else {
         unawaited(
-          _handlePlayerError(PlayerException(0, e.toString(), index ?? _currentIndex)).catchError((Object err, StackTrace st) {
-            debugPrint('Player error handler failed during general play error recovery: $err');
+          _handlePlayerError(
+            PlayerException(0, e.toString(), index ?? _currentIndex),
+          ).catchError((Object err, StackTrace st) {
+            debugPrint(
+              'Player error handler failed during general play error recovery: $err',
+            );
           }),
         );
       }
@@ -2436,7 +2575,11 @@ class PlayerService {
     if (activeSong == null) return;
     if (message.contains('loading interrupted')) return;
 
-    StabilityLogger.error('Playback', 'Player error triggered for song: ${activeSong.name} (Error: ${error.message})', error);
+    StabilityLogger.error(
+      'Playback',
+      'Player error triggered for song: ${activeSong.name} (Error: ${error.message})',
+      error,
+    );
 
     // 1. De-duplicate error events
     final songId = activeSong.id;
@@ -2457,12 +2600,19 @@ class PlayerService {
     _bufferingWatchdogTimer?.cancel();
     _bufferingWatchdogTimer = null;
 
-    _activeLogger?.logStep('Playback error triggered', false, detail: error.message);
+    _activeLogger?.logStep(
+      'Playback error triggered',
+      false,
+      detail: error.message,
+    );
 
     // Try recovering from offline cache first (if local downloaded file exists)
     try {
       if (await _tryRecoverFromOfflineCache(activeSong)) {
-        StabilityLogger.info('Playback', 'Successfully recovered playback from offline cache/download for ${activeSong.name}');
+        StabilityLogger.info(
+          'Playback',
+          'Successfully recovered playback from offline cache/download for ${activeSong.name}',
+        );
         return;
       }
     } catch (e) {
@@ -2473,14 +2623,16 @@ class PlayerService {
       if (_rateLimitRetryInProgress) return;
 
       if (_rateLimitRetryCount >= 1) {
-        debugPrint('Rate limit exceeded retry limit. Enforcing playback failure.');
+        debugPrint(
+          'Rate limit exceeded retry limit. Enforcing playback failure.',
+        );
         _activeLogger?.logStep('Rate limit retry count exceeded', false);
         _activeLogger?.printReport('FAILED: Toast displayed, queue unchanged');
         _showThrottledToast(
-          "Sorry, this song couldn't be found or played. Skipping to next song...",
+          "Sorry, this song couldn't be played. Please try another version or search for it manually.",
           toastLength: Toast.LENGTH_LONG,
         );
-        unawaited(skipNext());
+        // Do not skip automatically on failure
         return;
       }
 
@@ -2495,20 +2647,31 @@ class PlayerService {
       );
 
       try {
-        final lastPosition = _lastKnownPosition > Duration.zero ? _lastKnownPosition : _player.position;
+        final lastPosition = _lastKnownPosition > Duration.zero
+            ? _lastKnownPosition
+            : _player.position;
         await _player.pause(); // Spotify-like: pause, do not stop
         await Future.delayed(Duration(seconds: delaySeconds));
 
         _fallbackSongResolved = false;
-        final refreshedSong = await _resolveSongForPlayback(activeSong, forceRefresh: true);
+        final refreshedSong = await _resolveSongForPlayback(
+          activeSong,
+          forceRefresh: true,
+        );
         if (refreshedSong == null) {
-          _activeLogger?.logStep('Recovery search', false, detail: 'Resolution failed');
-          _activeLogger?.printReport('FAILED: Toast displayed, queue unchanged');
+          _activeLogger?.logStep(
+            'Recovery search',
+            false,
+            detail: 'Resolution failed',
+          );
+          _activeLogger?.printReport(
+            'FAILED: Toast displayed, queue unchanged',
+          );
           _showThrottledToast(
-            "Sorry, this song couldn't be found or played. Skipping to next song...",
+            "Sorry, this song couldn't be played. Please try another version or search for it manually.",
             toastLength: Toast.LENGTH_LONG,
           );
-          unawaited(skipNext());
+          // Do not skip automatically on failure
           return;
         }
 
@@ -2519,7 +2682,8 @@ class PlayerService {
           _rateLimitRetryCount,
         );
 
-        final retryInitialPos = lastPosition; // Preserve user's position on error recovery
+        final retryInitialPos =
+            lastPosition; // Preserve user's position on error recovery
         await _replaceCurrentAudioSource(
           updatedSong: retrySong,
           index: _currentIndex,
@@ -2539,10 +2703,10 @@ class PlayerService {
         _activeLogger?.logStep('Recovery search', false, detail: 'Error: $e');
         _activeLogger?.printReport('FAILED: Toast displayed, queue unchanged');
         _showThrottledToast(
-          "Sorry, this song couldn't be found or played. Skipping to next song...",
+          "Sorry, this song couldn't be played. Please try another version or search for it manually.",
           toastLength: Toast.LENGTH_LONG,
         );
-        unawaited(skipNext());
+        // Do not skip automatically on failure
       } finally {
         _rateLimitRetryInProgress = false;
       }
@@ -2550,96 +2714,93 @@ class PlayerService {
     }
 
     // Handle expired/forbidden URLs or timeouts
-    final isTimeout = message.contains('timeout') || message.contains('time out') || error.message?.toLowerCase().contains('timeout') == true;
-    if (message.contains('403') ||
+    final isTimeout =
+        message.contains('timeout') ||
+        message.contains('time out') ||
+        error.message?.toLowerCase().contains('timeout') == true;
+    final isDecoderError =
+        message.contains('decode') ||
+        message.contains('codec') ||
+        message.contains('decoder') ||
+        message.contains('format') ||
+        message.contains('extractor') ||
+        message.contains('demux');
+    final isHttpError =
+        message.contains('403') ||
         message.contains('404') ||
         message.contains('410') ||
+        message.contains('415') ||
         message.contains('forbidden') ||
         message.contains('unauthorized') ||
         message.contains('expire') ||
-        isTimeout ||
-        (message.contains('source error') && await _isNetworkConnected())) {
-      if (_rateLimitRetryInProgress) return;
+        message.contains('unsupported');
+    final isSourceError = message.contains('source error') || message.contains('player error');
 
-      if (_rateLimitRetryCount >= 1) {
-        debugPrint('Already attempted recovery for ${activeSong.id}. Stopping all further recovery attempts.');
-        _activeLogger?.logStep('Recovery attempt count exceeded', false);
-        _activeLogger?.printReport('FAILED: Toast displayed, queue unchanged');
+    if (isHttpError || isDecoderError || isTimeout || (isSourceError && await _isNetworkConnected())) {
+      final attempts = _songRecoveryAttempts[activeSong.id] ?? 0;
+      if (attempts >= 1) {
+        debugPrint(
+          'Recovery attempts exceeded limit for song ${activeSong.id}. Enforcing playback failure.',
+        );
+        _updatePlaybackState(PlaybackState.idle);
         _showThrottledToast(
-          "Sorry, this song couldn't be found or played. Skipping to next song...",
+          "Sorry, this song couldn't be played. Please try another version or search for it manually.",
           toastLength: Toast.LENGTH_LONG,
         );
-        unawaited(skipNext());
         return;
       }
-
-      _rateLimitRetryInProgress = true;
-      _rateLimitRetryCount += 1;
+      _songRecoveryAttempts[activeSong.id] = attempts + 1;
 
       debugPrint(
-        'Stream URL expired, forbidden, or timed out. Re-resolving ${activeSong.id}...',
+        'Stream failure detected. Triggering Production Recovery Pipeline for ${activeSong.id}...',
       );
 
+      final lastPosition = _lastKnownPosition > Duration.zero
+          ? _lastKnownPosition
+          : _player.position;
+
+      // Update state to buffering during recovery to freeze metadata display & show progress bar animation
+      _updatePlaybackState(PlaybackState.buffering);
+
+      final requestId = PlaybackCoordinator.newRequest(activeSong);
+
       try {
-        final lastPosition = _lastKnownPosition > Duration.zero ? _lastKnownPosition : _player.position;
-        final shouldAutoPlayAfterRetry = true;
-        await _player.pause(); // Spotify-like: pause, do not stop
+        await _player.pause();
 
-        _fallbackSongResolved = false;
-        Song? refreshedSong;
-        final fromBackup = _backupPlayableSongs.isNotEmpty;
-        if (fromBackup) {
-          refreshedSong = _backupPlayableSongs.removeAt(0);
-          debugPrint('Failure Recovery: Using next pre-validated parallel search result: ${refreshedSong.name}');
-        } else {
-          refreshedSong = await _resolveSongForPlayback(activeSong, forceRefresh: true);
-        }
-
-        if (refreshedSong == null) {
-          debugPrint('Recovery search returned no valid songs.');
-          _activeLogger?.logStep('Recovery search', false, detail: 'Resolution failed');
-          _activeLogger?.printReport('FAILED: Toast displayed, queue unchanged');
-          _showThrottledToast(
-            "Sorry, this song couldn't be found or played. Skipping to next song...",
-            toastLength: Toast.LENGTH_LONG,
-          );
-          unawaited(skipNext());
-          return;
-        }
-
-        _activeLogger?.logStep('Recovery search', true, detail: fromBackup ? 'From backup list' : 'From API resolve');
-
-        final retrySong = _buildRetryVariant(
-          refreshedSong,
-          _rateLimitRetryCount, // Change id slightly so just_audio sees it as a new distinct source
+        final recoveredSong = await SearchCoordinator.recoverSong(
+          activeSong,
+          sessionId: requestId,
         );
 
-        final retryInitialPos = lastPosition; // Preserve user's position on error recovery
-        await _replaceCurrentAudioSource(
-          updatedSong: retrySong,
-          index: _currentIndex,
-          position: retryInitialPos,
-        );
-
-        if (shouldAutoPlayAfterRetry) {
-          final resumed = await _playEnsuringAudioFocus();
-          if (resumed) {
-            _savePlaybackState();
+        if (PlaybackCoordinator.isValid(requestId)) {
+          if (recoveredSong == null) {
+            _updatePlaybackState(PlaybackState.idle);
+            _showThrottledToast(
+              "Sorry, this song couldn't be played. Please try another version or search for it manually.",
+              toastLength: Toast.LENGTH_LONG,
+            );
+            return;
           }
+
+          await _replaceCurrentAudioSource(
+            updatedSong: recoveredSong,
+            index: _currentIndex,
+            position: lastPosition,
+          );
+
+          // Allow normal state tracking to take over
+          _playbackState = PlaybackState.idle;
+
+          await _playEnsuringAudioFocus();
+          _savePlaybackState();
         }
-        _activeLogger?.logStep('Playback started after recovery', true);
-        _activeLogger?.printReport('SUCCESS (Recovered)');
       } catch (e) {
-        debugPrint('URL refresh failed: $e');
-        _activeLogger?.logStep('Recovery search', false, detail: 'Error: $e');
-        _activeLogger?.printReport('FAILED: Toast displayed, queue unchanged');
+        debugPrint('Recovery pipeline failed: $e');
+        _updatePlaybackState(PlaybackState.idle);
         _showThrottledToast(
-          "Sorry, this song couldn't be found or played. Skipping to next song...",
+          "Sorry, this song couldn't be played. Please try another version or search for it manually.",
           toastLength: Toast.LENGTH_LONG,
         );
-        unawaited(skipNext());
-      } finally {
-        _rateLimitRetryInProgress = false;
       }
       return;
     }
@@ -2746,6 +2907,7 @@ class PlayerService {
       _rateLimitSongId = null;
       _rateLimitRetryCount = 0;
       _rateLimitRetryInProgress = false;
+      _songRecoveryAttempts.clear();
       return;
     }
 
@@ -2753,6 +2915,7 @@ class PlayerService {
     _rateLimitSongId = songId;
     _rateLimitRetryCount = 0;
     _rateLimitRetryInProgress = false;
+    _songRecoveryAttempts.remove(songId);
   }
 
   static Future<void> _setQueueSource(
@@ -2806,13 +2969,20 @@ class PlayerService {
         .map((target) => target.audioSource)
         .toList(growable: false);
     await _runSerializedSourceMutation(() async {
-      await _player.setAudioSources(
-        sources,
-        initialIndex: _currentIndex,
-        initialPosition: initialPosition ?? Duration.zero,
-      ).timeout(const Duration(seconds: 12), onTimeout: () {
-        throw TimeoutException('Player preparation timed out after 12 seconds');
-      });
+      await _player
+          .setAudioSources(
+            sources,
+            initialIndex: _currentIndex,
+            initialPosition: initialPosition ?? Duration.zero,
+          )
+          .timeout(
+            const Duration(seconds: 12),
+            onTimeout: () {
+              throw TimeoutException(
+                'Player preparation timed out after 12 seconds',
+              );
+            },
+          );
     });
     // Guarantee start at 0:00 for fresh plays.
     if (initialPosition == null) {
@@ -2873,12 +3043,19 @@ class PlayerService {
 
     final resolvedTarget = _resolvePlaybackTarget(song);
     await _runSerializedSourceMutation(() async {
-      await _player.setAudioSource(
-        resolvedTarget.audioSource,
-        initialPosition: initialPosition ?? Duration.zero,
-      ).timeout(const Duration(seconds: 12), onTimeout: () {
-        throw TimeoutException('Player preparation timed out after 12 seconds');
-      });
+      await _player
+          .setAudioSource(
+            resolvedTarget.audioSource,
+            initialPosition: initialPosition ?? Duration.zero,
+          )
+          .timeout(
+            const Duration(seconds: 12),
+            onTimeout: () {
+              throw TimeoutException(
+                'Player preparation timed out after 12 seconds',
+              );
+            },
+          );
     });
     // Guarantee start at 0:00 — belt-and-suspenders guard against
     // just_audio carrying over a residual buffer position.
@@ -2943,8 +3120,6 @@ class PlayerService {
     return true;
   }
 
-
-
   static _ResolvedPlaybackTarget _resolvePlaybackTarget(Song song) {
     final declaredStreamUrl = (song.streamUrl ?? '').trim();
     final declaredIsLocal =
@@ -2983,7 +3158,9 @@ class PlayerService {
       }
     } catch (_) {}
 
-    if (resolvedArtUri == null && song.imageUrl != null && song.imageUrl!.isNotEmpty) {
+    if (resolvedArtUri == null &&
+        song.imageUrl != null &&
+        song.imageUrl!.isNotEmpty) {
       resolvedArtUri = Uri.parse(song.imageUrl!);
     }
 
@@ -3052,10 +3229,17 @@ class PlayerService {
     return bitrate;
   }
 
-  static Future<Song?> fetchSongDetailsForPlaybackWithClientPublic(Song song, http.Client client) =>
-      _fetchSongDetailsForPlaybackWithClient(song, client);
+  static Future<Song?> fetchSongDetailsForPlaybackWithClientPublic(
+    Song song,
+    http.Client client,
+  ) => _fetchSongDetailsForPlaybackWithClient(song, client);
 
-  static Future<Song?> _resolveSongForPlayback(Song song, {bool forceRefresh = false, String? requestId, http.Client? client}) async {
+  static Future<Song?> _resolveSongForPlayback(
+    Song song, {
+    bool forceRefresh = false,
+    String? requestId,
+    http.Client? client,
+  }) async {
     if (_isSessionStale(requestId, song.id)) return null;
 
     final songId = song.id.trim();
@@ -3064,7 +3248,10 @@ class PlayerService {
       if (isDownloadedDb) {
         final downloadPath = await DownloadService.getLocalPath(songId);
         if (downloadPath != null && downloadPath.isNotEmpty) {
-          StabilityLogger.info('Playback', 'Playback priority: playing manual download for $songId from $downloadPath');
+          StabilityLogger.info(
+            'Playback',
+            'Playback priority: playing manual download for $songId from $downloadPath',
+          );
           return song.copyWith(streamUrl: downloadPath);
         } else {
           // Local file is missing! Check if streaming fallback is allowed.
@@ -3078,21 +3265,31 @@ class PlayerService {
             }
           }
           if (isOfflineMode || !allowStreamingFallback) {
-            StabilityLogger.warning('Playback', 'Downloaded file for $songId is missing and streaming fallback is not allowed or app is offline. Aborting playback.');
+            StabilityLogger.warning(
+              'Playback',
+              'Downloaded file for $songId is missing and streaming fallback is not allowed or app is offline. Aborting playback.',
+            );
             return null;
           }
-          StabilityLogger.info('Playback', 'Downloaded file for $songId is missing. Falling back to online streaming.');
+          StabilityLogger.info(
+            'Playback',
+            'Downloaded file for $songId is missing. Falling back to online streaming.',
+          );
         }
       } else {
         final offlinePath = OfflineService.getLocalPath(songId);
         if (offlinePath != null && offlinePath.isNotEmpty) {
-          StabilityLogger.info('Playback', 'Playback priority: playing offline cache for $songId from $offlinePath');
+          StabilityLogger.info(
+            'Playback',
+            'Playback priority: playing offline cache for $songId from $offlinePath',
+          );
           return song.copyWith(streamUrl: offlinePath);
         }
       }
     }
 
-    final localClient = client ?? ApiService.createSecureHttpClient(pinCertificates: false);
+    final localClient =
+        client ?? ApiService.createSecureHttpClient(pinCertificates: false);
     try {
       var candidateSong = _optimizeRemoteStreamForCurrentQuality(song);
       final existingStreamUrl = (candidateSong.streamUrl ?? '').trim();
@@ -3108,7 +3305,11 @@ class PlayerService {
 
       final hasLocalCopy = localPath != null && localPath.isNotEmpty;
       if (PlaybackCoordinator.isValid(requestId)) {
-        _activeLogger?.logStep('Offline cache', hasLocalCopy, detail: hasLocalCopy ? 'HIT: $localPath' : 'MISS');
+        _activeLogger?.logStep(
+          'Offline cache',
+          hasLocalCopy,
+          detail: hasLocalCopy ? 'HIT: $localPath' : 'MISS',
+        );
       }
 
       if (localPath != null && localPath.isNotEmpty) {
@@ -3132,7 +3333,11 @@ class PlayerService {
         }
 
         try {
-          final resolvedSong = await _fetchSongDetailsForPlaybackWithClient(candidateSong, localClient, forceRefresh: forceRefresh);
+          final resolvedSong = await _fetchSongDetailsForPlaybackWithClient(
+            candidateSong,
+            localClient,
+            forceRefresh: forceRefresh,
+          );
           if (_isSessionStale(requestId, song.id)) return null;
 
           if (resolvedSong != null && _hasStreamUrl(resolvedSong)) {
@@ -3153,16 +3358,27 @@ class PlayerService {
         final cachedSong = _getCachedSongUrl(songId);
         final hasCache = cachedSong != null && _hasStreamUrl(cachedSong);
         if (PlaybackCoordinator.isValid(requestId)) {
-          _activeLogger?.logStep('Memory URL cache', hasCache, detail: hasCache ? 'HIT' : 'MISS');
+          _activeLogger?.logStep(
+            'Memory URL cache',
+            hasCache,
+            detail: hasCache ? 'HIT' : 'MISS',
+          );
         }
         if (cachedSong != null && _hasStreamUrl(cachedSong)) {
           if (_isSessionStale(requestId, song.id)) return null;
           // Validate it fast
-          final isValid = await _validateStreamUrl(cachedSong.streamUrl!, localClient);
+          final isValid = await _validateStreamUrl(
+            cachedSong.streamUrl!,
+            localClient,
+          );
           if (_isSessionStale(requestId, song.id)) return null;
 
           if (PlaybackCoordinator.isValid(requestId)) {
-            _activeLogger?.logStep('Memory URL validation', isValid, detail: isValid ? 'SUCCESS' : 'FAILED');
+            _activeLogger?.logStep(
+              'Memory URL validation',
+              isValid,
+              detail: isValid ? 'SUCCESS' : 'FAILED',
+            );
           }
 
           if (isValid) {
@@ -3172,7 +3388,9 @@ class PlayerService {
               resolved: cachedSong,
             );
           } else {
-            debugPrint('Cached stream URL for $songId was expired/invalid. Purging from cache.');
+            debugPrint(
+              'Cached stream URL for $songId was expired/invalid. Purging from cache.',
+            );
             _resolvedUrlCache.remove(songId);
           }
         }
@@ -3182,11 +3400,18 @@ class PlayerService {
           _hasStreamUrl(candidateSong) &&
           !_shouldUpgradeStreamQuality(candidateSong)) {
         if (_isSessionStale(requestId, song.id)) return null;
-        final isValid = await _validateStreamUrl(candidateSong.streamUrl!, localClient);
+        final isValid = await _validateStreamUrl(
+          candidateSong.streamUrl!,
+          localClient,
+        );
         if (_isSessionStale(requestId, song.id)) return null;
 
         if (PlaybackCoordinator.isValid(requestId)) {
-          _activeLogger?.logStep('Existing URL validation', isValid, detail: isValid ? 'SUCCESS' : 'FAILED');
+          _activeLogger?.logStep(
+            'Existing URL validation',
+            isValid,
+            detail: isValid ? 'SUCCESS' : 'FAILED',
+          );
         }
 
         if (isValid) {
@@ -3197,33 +3422,53 @@ class PlayerService {
       // Skip resolution if offline; we can't upgrade or fetch details anyway.
       if (!hasNetwork) {
         if (_hasStreamUrl(candidateSong)) return candidateSong;
-        final fallback = await _searchFallbackForSong(candidateSong, requestId: requestId, client: localClient);
+        final fallback = await SearchCoordinator.recoverSong(
+          candidateSong,
+          sessionId: requestId,
+        );
         if (fallback != null) {
-          return _mergeSongWithResolvedStream(base: candidateSong, resolved: fallback);
+          return _mergeSongWithResolvedStream(
+            base: candidateSong,
+            resolved: fallback,
+          );
         }
         return null;
       }
 
       Song? resolvedSong;
       try {
-        resolvedSong = await _fetchSongDetailsForPlaybackWithClient(candidateSong, localClient, forceRefresh: forceRefresh);
+        resolvedSong = await _fetchSongDetailsForPlaybackWithClient(
+          candidateSong,
+          localClient,
+          forceRefresh: forceRefresh,
+        );
       } catch (e) {
         debugPrint('Error fetching song details for playback: $e.');
       }
 
       if (PlaybackCoordinator.isValid(requestId)) {
-        _activeLogger?.logStep('Main API resolve', resolvedSong != null, detail: resolvedSong != null ? 'SUCCESS' : 'FAILED');
+        _activeLogger?.logStep(
+          'Main API resolve',
+          resolvedSong != null,
+          detail: resolvedSong != null ? 'SUCCESS' : 'FAILED',
+        );
       }
 
       if (_isSessionStale(requestId, song.id)) return null;
 
       if (resolvedSong == null || !_hasStreamUrl(resolvedSong)) {
-        debugPrint('Song URL failed to fetch. Retrying 1 time immediately with 10 microseconds delay...');
+        debugPrint(
+          'Song URL failed to fetch. Retrying 1 time immediately with 10 microseconds delay...',
+        );
         await Future.delayed(const Duration(microseconds: 10));
         if (_isSessionStale(requestId, song.id)) return null;
 
         try {
-          resolvedSong = await _fetchSongDetailsForPlaybackWithClient(candidateSong, localClient, forceRefresh: forceRefresh);
+          resolvedSong = await _fetchSongDetailsForPlaybackWithClient(
+            candidateSong,
+            localClient,
+            forceRefresh: forceRefresh,
+          );
         } catch (e2) {
           debugPrint('Retry fetching song details failed: $e2');
         }
@@ -3232,11 +3477,18 @@ class PlayerService {
       if (_isSessionStale(requestId, song.id)) return null;
 
       if (resolvedSong != null && _hasStreamUrl(resolvedSong)) {
-        final confidence = VerificationEngine.calculateConfidence(resolvedSong, song);
+        final confidence = VerificationEngine.calculateConfidence(
+          resolvedSong,
+          song,
+        );
         final isVerified = confidence >= VerificationEngine.threshold;
 
         if (PlaybackCoordinator.isValid(requestId)) {
-          _activeLogger?.logStep('Verification Engine', isVerified, detail: 'Score: $confidence%');
+          _activeLogger?.logStep(
+            'Verification Engine',
+            isVerified,
+            detail: 'Score: $confidence%',
+          );
         }
 
         if (isVerified) {
@@ -3245,15 +3497,29 @@ class PlayerService {
           if (_isSessionStale(requestId, song.id)) return null;
 
           if (PlaybackCoordinator.isValid(requestId)) {
-            _activeLogger?.logStep('URL validation', isValid, detail: isValid ? 'SUCCESS' : 'FAILED');
+            _activeLogger?.logStep(
+              'URL validation',
+              isValid,
+              detail: isValid ? 'SUCCESS' : 'FAILED',
+            );
           }
 
           if (isValid) {
-            if (forceRefresh && newUrl.isNotEmpty && newUrl == existingStreamUrl) {
-              debugPrint('Resolved stream URL is identical to failed URL. Triggering search fallback...');
-              final fallback = await _searchFallbackForSong(candidateSong, requestId: requestId, client: localClient);
+            if (forceRefresh &&
+                newUrl.isNotEmpty &&
+                newUrl == existingStreamUrl) {
+              debugPrint(
+                'Resolved stream URL is identical to failed URL. Triggering search fallback...',
+              );
+              final fallback = await SearchCoordinator.recoverSong(
+                candidateSong,
+                sessionId: requestId,
+              );
               if (fallback != null) {
-                return _mergeSongWithResolvedStream(base: candidateSong, resolved: fallback);
+                return _mergeSongWithResolvedStream(
+                  base: candidateSong,
+                  resolved: fallback,
+                );
               }
             }
 
@@ -3264,22 +3530,36 @@ class PlayerService {
             );
           }
         } else {
-          debugPrint('Resolved song failed verification (confidence: $confidence%). Rejecting candidate.');
+          debugPrint(
+            'Resolved song failed verification (confidence: $confidence%). Rejecting candidate.',
+          );
         }
       }
 
       // Fallbacks if resolution ultimately failed, returned invalid URL, or failed verification
       if (_hasStreamUrl(candidateSong)) {
-        final confidence = VerificationEngine.calculateConfidence(candidateSong, song);
+        final confidence = VerificationEngine.calculateConfidence(
+          candidateSong,
+          song,
+        );
         if (confidence >= VerificationEngine.threshold) {
-          final isValid = await _validateStreamUrl(candidateSong.streamUrl!, localClient);
+          final isValid = await _validateStreamUrl(
+            candidateSong.streamUrl!,
+            localClient,
+          );
           if (_isSessionStale(requestId, song.id)) return null;
 
           if (isValid) {
             if (forceRefresh) {
-              final fallback = await _searchFallbackForSong(candidateSong, requestId: requestId, client: localClient);
+              final fallback = await SearchCoordinator.recoverSong(
+                candidateSong,
+                sessionId: requestId,
+              );
               if (fallback != null) {
-                return _mergeSongWithResolvedStream(base: candidateSong, resolved: fallback);
+                return _mergeSongWithResolvedStream(
+                  base: candidateSong,
+                  resolved: fallback,
+                );
               }
             }
             return candidateSong;
@@ -3287,16 +3567,15 @@ class PlayerService {
         }
       }
 
-      final fallback = await _searchFallbackForSong(candidateSong, requestId: requestId, client: localClient);
+      final fallback = await SearchCoordinator.recoverSong(
+        candidateSong,
+        sessionId: requestId,
+      );
       if (fallback != null) {
-        return _mergeSongWithResolvedStream(base: candidateSong, resolved: fallback);
-      }
-
-      if (hasNetwork) {
-        final emergency = await EmergencyPlaybackResolver.resolve(candidateSong, client: localClient);
-        if (emergency != null) {
-          return _mergeSongWithResolvedStream(base: candidateSong, resolved: emergency);
-        }
+        return _mergeSongWithResolvedStream(
+          base: candidateSong,
+          resolved: fallback,
+        );
       }
 
       return null;
@@ -3305,194 +3584,6 @@ class PlayerService {
         localClient.close();
       }
     }
-  }
-
-
-  static Future<Song?> searchFallbackForSong(Song song, {http.Client? client}) =>
-      _searchFallbackForSong(song, client: client);
-
-  static Future<Song?> _searchFallbackForSong(Song song, {String? requestId, http.Client? client}) async {
-    // 1. Get first artist name if multiple exist
-    String artistQuery = '';
-    final artist = song.artist ?? '';
-    if (artist.isNotEmpty) {
-      artistQuery = artist.split(',').first.trim();
-    }
-
-    // Extract movie name if present in song name (e.g. (From "MovieName")) before cleaning
-    String? movieQuery;
-    final movieMatch = RegExp(r'(?:\([Ff]rom\s+([^)]+)\)|\[[Ff]rom\s+([^\]]+)\])').firstMatch(song.name);
-    if (movieMatch != null) {
-      final rawMovie = (movieMatch.group(1) ?? movieMatch.group(2))?.trim() ?? '';
-      var cleanMovie = rawMovie;
-      if (cleanMovie.startsWith('"') || cleanMovie.startsWith("'")) {
-        cleanMovie = cleanMovie.substring(1);
-      }
-      if (cleanMovie.endsWith('"') || cleanMovie.endsWith("'")) {
-        cleanMovie = cleanMovie.substring(0, cleanMovie.length - 1);
-      }
-      movieQuery = cleanMovie.trim();
-    }
-
-    // 2. Clean song name
-    String songNameQuery = song.name;
-    songNameQuery = songNameQuery.replaceAll(RegExp(r'\([Ff]rom.*?\)|\[[Ff]rom.*?\]'), '');
-    songNameQuery = songNameQuery.replaceAll(RegExp(r'\([Ff]eat.*?\)|\[[Ff]eat.*?\]'), '');
-    songNameQuery = songNameQuery.trim();
-
-    final albumQuery = (song.album ?? '').trim();
-
-    // Create alternative cleaned variants
-    String cleanTitle = song.name.replaceAll(RegExp(r'\([Ff]rom.*?\)|\[[Ff]rom.*?\]'), '').trim();
-    String cleanTitleNoFeat = cleanTitle.replaceAll(RegExp(r'\([Ff]eat.*?\)|\[[Ff]eat.*?\]'), '').trim();
-    String cleanTitleNoBrackets = cleanTitleNoFeat.replaceAll(RegExp(r'\(.*?\)|\[.*?\]'), '').trim();
-
-    // Collect query variants
-    final rawQueries = <String>[
-      song.name, // Original Title
-      if (artistQuery.isNotEmpty) '${song.name} $artistQuery', // Title + Artist
-      if (albumQuery.isNotEmpty) '${song.name} $albumQuery', // Title + Album
-      if (movieQuery != null && movieQuery.isNotEmpty) '${song.name} $movieQuery', // Title + Movie
-      if (artistQuery.isNotEmpty) artistQuery, // Artist
-      if (albumQuery.isNotEmpty) albumQuery, // Album
-      if (movieQuery != null && movieQuery.isNotEmpty) movieQuery, // Movie
-      if (cleanTitle.isNotEmpty) cleanTitle, // Clean Title
-      if (cleanTitleNoFeat.isNotEmpty) cleanTitleNoFeat, // Title without feat.
-      if (cleanTitleNoBrackets.isNotEmpty) cleanTitleNoBrackets, // Title without brackets
-      
-      // Advanced Combinations
-      if (cleanTitle.isNotEmpty && artistQuery.isNotEmpty) '$cleanTitle $artistQuery',
-      if (cleanTitle.isNotEmpty && movieQuery != null && movieQuery.isNotEmpty) '$cleanTitle $movieQuery',
-      if (cleanTitle.isNotEmpty && movieQuery != null && movieQuery.isNotEmpty && artistQuery.isNotEmpty) '$cleanTitle $movieQuery $artistQuery',
-    ];
-
-    // Normalize and de-duplicate queries
-    final queries = rawQueries
-        .map((q) => q.trim().replaceAll(RegExp(r'\s+'), ' '))
-        .where((q) => q.isNotEmpty)
-        .toSet()
-        .toList();
-
-    if (queries.isEmpty) return null;
-
-    if (_isSessionStale(requestId, song.id)) return null;
-
-    final localClient = client ?? ApiService.createSecureHttpClient(pinCertificates: false);
-    try {
-      debugPrint('Parallel searches initiated for variants: $queries');
-      final completer = Completer<Song?>();
-      int pendingTasks = queries.length;
-      bool isFinished = false;
-
-      void checkCompletion() {
-        if (!isFinished && pendingTasks == 0) {
-          isFinished = true;
-          if (!completer.isCompleted) completer.complete(null);
-        }
-      }
-
-      Future<void> processCandidate(Song candidateSong) async {
-        if (isFinished) return;
-        if (candidateSong.id == song.id) return;
-        
-        final confidence = VerificationEngine.calculateConfidence(candidateSong, song);
-        if (confidence < VerificationEngine.threshold) return;
-
-        var resolvedCandidate = candidateSong;
-        if (!_hasStreamUrl(resolvedCandidate)) {
-          resolvedCandidate = await _fetchSongDetailsForPlaybackWithClient(candidateSong, localClient) ?? candidateSong;
-        }
-
-        if (isFinished || !_hasStreamUrl(resolvedCandidate)) return;
-
-        final isValid = await _validateStreamUrl(resolvedCandidate.streamUrl!, localClient);
-        
-        if (isFinished) return;
-        
-        if (isValid) {
-          isFinished = true;
-          if (!completer.isCompleted) {
-            _setCachedSongUrl(song, resolvedCandidate.streamUrl!);
-            _fallbackSongResolved = true;
-            completer.complete(song.copyWith(
-              streamUrl: resolvedCandidate.streamUrl,
-              duration: resolvedCandidate.duration != null && resolvedCandidate.duration! > 0
-                  ? resolvedCandidate.duration
-                  : song.duration,
-            ));
-          }
-        }
-      }
-
-      for (final query in queries) {
-        _searchSongsWithClient(query, localClient).then((results) async {
-          if (isFinished) return;
-          
-          final candidates = results.map((item) => Song.fromJson(Map<String, dynamic>.from(item)))
-              .where((c) => c.id != song.id)
-              .toList();
-              
-          candidates.sort((a, b) => 
-            VerificationEngine.calculateConfidence(b, song)
-            .compareTo(VerificationEngine.calculateConfidence(a, song))
-          );
-          
-          for (final candidateSong in candidates) {
-            if (isFinished) break;
-            await processCandidate(candidateSong);
-          }
-        }).catchError((_) {}).whenComplete(() {
-          pendingTasks--;
-          checkCompletion();
-        });
-      }
-
-      if (song.albumId != null && song.albumId!.trim().isNotEmpty) {
-        pendingTasks++;
-        ApiService.getAlbums(id: song.albumId!.trim()).then((albumDetails) async {
-          if (isFinished) return;
-          final songs = albumDetails['data']?['songs'];
-          if (songs is List) {
-            final candidates = songs.whereType<Map>().map((m) => Song.fromJson(Map<String, dynamic>.from(m)))
-                .where((c) => c.id != song.id).toList();
-            candidates.sort((a, b) => 
-               VerificationEngine.calculateConfidence(b, song).compareTo(VerificationEngine.calculateConfidence(a, song))
-            );
-            for (final candidateSong in candidates) {
-              if (isFinished) break;
-              await processCandidate(candidateSong);
-            }
-          }
-        }).catchError((_) {}).whenComplete(() {
-          pendingTasks--;
-          checkCompletion();
-        });
-      }
-
-      if (pendingTasks == 0) {
-        checkCompletion();
-      }
-
-      final winner = await completer.future;
-      if (_isSessionStale(requestId, song.id)) return null;
-
-      if (PlaybackCoordinator.isValid(requestId)) {
-        _activeLogger?.logStep('Parallel search (First Valid)', winner != null, detail: winner != null ? 'SUCCESS' : 'NO MATCH');
-      }
-
-      if (winner != null) {
-         debugPrint('Found winning parallel search result: ${winner.name} (${winner.id})');
-      }
-      return winner;
-    } catch (e) {
-      debugPrint('Parallel search fallback failed: $e');
-    } finally {
-      if (client == null) {
-        localClient.close();
-      }
-    }
-
-    return null;
   }
 
   static Song _optimizeRemoteStreamForCurrentQuality(Song song) {
@@ -3523,15 +3614,13 @@ class PlayerService {
   static int? _extractBitrateFromUrl(String? url) {
     final value = (url ?? '').trim();
     if (value.isEmpty) return null;
-    
+
     // Robust regex to find bitrates like _320, /320/, 320.mp4, or _320_v4.
     // Matches the same pattern as Song.optimizeStreamUrlForData.
     final match = RegExp(r'([/_])(\d{2,3})(?=[_/\.]|$)').firstMatch(value);
-    
+
     return int.tryParse(match?.group(2) ?? '');
   }
-
-
 
   static Song _mergeSongWithResolvedStream({
     required Song base,
@@ -3580,6 +3669,14 @@ class PlayerService {
   /// interruption listener stays active for subsequent events.
   static Future<void> pause() async {
     await init();
+    if (_playbackState == PlaybackState.buffering) {
+      PlaybackCoordinator.reset();
+      _activeHttpClient?.close();
+      _activeHttpClient = null;
+      _resolvingSong = null;
+      _resolvingSongController.add(null);
+      _isLoadingNewSong = false;
+    }
     if (_shouldConvertManualPauseToConversationMode()) {
       _recordConversationUserAction(_ConversationActionType.pause);
       await _activateConversationMode(
@@ -3672,9 +3769,7 @@ class PlayerService {
         _qualityAdjustmentMsgController.add(
           'Connect to the internet to play this song.',
         );
-        _showThrottledToast(
-          'Connect to the internet to play this song.',
-        );
+        _showThrottledToast('Connect to the internet to play this song.');
         return;
       }
     }
@@ -3800,14 +3895,17 @@ class PlayerService {
 
   static Future<void> seek(Duration position, {bool immediate = false}) async {
     await init();
-    if (_isLoadingNewSong || _player.processingState == ProcessingState.loading) {
+    if (_isLoadingNewSong ||
+        _player.processingState == ProcessingState.loading) {
       return;
     }
     final normalized = position < Duration.zero ? Duration.zero : position;
 
     // Buffer-first offline seek restriction: remote tracks cannot seek past buffered data offline.
     final activeSong = _currentSong;
-    if (activeSong != null && !_isSongUsingLocalSource(activeSong) && !_isNetworkAvailable) {
+    if (activeSong != null &&
+        !_isSongUsingLocalSource(activeSong) &&
+        !_isNetworkAvailable) {
       final buffered = _player.bufferedPosition;
       if (normalized > buffered) {
         _offlineSeekPosition = normalized; // Store intended position
@@ -3825,7 +3923,9 @@ class PlayerService {
     Future<void> applySeek() async {
       try {
         final wasPlaying = _player.playing;
-        await _player.seek(normalized, index: _currentIndex).timeout(const Duration(seconds: 4));
+        await _player
+            .seek(normalized, index: _currentIndex)
+            .timeout(const Duration(seconds: 4));
         if (_externalSeeking &&
             _wasPlayingBeforeSeek &&
             !_player.playing &&
@@ -3851,8 +3951,29 @@ class PlayerService {
   }
 
   static Future<void> togglePlayPause() async {
+    if (_playbackState == PlaybackState.buffering) {
+      StabilityLogger.info(
+        'Playback',
+        'Play/Pause toggled while recovering. Cancelling recovery.',
+      );
+      _userPausedOrStoppedPlayback = true;
+      PlaybackCoordinator.reset();
+      _activeHttpClient?.close();
+      _activeHttpClient = null;
+      _resolvingSong = null;
+      _resolvingSongController.add(null);
+      _isLoadingNewSong = false;
+      _updatePlaybackState(PlaybackState.paused);
+      try {
+        await _player.pause();
+      } catch (_) {}
+      return;
+    }
     if (_isLoadingNewSong) {
-      StabilityLogger.info('Playback', 'Play/Pause toggled while loading. Cancelling loading.');
+      StabilityLogger.info(
+        'Playback',
+        'Play/Pause toggled while loading. Cancelling loading.',
+      );
       _userPausedOrStoppedPlayback = true;
       PlaybackCoordinator.reset();
       _activeHttpClient?.close();
@@ -3901,7 +4022,8 @@ class PlayerService {
 
   static Future<void> _advanceQueue({required bool isUserTriggered}) async {
     _checkAndRecordSkipTelemetry();
-    final wasPlaying = _player.playing ||
+    final wasPlaying =
+        _player.playing ||
         (!_userPausedOrStoppedPlayback &&
             !_pausedByAudioInterruption &&
             !_pausedByOutputDisconnect &&
@@ -3937,7 +4059,8 @@ class PlayerService {
     }
 
     // End of queue: try forward history restoration first (user-triggered Next only)
-    if (isUserTriggered && await _restoreForwardQueueFromHistory(resumePlayback: wasPlaying)) {
+    if (isUserTriggered &&
+        await _restoreForwardQueueFromHistory(resumePlayback: wasPlaying)) {
       return;
     }
 
@@ -3948,7 +4071,7 @@ class PlayerService {
         minCount: _autoplayBatchMin,
         forceOfflineOnly: !_isNetworkAvailable,
       );
-      
+
       // If new songs were successfully appended, advance to the first appended song
       if (_currentIndex < _queue.length - 1) {
         if (!_isNetworkAvailable) {
@@ -4321,7 +4444,10 @@ class PlayerService {
     }
   }
 
-  static void _showThrottledToast(String msg, {Toast toastLength = Toast.LENGTH_LONG}) {
+  static void _showThrottledToast(
+    String msg, {
+    Toast toastLength = Toast.LENGTH_LONG,
+  }) {
     final now = DateTime.now();
     if (_lastErrorToastMsg == msg &&
         _lastErrorToastTime != null &&
@@ -4369,6 +4495,21 @@ class PlayerService {
     if (queueForRebuild.isNotEmpty) {
       queueForRebuild[normalizedIndex] = updatedSong;
     }
+    if (replacementQueue == null) {
+      if (normalizedIndex < _queue.length) {
+        _queue[normalizedIndex] = updatedSong;
+      }
+    } else {
+      _queue
+        ..clear()
+        ..addAll(queueForRebuild);
+    }
+
+    final origIdx = _originalQueue.indexWhere((s) => s.id == updatedSong.id);
+    if (origIdx != -1) {
+      _originalQueue[origIdx] = updatedSong;
+    }
+
     final resolvedTargets = _resolvePlaybackTargets(queueForRebuild);
     final rebuiltSources = resolvedTargets
         .map((target) => target.audioSource)
@@ -4382,11 +4523,17 @@ class PlayerService {
               resolvedTargets[normalizedIndex].audioSource;
           await _player.insertAudioSource(normalizedIndex, replacementSource);
           try {
-            await _player.seek(position, index: normalizedIndex).timeout(const Duration(seconds: 4));
+            await _player
+                .seek(position, index: normalizedIndex)
+                .timeout(const Duration(seconds: 4));
             // Wait for player to be ready before returning, so `play()` works correctly.
-            await _player.processingStateStream.firstWhere(
-              (state) => state == ProcessingState.ready || state == ProcessingState.idle,
-            ).timeout(const Duration(seconds: 4));
+            await _player.processingStateStream
+                .firstWhere(
+                  (state) =>
+                      state == ProcessingState.ready ||
+                      state == ProcessingState.idle,
+                )
+                .timeout(const Duration(seconds: 4));
           } catch (e) {
             debugPrint('Replace Source Seek Error: $e');
           }
@@ -4410,11 +4557,17 @@ class PlayerService {
         final replacementSource = resolvedTargets[normalizedIndex].audioSource;
         await _player.insertAudioSource(0, replacementSource);
         try {
-          await _player.seek(position, index: 0).timeout(const Duration(seconds: 4));
+          await _player
+              .seek(position, index: 0)
+              .timeout(const Duration(seconds: 4));
           // Wait for player to be ready before returning, so `play()` works correctly.
-          await _player.processingStateStream.firstWhere(
-            (state) => state == ProcessingState.ready || state == ProcessingState.idle,
-          ).timeout(const Duration(seconds: 4));
+          await _player.processingStateStream
+              .firstWhere(
+                (state) =>
+                    state == ProcessingState.ready ||
+                    state == ProcessingState.idle,
+              )
+              .timeout(const Duration(seconds: 4));
         } catch (e) {
           debugPrint('Replace Single Source Seek Error: $e');
         }
@@ -4436,6 +4589,14 @@ class PlayerService {
 
   static Future<void> stop() async {
     await init();
+    if (_playbackState == PlaybackState.buffering) {
+      PlaybackCoordinator.reset();
+      _activeHttpClient?.close();
+      _activeHttpClient = null;
+      _resolvingSong = null;
+      _resolvingSongController.add(null);
+      _isLoadingNewSong = false;
+    }
     if (_conversationModeActive) {
       await _deactivateConversationMode(
         restoreVolume: true,
@@ -4695,20 +4856,26 @@ class PlayerService {
       final client = ApiService.createSecureHttpClient(pinCertificates: false);
       try {
         if (isOffline) {
-          final downloadedPath = await DownloadService.getLocalPath(songToRestore.id);
-          final cachedPath = downloadedPath ?? OfflineService.getLocalPath(songToRestore.id);
+          final downloadedPath = await DownloadService.getLocalPath(
+            songToRestore.id,
+          );
+          final cachedPath =
+              downloadedPath ?? OfflineService.getLocalPath(songToRestore.id);
           if (cachedPath == null || cachedPath.trim().isEmpty) {
             // Song missing offline! Search offline database for same song title
             final downloadedSongs = await DownloadService.getDownloadedSongs();
             Song? fallbackSong;
             for (final ds in downloadedSongs) {
-              if (ds.name.trim().toLowerCase() == songToRestore.name.trim().toLowerCase()) {
+              if (ds.name.trim().toLowerCase() ==
+                  songToRestore.name.trim().toLowerCase()) {
                 fallbackSong = ds;
                 break;
               }
             }
             if (fallbackSong != null) {
-              final path = await DownloadService.getLocalPath(fallbackSong.id) ?? OfflineService.getLocalPath(fallbackSong.id);
+              final path =
+                  await DownloadService.getLocalPath(fallbackSong.id) ??
+                  OfflineService.getLocalPath(fallbackSong.id);
               if (path != null && path.trim().isNotEmpty) {
                 songToRestore = fallbackSong.copyWith(streamUrl: path);
               } else {
@@ -4735,12 +4902,16 @@ class PlayerService {
           } else {
             // Stream URL invalid/expired/missing! Search API for same song title
             try {
-              final searchPayload = await ApiService.globalSearch(songToRestore.name);
+              final searchPayload = await ApiService.globalSearch(
+                songToRestore.name,
+              );
               final results = searchPayload['songs'] ?? [];
               Song? fallbackSong;
               for (final res in results) {
                 final parsed = Song.fromJson(res);
-                if (parsed.name.trim().toLowerCase() == songToRestore.name.trim().toLowerCase() && _hasStreamUrl(parsed)) {
+                if (parsed.name.trim().toLowerCase() ==
+                        songToRestore.name.trim().toLowerCase() &&
+                    _hasStreamUrl(parsed)) {
                   fallbackSong = parsed;
                   break;
                 }
@@ -4752,7 +4923,8 @@ class PlayerService {
                   requestId: PlaybackCoordinator.newRequest(fallbackSong),
                   client: client,
                 );
-                if (resolvedFallback != null && _hasStreamUrl(resolvedFallback)) {
+                if (resolvedFallback != null &&
+                    _hasStreamUrl(resolvedFallback)) {
                   songToRestore = resolvedFallback;
                 } else {
                   _showThrottledToast("Song unavailable.");
@@ -4808,13 +4980,20 @@ class PlayerService {
           .toList(growable: false);
 
       await _runSerializedSourceMutation(() async {
-        await _player.setAudioSources(
-          sources,
-          initialIndex: _currentIndex,
-          initialPosition: candidate.position,
-        ).timeout(const Duration(seconds: 12), onTimeout: () {
-          throw TimeoutException('Player preparation timed out after 12 seconds');
-        });
+        await _player
+            .setAudioSources(
+              sources,
+              initialIndex: _currentIndex,
+              initialPosition: candidate.position,
+            )
+            .timeout(
+              const Duration(seconds: 12),
+              onTimeout: () {
+                throw TimeoutException(
+                  'Player preparation timed out after 12 seconds',
+                );
+              },
+            );
       });
 
       _updateTrackedPlaybackSourceKeys(resolvedTargets);
@@ -5117,18 +5296,24 @@ class PlayerService {
 
   static Future<void> _onPlaybackCompleted() async {
     // 1. Natural Completion Check
-    final duration = _player.duration ?? Duration(seconds: _currentSong?.duration ?? 0);
+    final duration =
+        _player.duration ?? Duration(seconds: _currentSong?.duration ?? 0);
     final position = _player.position;
-    final finishedNaturally = duration != Duration.zero &&
+    final finishedNaturally =
+        duration != Duration.zero &&
         position.inSeconds >= duration.inSeconds - 2;
 
     if (!finishedNaturally) {
-      debugPrint('Playback completed event fired, but track did not finish naturally. Position: $position, Duration: $duration. Ignoring automatic skip.');
+      debugPrint(
+        'Playback completed event fired, but track did not finish naturally. Position: $position, Duration: $duration. Ignoring automatic skip.',
+      );
       return;
     }
 
     if (_currentSong != null) {
-      unawaited(BackgroundLearningService.recordReplay(songId: _currentSong!.id));
+      unawaited(
+        BackgroundLearningService.recordReplay(songId: _currentSong!.id),
+      );
       unawaited(
         OfflineService.recordPlaybackProgress(
           _currentSong!,
@@ -5159,7 +5344,11 @@ class PlayerService {
     if (_songPlayStartedAt != null && _songPlayStartedId != null) {
       final elapsed = DateTime.now().difference(_songPlayStartedAt!);
       if (elapsed.inSeconds < 5) {
-        unawaited(BackgroundLearningService.recordImmediateSkip(songId: _songPlayStartedId!));
+        unawaited(
+          BackgroundLearningService.recordImmediateSkip(
+            songId: _songPlayStartedId!,
+          ),
+        );
       }
       _songPlayStartedAt = null;
       _songPlayStartedId = null;
@@ -5207,9 +5396,14 @@ class PlayerService {
       for (int i = 0; i < _queue.length; i++) {
         if (i == _currentIndex) continue; // Skip currently playing song
         final song = _queue[i];
-        if (_isSongUsingLocalSource(song)) continue; // Keep local downloads local
+        if (_isSongUsingLocalSource(song)) {
+          continue; // Keep local downloads local
+        }
 
-        final resolved = await _resolveSongForPlayback(song, forceRefresh: true);
+        final resolved = await _resolveSongForPlayback(
+          song,
+          forceRefresh: true,
+        );
         if (resolved != null) {
           _queue[i] = resolved;
           if (_player.audioSource != null && i < _player.sequence.length) {
@@ -5219,14 +5413,21 @@ class PlayerService {
                 await _player.insertAudioSource(i, target.audioSource);
                 await _player.removeAudioSourceAt(i + 1);
               } catch (e) {
-                StabilityLogger.warning('Playback', 'Failed to update background queue source at index $i: $e');
+                StabilityLogger.warning(
+                  'Playback',
+                  'Failed to update background queue source at index $i: $e',
+                );
               }
             });
           }
         }
       }
     } catch (e) {
-      StabilityLogger.error('Playback', 'Reconnection background sync error', e);
+      StabilityLogger.error(
+        'Playback',
+        'Reconnection background sync error',
+        e,
+      );
     }
   }
 
@@ -5235,14 +5436,19 @@ class PlayerService {
     if (nextSongIndex >= _queue.length) return;
 
     final immediateNextSong = _queue[nextSongIndex];
-    final resolvedImmediateNext = await _resolveLocalSongCopy(immediateNextSong);
-    final isImmediateNextDownloaded = _isSongUsingLocalSource(resolvedImmediateNext);
+    final resolvedImmediateNext = await _resolveLocalSongCopy(
+      immediateNextSong,
+    );
+    final isImmediateNextDownloaded = _isSongUsingLocalSource(
+      resolvedImmediateNext,
+    );
 
     if (isImmediateNextDownloaded) {
       await _resolveOfflineSourceForQueueIndex(nextSongIndex);
       _currentIndex = nextSongIndex;
       _currentSong = _queue[_currentIndex];
-      if (_player.audioSource != null && nextSongIndex < _player.sequence.length) {
+      if (_player.audioSource != null &&
+          nextSongIndex < _player.sequence.length) {
         await _player.seek(Duration.zero, index: nextSongIndex);
         if (wasPlaying) {
           await _playEnsuringAudioFocus();
@@ -5271,7 +5477,8 @@ class PlayerService {
           await _resolveOfflineSourceForQueueIndex(nextDownloadedIndex);
           _currentIndex = nextDownloadedIndex;
           _currentSong = _queue[_currentIndex];
-          if (_player.audioSource != null && nextDownloadedIndex < _player.sequence.length) {
+          if (_player.audioSource != null &&
+              nextDownloadedIndex < _player.sequence.length) {
             await _player.seek(Duration.zero, index: nextDownloadedIndex);
             if (wasPlaying) {
               await _playEnsuringAudioFocus();
@@ -5338,7 +5545,9 @@ class PlayerService {
         } finally {
           _setSourceSwitching(false);
         }
-        _qualityAdjustmentMsgController.add('Offline mode active. Continuing playback.');
+        _qualityAdjustmentMsgController.add(
+          'Offline mode active. Continuing playback.',
+        );
         return;
       }
 
@@ -5375,12 +5584,16 @@ class PlayerService {
     // ─── Step 1: Try a seamless switch to a local file. ───────────────────
     // Capture state before any async work so snapshots are always fresh.
     final wasPlaying = _player.playing;
-    final lastPosition = _lastKnownPosition > Duration.zero ? _lastKnownPosition : _player.position;
+    final lastPosition = _lastKnownPosition > Duration.zero
+        ? _lastKnownPosition
+        : _player.position;
 
     var localPath = OfflineService.getLocalPath(song.id);
     localPath ??= await DownloadService.getLocalPath(song.id);
 
-    if (localPath != null && localPath.isNotEmpty && File(localPath).existsSync()) {
+    if (localPath != null &&
+        localPath.isNotEmpty &&
+        File(localPath).existsSync()) {
       debugPrint(
         'Network dropped for ${song.id} but a local copy exists. '
         'Switching seamlessly to local file.',
@@ -5413,8 +5626,12 @@ class PlayerService {
           await _playEnsuringAudioFocus();
         }
         _savePlaybackState();
-        _qualityAdjustmentMsgController.add('Offline mode active. Continuing playback.');
-        debugPrint('Seamlessly switched ${song.id} to local file on network loss.');
+        _qualityAdjustmentMsgController.add(
+          'Offline mode active. Continuing playback.',
+        );
+        debugPrint(
+          'Seamlessly switched ${song.id} to local file on network loss.',
+        );
         return;
       } catch (e) {
         debugPrint('Seamless local-file switch failed for ${song.id}: $e');
@@ -5498,7 +5715,11 @@ class PlayerService {
       try {
         await _player.stop();
       } catch (_) {}
-      unawaited(_handlePlayerError(PlayerException(404, 'loading timeout / 404', _currentIndex)));
+      unawaited(
+        _handlePlayerError(
+          PlayerException(404, 'loading timeout / 404', _currentIndex),
+        ),
+      );
     });
   }
 
@@ -5510,7 +5731,11 @@ class PlayerService {
     final song = _currentSong;
     if (song == null) return false;
     // Capture position before async resolution so it doesn't drift.
-    final lastPosition = _offlineSeekPosition ?? (_lastKnownPosition > Duration.zero ? _lastKnownPosition : _player.position);
+    final lastPosition =
+        _offlineSeekPosition ??
+        (_lastKnownPosition > Duration.zero
+            ? _lastKnownPosition
+            : _player.position);
     _offlineSeekPosition = null; // Clear it after reading
 
     // Prefer offline cache.
@@ -5523,7 +5748,10 @@ class PlayerService {
       if (File(localPath).existsSync()) {
         playableSong = song.copyWith(streamUrl: localPath);
       } else if (_isNetworkAvailable) {
-        final resolved = await _resolveSongForPlayback(song, forceRefresh: true);
+        final resolved = await _resolveSongForPlayback(
+          song,
+          forceRefresh: true,
+        );
         if (resolved == null) return false;
         playableSong = resolved;
       } else {
@@ -5538,7 +5766,8 @@ class PlayerService {
       return false;
     }
 
-    final reloadInitialPos = lastPosition; // Always restore the user's last position on reload
+    final reloadInitialPos =
+        lastPosition; // Always restore the user's last position on reload
 
     _setSourceSwitching(true);
     try {
@@ -5580,7 +5809,9 @@ class PlayerService {
 
     var localPath = OfflineService.getLocalPath(song.id);
     localPath ??= await DownloadService.getLocalPath(song.id);
-    if (localPath == null || localPath.isEmpty || !File(localPath).existsSync()) return;
+    if (localPath == null || localPath.isEmpty || !File(localPath).existsSync()) {
+      return;
+    }
 
     final offlineSong = song.copyWith(streamUrl: localPath);
     _queue[index] = offlineSong;
@@ -5605,7 +5836,10 @@ class PlayerService {
           if (_player.audioSource != null && index < currentSequence.length) {
             final currentItem = currentSequence[index].tag;
             if (currentItem is MediaItem && currentItem.id == song.id) {
-              await _player.insertAudioSource(index, resolvedTarget.audioSource);
+              await _player.insertAudioSource(
+                index,
+                resolvedTarget.audioSource,
+              );
               await _player.removeAudioSourceAt(index + 1);
             }
           }
@@ -6052,26 +6286,33 @@ class PlayerService {
 
     try {
       final uri = Uri.parse(cleanUrl);
-      var response = await client.head(uri).timeout(const Duration(milliseconds: 1500));
-      
+      var response = await client
+          .head(uri)
+          .timeout(const Duration(milliseconds: 1500));
+
       // If HEAD returns 405 Method Not Allowed or 403 Forbidden or 501/500, we fallback to a GET with a tiny byte range.
       if (response.statusCode != 200) {
         final request = http.Request('GET', uri);
         request.headers['Range'] = 'bytes=0-1'; // Request first 2 bytes
-        final streamedResponse = await client.send(request).timeout(const Duration(milliseconds: 1500));
-        if (streamedResponse.statusCode == 200 || streamedResponse.statusCode == 206) {
-          final contentType = (streamedResponse.headers['content-type'] ?? '').toLowerCase();
+        final streamedResponse = await client
+            .send(request)
+            .timeout(const Duration(milliseconds: 1500));
+        if (streamedResponse.statusCode == 200 ||
+            streamedResponse.statusCode == 206) {
+          final contentType = (streamedResponse.headers['content-type'] ?? '')
+              .toLowerCase();
           if (contentType.isNotEmpty) {
             return true; // We received a partial content or full content response from media server
           }
         }
         return false;
       }
-      
-      final contentType = (response.headers['content-type'] ?? '').toLowerCase();
+
+      final contentType = (response.headers['content-type'] ?? '')
+          .toLowerCase();
       final contentLengthStr = response.headers['content-length'] ?? '0';
       final contentLength = int.tryParse(contentLengthStr) ?? 0;
-      
+
       if (contentType.contains('audio') ||
           contentType.contains('mpeg') ||
           contentType.contains('octet-stream') ||
@@ -6090,8 +6331,8 @@ class PlayerService {
   }
 
   static Song? _getCachedSongUrl(String songId) {
-    final entry = _resolvedUrlCache[songId];
-    if (entry != null && !entry.isExpired) {
+    final entry = SearchCoordinator.getCacheEntry(songId);
+    if (entry != null) {
       return entry.song.copyWith(streamUrl: entry.streamUrl);
     }
     return null;
@@ -6100,77 +6341,16 @@ class PlayerService {
   static void _setCachedSongUrl(Song song, String streamUrl) {
     final songId = song.id.trim();
     if (songId.isEmpty || streamUrl.trim().isEmpty) return;
-    
-    _resolvedUrlCache[songId] = _StreamUrlCacheEntry(
+
+    SearchCoordinator.cacheStream(
+      songId: songId,
       song: song,
       streamUrl: streamUrl,
-      expirationTime: DateTime.now().add(const Duration(hours: 1)),
+      isValidated: true,
+      expiresAt: DateTime.now().add(const Duration(hours: 24)),
+      provider: 'player_service',
+      bitrate: 0,
     );
-  }
-
-  static int _scoreCandidate(Song candidate, Song target) {
-    int score = 0;
-
-    final cName = candidate.name.toLowerCase();
-    final tName = target.name.toLowerCase();
-    final cArtist = (candidate.artist ?? '').toLowerCase();
-    final tArtist = (target.artist ?? '').toLowerCase();
-    final cAlbum = (candidate.album ?? '').toLowerCase();
-    final tAlbum = (target.album ?? '').toLowerCase();
-
-    // 1. Title Match (Highest priority)
-    if (cName == tName) {
-      score += 100;
-    } else if (cName.contains(tName) || tName.contains(cName)) {
-      score += 60;
-    }
-
-    // 2. Album Match (Second priority)
-    if (tAlbum.isNotEmpty && cAlbum.isNotEmpty) {
-      if (cAlbum == tAlbum) {
-        score += 50;
-      } else if (cAlbum.contains(tAlbum) || tAlbum.contains(cAlbum)) {
-        score += 30;
-      }
-    }
-
-    // 3. Artist Match (Third priority)
-    if (tArtist.isNotEmpty) {
-      final tArtists = tArtist.split(',').map((e) => e.trim()).toList();
-      final cArtists = cArtist.split(',').map((e) => e.trim()).toList();
-      bool match = false;
-      for (final ta in tArtists) {
-        if (ta.isNotEmpty && cArtists.any((ca) => ca.contains(ta) || ta.contains(ca))) {
-          match = true;
-          break;
-        }
-      }
-      if (match) {
-        score += 30;
-      }
-    }
-
-    // 4. Duration Difference
-    if (candidate.duration != null && target.duration != null && candidate.duration! > 0 && target.duration! > 0) {
-      final diff = (candidate.duration! - target.duration!).abs();
-      if (diff <= 5) {
-        score += 10;
-      } else if (diff > 15) {
-        score -= 20;
-      }
-    }
-
-    // 5. Verified Source
-    if (candidate.isOfficial) {
-      score += 20;
-    }
-
-    // 6. Recommendation Score
-    if (candidate.recommendationScore != null) {
-      score += (candidate.recommendationScore! * 10).toInt();
-    }
-
-    return score;
   }
 
   static void _preloadUpcomingSongs(int currentIndex) {
@@ -6184,18 +6364,29 @@ class PlayerService {
         if (nextIndex < _queue.length) indicesToPreload.add(nextIndex);
       }
 
-      Future<void> updatePreloadedSource(int indexToPreload, Song resolvedSong, String songId) async {
-        if (indexToPreload < _queue.length && _queue[indexToPreload].id == songId) {
+      Future<void> updatePreloadedSource(
+        int indexToPreload,
+        Song resolvedSong,
+        String songId,
+      ) async {
+        if (indexToPreload < _queue.length &&
+            _queue[indexToPreload].id == songId) {
           _queue[indexToPreload] = resolvedSong;
-          
+
           final resolvedTarget = _resolvePlaybackTarget(resolvedSong);
           await _runSerializedSourceMutation(() async {
             final currentSequence = _player.sequence;
-            if (_player.audioSource != null && indexToPreload < currentSequence.length) {
+            if (_player.audioSource != null &&
+                indexToPreload < currentSequence.length) {
               final currentItem = currentSequence[indexToPreload].tag;
               if (currentItem is MediaItem && currentItem.id == songId) {
-                debugPrint('Preloading completed: replacing source at index $indexToPreload for ${resolvedSong.name}');
-                await _player.insertAudioSource(indexToPreload, resolvedTarget.audioSource);
+                debugPrint(
+                  'Preloading completed: replacing source at index $indexToPreload for ${resolvedSong.name}',
+                );
+                await _player.insertAudioSource(
+                  indexToPreload,
+                  resolvedTarget.audioSource,
+                );
                 await _player.removeAudioSourceAt(indexToPreload + 1);
               }
             }
@@ -6215,68 +6406,40 @@ class PlayerService {
         final cached = _getCachedSongUrl(songId);
         if (cached != null && _hasStreamUrl(cached)) {
           if (cached.streamUrl != song.streamUrl) {
-             unawaited(updatePreloadedSource(indexToPreload, cached, songId));
+            unawaited(updatePreloadedSource(indexToPreload, cached, songId));
           }
           continue;
         }
 
         // Resolve in background (unawaited)
-        unawaited(_resolveSongForPlayback(song).then((resolvedSong) async {
-          if (resolvedSong != null && _hasStreamUrl(resolvedSong) && resolvedSong.streamUrl != song.streamUrl) {
-            await updatePreloadedSource(indexToPreload, resolvedSong, songId);
-          }
-        }).catchError((e) {
-          debugPrint('Preload failed for song ${song.name}: $e');
-        }));
+        unawaited(
+          _resolveSongForPlayback(song, requestId: 'pre-resolve-$songId')
+              .then((resolvedSong) async {
+                if (resolvedSong != null &&
+                    _hasStreamUrl(resolvedSong) &&
+                    resolvedSong.streamUrl != song.streamUrl) {
+                  await updatePreloadedSource(
+                    indexToPreload,
+                    resolvedSong,
+                    songId,
+                  );
+                }
+              })
+              .catchError((e) {
+                debugPrint('Preload failed for song ${song.name}: $e');
+              }),
+        );
       }
     });
   }
 
-  static Future<List<dynamic>> _searchSongsWithClient(String query, http.Client client) async {
-    final normalizedQuery = query.trim().replaceAll(RegExp(r'\s+'), ' ');
-    if (normalizedQuery.isEmpty) return const [];
 
-    final baseUrl = ApiService.baseUrl;
-    final queryParams = <String, String>{
-      'query': normalizedQuery,
-      'page': '1',
-      'limit': '5',
-    };
 
-    try {
-      final res = await client
-          .get(
-            Uri.parse('$baseUrl/api/search').replace(queryParameters: queryParams),
-          )
-          .timeout(const Duration(seconds: 3));
-      if (res.statusCode == 200) {
-        final decoded = jsonDecode(res.body);
-        final d = decoded['data'] ?? decoded;
-        if (d is Map) {
-          final results = d['songs'] ?? d['results'] ?? [];
-          if (results is List) return results;
-        }
-      }
-    } catch (_) {}
-
-    try {
-      final fallbackUrl = 'https://saavn.dev/api/search/songs?query=${Uri.encodeComponent(normalizedQuery)}';
-      final res = await client
-          .get(Uri.parse(fallbackUrl))
-          .timeout(const Duration(seconds: 3));
-      if (res.statusCode == 200) {
-        final decoded = jsonDecode(res.body);
-        final d = decoded['data'];
-        if (d is Map && d['results'] is List) {
-          return d['results'] as List;
-        }
-      }
-    } catch (_) {}
-
-    return const [];
-  }
-
-  static Future<Song?> _fetchSongDetailsForPlaybackWithClient(Song song, http.Client client, {bool forceRefresh = false}) async {
+  static Future<Song?> _fetchSongDetailsForPlaybackWithClient(
+    Song song,
+    http.Client client, {
+    bool forceRefresh = false,
+  }) async {
     final songId = song.id.trim();
     if (songId.isEmpty) return null;
 
@@ -6290,7 +6453,9 @@ class PlayerService {
         dynamic payload = songData['data'];
         if (payload is List && payload.isNotEmpty) payload = payload.first;
         if (payload is Map) {
-          final resolvedSong = Song.fromJson(Map<String, dynamic>.from(payload));
+          final resolvedSong = Song.fromJson(
+            Map<String, dynamic>.from(payload),
+          );
           if (_hasStreamUrl(resolvedSong)) return resolvedSong;
         }
       }
@@ -6305,7 +6470,9 @@ class PlayerService {
         dynamic payload = parsed['data'];
         if (payload is List && payload.isNotEmpty) payload = payload.first;
         if (payload is Map) {
-          final resolvedSong = Song.fromJson(Map<String, dynamic>.from(payload));
+          final resolvedSong = Song.fromJson(
+            Map<String, dynamic>.from(payload),
+          );
           if (_hasStreamUrl(resolvedSong)) return resolvedSong;
         }
       }
@@ -6345,7 +6512,10 @@ class PlayerService {
         int swapIndex = -1;
         for (int j = i + 1; j < remaining.length; j++) {
           if (!_isSameArtistOrAlbum(prev, remaining[j]) &&
-              !_isSameArtistOrAlbum(remaining[j], remaining[i + 1 == j ? i : i + 1])) {
+              !_isSameArtistOrAlbum(
+                remaining[j],
+                remaining[i + 1 == j ? i : i + 1],
+              )) {
             swapIndex = j;
             break;
           }
@@ -6462,17 +6632,18 @@ class _PlaybackSessionLogger {
 class CustomAudioPlayer extends AudioPlayer {
   bool _isInternal = false;
 
-  CustomAudioPlayer() : super(
-    audioLoadConfiguration: const AudioLoadConfiguration(
-      androidLoadControl: AndroidLoadControl(
-        minBufferDuration: Duration(seconds: 20),
-        maxBufferDuration: Duration(seconds: 90),
-        bufferForPlaybackDuration: Duration(seconds: 3),
-        bufferForPlaybackAfterRebufferDuration: Duration(seconds: 6),
-        backBufferDuration: Duration(seconds: 10),
-      ),
-    ),
-  );
+  CustomAudioPlayer()
+    : super(
+        audioLoadConfiguration: const AudioLoadConfiguration(
+          androidLoadControl: AndroidLoadControl(
+            minBufferDuration: Duration(seconds: 20),
+            maxBufferDuration: Duration(seconds: 90),
+            bufferForPlaybackDuration: Duration(seconds: 3),
+            bufferForPlaybackAfterRebufferDuration: Duration(seconds: 6),
+            backBufferDuration: Duration(seconds: 10),
+          ),
+        ),
+      );
 
   @override
   Future<void> seekToPrevious() async {
@@ -6510,4 +6681,3 @@ class CustomAudioPlayer extends AudioPlayer {
     }
   }
 }
-

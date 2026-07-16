@@ -537,13 +537,17 @@ class PlayerService {
         );
       }
 
-      if (_playbackState != PlaybackState.seeking && _playbackState != PlaybackState.buffering) {
+      if (_playbackState != PlaybackState.seeking) {
         switch (state.processingState) {
           case ProcessingState.idle:
-            _updatePlaybackState(PlaybackState.idle);
+            if (_playbackState != PlaybackState.buffering) {
+              _updatePlaybackState(PlaybackState.idle);
+            }
             break;
           case ProcessingState.loading:
-            _updatePlaybackState(PlaybackState.preparingDecoder);
+            if (_playbackState != PlaybackState.buffering) {
+              _updatePlaybackState(PlaybackState.preparingDecoder);
+            }
             break;
           case ProcessingState.buffering:
             _updatePlaybackState(PlaybackState.buffering);

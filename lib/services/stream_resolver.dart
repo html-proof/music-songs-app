@@ -38,6 +38,9 @@ class StreamResolver {
       }
       
       final contentType = (response.headers['content-type'] ?? '').toLowerCase();
+      if (contentType.contains('html')) {
+        return false;
+      }
       final contentLengthStr = response.headers['content-length'] ?? '0';
       final contentLength = int.tryParse(contentLengthStr) ?? 0;
       

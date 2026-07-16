@@ -2998,10 +2998,10 @@ class PlayerService {
             initialPosition: initialPosition ?? Duration.zero,
           )
           .timeout(
-            const Duration(seconds: 12),
+            const Duration(seconds: 4),
             onTimeout: () {
               throw TimeoutException(
-                'Player preparation timed out after 12 seconds',
+                'Player preparation timed out after 4 seconds',
               );
             },
           );
@@ -3071,10 +3071,10 @@ class PlayerService {
             initialPosition: initialPosition ?? Duration.zero,
           )
           .timeout(
-            const Duration(seconds: 12),
+            const Duration(seconds: 4),
             onTimeout: () {
               throw TimeoutException(
-                'Player preparation timed out after 12 seconds',
+                'Player preparation timed out after 4 seconds',
               );
             },
           );
@@ -6333,7 +6333,7 @@ class PlayerService {
             streamedResponse.statusCode == 206) {
           final contentType = (streamedResponse.headers['content-type'] ?? '')
               .toLowerCase();
-          if (contentType.isNotEmpty) {
+          if (contentType.isNotEmpty && !contentType.contains('html')) {
             return true; // We received a partial content or full content response from media server
           }
         }
@@ -6348,6 +6348,9 @@ class PlayerService {
 
       final contentType = (response.headers['content-type'] ?? '')
           .toLowerCase();
+      if (contentType.contains('html')) {
+        return false;
+      }
       final contentLengthStr = response.headers['content-length'] ?? '0';
       final contentLength = int.tryParse(contentLengthStr) ?? 0;
 

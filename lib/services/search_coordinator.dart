@@ -43,6 +43,7 @@ class SearchCoordinator {
   // --- Failed URL Blacklist (10-minute TTL) ---
   static const Duration _blacklistTtl = Duration(minutes: 10);
   static final Map<String, DateTime> _blacklistedUrls = {};
+  static final Map<String, DateTime> _recoveredAlbumsCache = {};
 
   static final List<String> _alternateCdns = [
     'aac.saavncdn.com',
@@ -476,5 +477,183 @@ class SearchCoordinator {
       }
     } catch (_) {}
     return false;
+  }
+
+  /// Recover an entire album/playlist when multiple songs in it fail.
+  /// Resolves the album tracks, matches them to the queue using ISRC, title, MBID,
+  /// and track/duration heuristics, validates them, and caches them for subsequent play requests.
+  static Future<Map<String, String>?> recoverAlbum(
+    Song triggeringSong,
+    List<Song> activeQueue, {
+    String? sessionId,
+  }) async {
+    final albumId = triggeringSong.albumId?.trim() ?? '';
+    final albumName = triggeringSong.album?.trim() ?? '';
+    final albumKey = albumId.isNotEmpty ? albumId : albumName;
+
+    if (albumKey.isEmpty) return null;
+
+    // 0. Cache check: If recently recovered (within last 10 minutes), reuse cached results
+    final cachedRecovery = _recoveredAlbumsCache[albumKey];
+    if (cachedRecovery != null && DateTime.now().isBefore(cachedRecovery)) {
+      debugPrint('[SearchCoordinator] Album $albumKey was recently recovered. Skipping search.');
+      final Map<String, String> mapping = {};
+      for (final s in activeQueue) {
+        final sId = s.id;
+        final entry = getCacheEntry(sId);
+        if (entry != null && !isBlacklisted(entry.streamUrl)) {
+          mapping[sId] = entry.streamUrl;
+        }
+      }
+      return mapping.isNotEmpty ? mapping : null;
+    }
+
+    debugPrint('[SearchCoordinator] Recovering album: $albumKey (Triggered by ${triggeringSong.name})');
+
+    final client = ApiService.createSecureHttpClient(pinCertificates: false);
+    try {
+      Map<String, dynamic>? albumPayload;
+      if (albumId.isNotEmpty) {
+        try {
+          albumPayload = await ApiService.getAlbums(id: albumId, client: client);
+        } catch (_) {}
+      }
+
+      if ((albumPayload == null ||
+              albumPayload['data'] == null ||
+              (albumPayload['data'] is Map &&
+                  (albumPayload['data']['songs'] == null ||
+                      (albumPayload['data']['songs'] as List).isEmpty))) &&
+          albumName.isNotEmpty) {
+        try {
+          final query = '$albumName ${triggeringSong.artist ?? ""}';
+          albumPayload = await ApiService.getAlbums(query: query, client: client);
+        } catch (_) {}
+      }
+
+      List<dynamic> rawSongs = [];
+      if (albumPayload != null) {
+        final data = albumPayload['data'];
+        if (data is Map && data['songs'] is List) {
+          rawSongs = data['songs'];
+        } else if (albumPayload['songs'] is List) {
+          rawSongs = albumPayload['songs'];
+        }
+      }
+
+      if (rawSongs.isEmpty) {
+        debugPrint('[SearchCoordinator] No songs found in resolved album details for $albumKey');
+        return null;
+      }
+
+      final resolvedSongs = rawSongs
+          .whereType<Map>()
+          .map((m) => Song.fromJson(Map<String, dynamic>.from(m)))
+          .toList();
+
+      final originalAlbumTracks = activeQueue.where((s) {
+        final sId = s.albumId?.trim() ?? '';
+        final sName = s.album?.trim() ?? '';
+        final sKey = sId.isNotEmpty ? sId : sName;
+        return sKey == albumKey;
+      }).toList();
+
+      final Map<Song, Song> matchMap = {};
+      for (final origTrack in originalAlbumTracks) {
+        final match = _findMatchingTrack(origTrack, resolvedSongs);
+        if (match != null && match.streamUrl != null && match.streamUrl!.isNotEmpty) {
+          matchMap[origTrack] = match;
+        }
+      }
+
+      if (matchMap.isEmpty) {
+        debugPrint('[SearchCoordinator] Album recovery matching returned 0 tracks');
+        return null;
+      }
+
+      // Parallel validation of matched tracks
+      final Map<String, String> validMapping = {};
+      final List<Future<void>> validationFutures = [];
+
+      for (final entry in matchMap.entries) {
+        final origTrack = entry.key;
+        final resolvedTrack = entry.value;
+        final streamUrl = resolvedTrack.streamUrl!;
+
+        validationFutures.add(
+          _validateStream(Uri.parse(streamUrl), client).then((isValid) {
+            if (isValid) {
+              validMapping[origTrack.id] = streamUrl;
+              // Cache in memory resolver cache (10-minute TTL)
+              cacheStream(
+                songId: origTrack.id,
+                song: origTrack.copyWith(streamUrl: streamUrl),
+                streamUrl: streamUrl,
+                isValidated: true,
+                expiresAt: DateTime.now().add(_cacheTtl),
+                provider: 'album_recovery',
+                bitrate: resolvedTrack.duration != null ? 320 : 160,
+              );
+            } else {
+              blacklistUrl(streamUrl);
+            }
+          }),
+        );
+      }
+
+      await Future.wait(validationFutures);
+
+      if (validMapping.isNotEmpty) {
+        // Cache this album recovery for 10 minutes
+        _recoveredAlbumsCache[albumKey] = DateTime.now().add(_cacheTtl);
+        debugPrint('[SearchCoordinator] Recovered ${validMapping.length} tracks for album: $albumKey');
+        return validMapping;
+      }
+    } catch (e) {
+      debugPrint('[SearchCoordinator] Album recovery failed: $e');
+    } finally {
+      client.close();
+    }
+    return null;
+  }
+
+  static Song? _findMatchingTrack(Song origTrack, List<Song> resolvedTracks) {
+    // 1. ISRC Match
+    if (origTrack.isrc != null && origTrack.isrc!.isNotEmpty) {
+      final match = resolvedTracks.cast<Song?>().firstWhere(
+        (t) => t != null && t.isrc != null && t.isrc!.toLowerCase().trim() == origTrack.isrc!.toLowerCase().trim(),
+        orElse: () => null,
+      );
+      if (match != null) return match;
+    }
+
+    // 2. MusicBrainz ID Match
+    if (origTrack.musicbrainzId != null && origTrack.musicbrainzId!.isNotEmpty) {
+      final match = resolvedTracks.cast<Song?>().firstWhere(
+        (t) => t != null && t.musicbrainzId != null && t.musicbrainzId!.toLowerCase().trim() == origTrack.musicbrainzId!.toLowerCase().trim(),
+        orElse: () => null,
+      );
+      if (match != null) return match;
+    }
+
+    // 3. Verification Engine (Score >= threshold)
+    Song? bestMatch;
+    double bestConfidence = 0.0;
+    for (final t in resolvedTracks) {
+      final confidence = VerificationEngine.calculateConfidence(t, origTrack);
+      if (confidence >= VerificationEngine.threshold && confidence > bestConfidence) {
+        bestConfidence = confidence;
+        bestMatch = t;
+      }
+    }
+    if (bestMatch != null) return bestMatch;
+
+    // 4. Fallback: Clean Title exact match (case insensitive)
+    final cleanOrigTitle = origTrack.name.toLowerCase().trim();
+    final match = resolvedTracks.cast<Song?>().firstWhere(
+      (t) => t != null && t.name.toLowerCase().trim() == cleanOrigTitle,
+      orElse: () => null,
+    );
+    return match;
   }
 }

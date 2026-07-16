@@ -106,5 +106,46 @@ void main() {
       // Since B was the last one, it should be the one successfully prepared or attempted
       expect(PlayerService.currentSong?.id, isNot('song_a'));
     });
+
+    test('Album failure count tracks consecutive failures in the same album', () async {
+      final songA1 = Song(
+        id: 'song_a1',
+        name: 'Song A1',
+        artist: 'Artist A',
+        album: 'Album A',
+        albumId: 'album_a',
+        duration: 200,
+      );
+
+      final songA2 = Song(
+        id: 'song_a2',
+        name: 'Song A2',
+        artist: 'Artist A',
+        album: 'Album A',
+        albumId: 'album_a',
+        duration: 220,
+      );
+
+      final songB1 = Song(
+        id: 'song_b1',
+        name: 'Song B1',
+        artist: 'Artist B',
+        album: 'Album B',
+        albumId: 'album_b',
+        duration: 240,
+      );
+
+      // Play song A1 (resolution will fail, incrementing count to 1)
+      await PlayerService.play(songA1);
+      expect(PlayerService.consecutiveFailedAlbumSongsCount, 1);
+
+      // Play song A2 (resolution will fail, incrementing count to 2)
+      await PlayerService.play(songA2);
+      expect(PlayerService.consecutiveFailedAlbumSongsCount, 2);
+
+      // Play song B1 (different album: resets count to 1 for album_b)
+      await PlayerService.play(songB1);
+      expect(PlayerService.consecutiveFailedAlbumSongsCount, 1);
+    });
   });
 }

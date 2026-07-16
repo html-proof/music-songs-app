@@ -124,6 +124,8 @@ class PlayerService {
   static final List<String> _queuePlaybackSourceKeys = <String>[];
   static int _currentIndex = -1;
   static final Map<String, int> _songRecoveryAttempts = {};
+  static String? _lastFailedAlbumId;
+  static int _consecutiveFailedAlbumSongsCount = 0;
   static final Set<String> _activeVideoSources = <String>{};
   static bool _pausedByVideoPlayback = false;
   static bool _pausedByAudioInterruption = false;
@@ -726,6 +728,9 @@ class PlayerService {
   static AudioPlayer get player => _player;
   static Song? get currentSong => _currentSong;
   static List<Song> get queue => _queue;
+
+  @visibleForTesting
+  static int get consecutiveFailedAlbumSongsCount => _consecutiveFailedAlbumSongsCount;
   static int get currentIndex => _currentIndex;
   static bool get isLoadingNewSong => _isLoadingNewSong;
   static bool get canSkipPrevious {
@@ -2391,7 +2396,7 @@ class PlayerService {
       _checkSession(requestId);
       _fallbackSongResolved = false;
       _updatePlaybackState(PlaybackState.verifyingIdentity);
-      final playableSong = await _resolveSongForPlayback(
+      var playableSong = await _resolveSongForPlayback(
         song,
         requestId: requestId,
         client: _activeHttpClient,
@@ -2402,6 +2407,16 @@ class PlayerService {
       // Cancel remaining requests / tasks from this session
       _activeHttpClient?.close();
       _activeHttpClient = null;
+
+      if (playableSong == null) {
+        final bool albumRecovered = await _trackAlbumFailure(song, requestId);
+        if (albumRecovered) {
+          playableSong = await _resolveSongForPlayback(
+            song,
+            requestId: requestId,
+          );
+        }
+      }
 
       if (playableSong == null) {
         if (PlaybackCoordinator.isValid(requestId)) {
@@ -2551,7 +2566,7 @@ class PlayerService {
           if (user != null) {
             final prefs = await PreferencesService.getPreferences(user.uid);
             if (prefs != null && prefs.autoDownloadPlayedSongs) {
-              await DownloadService.downloadSong(playableSong);
+              await DownloadService.downloadSong(playableSong!);
             }
           }
         } catch (e) {
@@ -2782,6 +2797,11 @@ class PlayerService {
         message.contains('broken pipe');
 
     if (isHttpError || isDecoderError || isTimeout || isDnsOrNetworkError || (isSourceError && await _isNetworkConnected())) {
+      final requestId = PlaybackCoordinator.newRequest(activeSong);
+
+      // Check if this triggers album-level recovery
+      await _trackAlbumFailure(activeSong, requestId);
+
       final attempts = _songRecoveryAttempts[activeSong.id] ?? 0;
       if (attempts >= 1) {
         debugPrint(
@@ -2812,8 +2832,6 @@ class PlayerService {
 
       // Update state to buffering during recovery to freeze metadata display & show progress bar animation
       _updatePlaybackState(PlaybackState.buffering);
-
-      final requestId = PlaybackCoordinator.newRequest(activeSong);
 
       try {
         await _player.pause();
@@ -2958,12 +2976,75 @@ class PlayerService {
         '&ts=${DateTime.now().millisecondsSinceEpoch}';
   }
 
+  static Future<bool> _trackAlbumFailure(Song song, String requestId) async {
+    final albumId = song.albumId?.trim() ?? '';
+    final albumName = song.album?.trim() ?? '';
+    final albumKey = albumId.isNotEmpty ? albumId : albumName;
+
+    if (albumKey.isEmpty) return false;
+
+    if (albumKey == _lastFailedAlbumId) {
+      _consecutiveFailedAlbumSongsCount++;
+    } else {
+      _lastFailedAlbumId = albumKey;
+      _consecutiveFailedAlbumSongsCount = 1;
+    }
+
+    StabilityLogger.info(
+      'Playback',
+      'Album failure track: album=$albumKey, consecutive_failures=$_consecutiveFailedAlbumSongsCount',
+    );
+
+    if (_consecutiveFailedAlbumSongsCount >= 3) {
+      StabilityLogger.info(
+        'Playback',
+        'Album-level failure detected for album: $albumKey. Initiating Album-Level Fallback Recovery...',
+      );
+
+      final recoveredUrls = await SearchCoordinator.recoverAlbum(
+        song,
+        _queue,
+        sessionId: requestId,
+      );
+
+      if (recoveredUrls != null && recoveredUrls.isNotEmpty) {
+        // Update all matching songs in the queue
+        for (int i = 0; i < _queue.length; i++) {
+          final s = _queue[i];
+          final newUrl = recoveredUrls[s.id];
+          if (newUrl != null && newUrl.isNotEmpty) {
+            _queue[i] = s.copyWith(streamUrl: newUrl);
+          }
+        }
+        // Also update originalQueue
+        for (int i = 0; i < _originalQueue.length; i++) {
+          final s = _originalQueue[i];
+          final newUrl = recoveredUrls[s.id];
+          if (newUrl != null && newUrl.isNotEmpty) {
+            _originalQueue[i] = s.copyWith(streamUrl: newUrl);
+          }
+        }
+
+        // Update _currentSong if it was matching
+        final currentUrl = recoveredUrls[song.id];
+        if (currentUrl != null && currentUrl.isNotEmpty) {
+          _currentSong = song.copyWith(streamUrl: currentUrl);
+        }
+
+        _consecutiveFailedAlbumSongsCount = 0; // Reset counter after successful recovery
+        return true;
+      }
+    }
+    return false;
+  }
+
   static void _resetRateLimitStateForSong(String? songId) {
     if (songId == null || songId.isEmpty) {
       _rateLimitSongId = null;
       _rateLimitRetryCount = 0;
       _rateLimitRetryInProgress = false;
       _songRecoveryAttempts.clear();
+      _consecutiveFailedAlbumSongsCount = 0;
       return;
     }
 
@@ -2972,6 +3053,7 @@ class PlayerService {
     _rateLimitRetryCount = 0;
     _rateLimitRetryInProgress = false;
     _songRecoveryAttempts.remove(songId);
+    _consecutiveFailedAlbumSongsCount = 0;
   }
 
   static Future<void> _setQueueSource(
@@ -3409,9 +3491,11 @@ class PlayerService {
         return candidateSong.copyWith(streamUrl: localPath);
       }
 
-      // Check memory Stream URL Cache first if not forcing refresh
-      if (!forceRefresh && songId.isNotEmpty) {
-        final cacheEntry = SearchCoordinator.getCacheEntry(songId);
+      // Check memory Stream URL Cache first if not forcing refresh (or if it is a fresh recovery entry)
+      final cacheEntryForCheck = songId.isNotEmpty ? SearchCoordinator.getCacheEntry(songId) : null;
+      final isRecoveryEntry = cacheEntryForCheck?.provider == 'album_recovery' || cacheEntryForCheck?.provider == 'recovery_engine';
+      if ((!forceRefresh || isRecoveryEntry) && songId.isNotEmpty) {
+        final cacheEntry = cacheEntryForCheck;
         final cachedSong = cacheEntry?.song.copyWith(streamUrl: cacheEntry.streamUrl);
         final hasCache = cachedSong != null && _hasStreamUrl(cachedSong);
         if (PlaybackCoordinator.isValid(requestId)) {

@@ -219,7 +219,6 @@ class PlayerService {
   static final StreamController<bool> _qualitySwitchingController =
       StreamController<bool>.broadcast();
 
-  static final Map<String, _StreamUrlCacheEntry> _resolvedUrlCache = {};
   static http.Client? _activeHttpClient;
   static DateTime? _songPlayStartedAt;
   static String? _songPlayStartedId;
@@ -2739,8 +2738,16 @@ class PlayerService {
         message.contains('expire') ||
         message.contains('unsupported');
     final isSourceError = message.contains('source error') || message.contains('player error');
+    final isDnsOrNetworkError =
+        message.contains('dns') ||
+        message.contains('socket') ||
+        message.contains('connection refused') ||
+        message.contains('host lookup') ||
+        message.contains('network unreachable') ||
+        message.contains('connection reset') ||
+        message.contains('broken pipe');
 
-    if (isHttpError || isDecoderError || isTimeout || (isSourceError && await _isNetworkConnected())) {
+    if (isHttpError || isDecoderError || isTimeout || isDnsOrNetworkError || (isSourceError && await _isNetworkConnected())) {
       final attempts = _songRecoveryAttempts[activeSong.id] ?? 0;
       if (attempts >= 1) {
         debugPrint(
@@ -2754,6 +2761,12 @@ class PlayerService {
         return;
       }
       _songRecoveryAttempts[activeSong.id] = attempts + 1;
+
+      // Blacklist the failed stream URL to prevent retrying it
+      final failedUrl = (activeSong.streamUrl ?? '').trim();
+      if (failedUrl.isNotEmpty && !_isLocalFilePath(failedUrl)) {
+        SearchCoordinator.blacklistUrl(failedUrl);
+      }
 
       debugPrint(
         'Stream failure detected. Triggering Production Recovery Pipeline for ${activeSong.id}...',
@@ -2771,13 +2784,18 @@ class PlayerService {
       try {
         await _player.pause();
 
-        final recoveredSong = await SearchCoordinator.recoverSong(
-          activeSong,
-          sessionId: requestId,
-        );
+        // 3-second recovery timeout: never leave the user stuck in buffering
+        final recoveredSong = await Future.any<Song?>([
+          SearchCoordinator.recoverSong(
+            activeSong,
+            sessionId: requestId,
+          ),
+          Future<Song?>.delayed(const Duration(seconds: 3), () => null),
+        ]);
 
         if (PlaybackCoordinator.isValid(requestId)) {
           if (recoveredSong == null) {
+            SearchCoordinator.cancelSession(requestId);
             _updatePlaybackState(PlaybackState.idle);
             _showThrottledToast(
               "Sorry, this song couldn't be played. Please try another version or search for it manually.",
@@ -2793,7 +2811,7 @@ class PlayerService {
           );
 
           // Allow normal state tracking to take over
-          _playbackState = PlaybackState.idle;
+          _updatePlaybackState(PlaybackState.idle);
 
           await _playEnsuringAudioFocus();
           _savePlaybackState();
@@ -3359,7 +3377,8 @@ class PlayerService {
 
       // Check memory Stream URL Cache first if not forcing refresh
       if (!forceRefresh && songId.isNotEmpty) {
-        final cachedSong = _getCachedSongUrl(songId);
+        final cacheEntry = SearchCoordinator.getCacheEntry(songId);
+        final cachedSong = cacheEntry?.song.copyWith(streamUrl: cacheEntry.streamUrl);
         final hasCache = cachedSong != null && _hasStreamUrl(cachedSong);
         if (PlaybackCoordinator.isValid(requestId)) {
           _activeLogger?.logStep(
@@ -3368,20 +3387,28 @@ class PlayerService {
             detail: hasCache ? 'HIT' : 'MISS',
           );
         }
-        if (cachedSong != null && _hasStreamUrl(cachedSong)) {
+        if (cachedSong != null && _hasStreamUrl(cachedSong) && cacheEntry != null) {
           if (_isSessionStale(requestId, song.id)) return null;
-          // Validate it fast
-          final isValid = await _validateStreamUrl(
-            cachedSong.streamUrl!,
-            localClient,
-          );
+
+          // Instant startup: skip HEAD validation for non-expired, non-blacklisted cache entries
+          final isFreshCache = !cacheEntry.isExpired && !SearchCoordinator.isBlacklisted(cachedSong.streamUrl!);
+          bool isValid;
+          if (isFreshCache) {
+            isValid = true;
+            debugPrint('Instant cache hit for $songId (fresh, non-blacklisted). Skipping validation.');
+          } else {
+            isValid = await _validateStreamUrl(
+              cachedSong.streamUrl!,
+              localClient,
+            );
+          }
           if (_isSessionStale(requestId, song.id)) return null;
 
           if (PlaybackCoordinator.isValid(requestId)) {
             _activeLogger?.logStep(
               'Memory URL validation',
               isValid,
-              detail: isValid ? 'SUCCESS' : 'FAILED',
+              detail: isFreshCache ? 'SKIPPED (fresh cache)' : (isValid ? 'SUCCESS' : 'FAILED'),
             );
           }
 
@@ -3393,9 +3420,10 @@ class PlayerService {
             );
           } else {
             debugPrint(
-              'Cached stream URL for $songId was expired/invalid. Purging from cache.',
+              'Cached stream URL for $songId was expired/invalid. Purging from cache and blacklisting.',
             );
-            _resolvedUrlCache.remove(songId);
+            SearchCoordinator.blacklistUrl(cachedSong.streamUrl!);
+            // Removed redundant _resolvedUrlCache.remove(songId);
           }
         }
       }
@@ -6309,6 +6337,12 @@ class PlayerService {
             return true; // We received a partial content or full content response from media server
           }
         }
+
+        // Blacklist URLs that return definitive failures (403, 404, 410)
+        final status = streamedResponse.statusCode;
+        if (status == 403 || status == 404 || status == 410) {
+          SearchCoordinator.blacklistUrl(cleanUrl);
+        }
         return false;
       }
 
@@ -6351,7 +6385,7 @@ class PlayerService {
       song: song,
       streamUrl: streamUrl,
       isValidated: true,
-      expiresAt: DateTime.now().add(const Duration(hours: 24)),
+      expiresAt: DateTime.now().add(const Duration(minutes: 10)),
       provider: 'player_service',
       bitrate: 0,
     );
@@ -6415,13 +6449,28 @@ class PlayerService {
           continue;
         }
 
-        // Resolve in background (unawaited)
+        // Resolve in background with validation (unawaited)
         unawaited(
           _resolveSongForPlayback(song, requestId: 'pre-resolve-$songId')
               .then((resolvedSong) async {
                 if (resolvedSong != null &&
                     _hasStreamUrl(resolvedSong) &&
                     resolvedSong.streamUrl != song.streamUrl) {
+                  // Validate the preloaded URL; blacklist + fallback on failure
+                  final preloadUrl = resolvedSong.streamUrl!;
+                  if (!_isLocalFilePath(preloadUrl) && !SearchCoordinator.isBlacklisted(preloadUrl)) {
+                    try {
+                      final preloadClient = ApiService.createSecureHttpClient(pinCertificates: false);
+                      final isValid = await _validateStreamUrl(preloadUrl, preloadClient);
+                      preloadClient.close();
+                      if (!isValid) {
+                        debugPrint('Preloaded URL invalid for ${song.name}. Blacklisting and triggering fallback.');
+                        SearchCoordinator.blacklistUrl(preloadUrl);
+                        unawaited(SearchCoordinator.recoverSong(song, sessionId: 'pre-resolve-fallback-$songId'));
+                        return;
+                      }
+                    } catch (_) {}
+                  }
                   await updatePreloadedSource(
                     indexToPreload,
                     resolvedSong,
@@ -6591,19 +6640,7 @@ class PlayerService {
   }
 }
 
-class _StreamUrlCacheEntry {
-  final Song song;
-  final String streamUrl;
-  final DateTime expirationTime;
 
-  _StreamUrlCacheEntry({
-    required this.song,
-    required this.streamUrl,
-    required this.expirationTime,
-  });
-
-  bool get isExpired => DateTime.now().isAfter(expirationTime);
-}
 
 class _PlaybackSessionLogger {
   final int sessionId;

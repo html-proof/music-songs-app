@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
@@ -31,14 +32,57 @@ class ResolvedStreamEntry {
 
 class SearchCoordinator {
   static final Map<String, List<http.Client>> _sessionClients = {};
-  static final Map<String, ResolvedStreamEntry> _resolvedCache = {};
   static final Map<String, Future<Song?>> _activeRecoveryTasks = {};
+
+  // --- LRU Cache (max 200 entries, 10-minute TTL) ---
+  static const int _maxCacheSize = 200;
+  static const Duration _cacheTtl = Duration(minutes: 10);
+  static final LinkedHashMap<String, ResolvedStreamEntry> _resolvedCache =
+      LinkedHashMap<String, ResolvedStreamEntry>();
+
+  // --- Failed URL Blacklist (10-minute TTL) ---
+  static const Duration _blacklistTtl = Duration(minutes: 10);
+  static final Map<String, DateTime> _blacklistedUrls = {};
 
   static final List<String> _alternateCdns = [
     'aac.saavncdn.com',
     'jiosaavn.cdn.jio.com',
     'snoidcdnems04.cdnsrv.jio.com',
   ];
+
+  // ─── URL Blacklist ───────────────────────────────────────────────
+
+  /// Blacklists a URL that has been confirmed to fail (403, 404, 410, timeout, etc.).
+  /// The URL will be skipped during validation for the next [_blacklistTtl].
+  static void blacklistUrl(String url) {
+    final normalized = url.trim();
+    if (normalized.isEmpty) return;
+    _blacklistedUrls[normalized] = DateTime.now().add(_blacklistTtl);
+    // Periodic cleanup: remove expired entries when the map grows large
+    if (_blacklistedUrls.length > 500) {
+      _pruneBlacklist();
+    }
+  }
+
+  /// Returns true if the URL is currently blacklisted and should be skipped.
+  static bool isBlacklisted(String url) {
+    final normalized = url.trim();
+    if (normalized.isEmpty) return false;
+    final expiry = _blacklistedUrls[normalized];
+    if (expiry == null) return false;
+    if (DateTime.now().isAfter(expiry)) {
+      _blacklistedUrls.remove(normalized);
+      return false;
+    }
+    return true;
+  }
+
+  static void _pruneBlacklist() {
+    final now = DateTime.now();
+    _blacklistedUrls.removeWhere((_, expiry) => now.isAfter(expiry));
+  }
+
+  // ─── Session Management ──────────────────────────────────────────
 
   /// Registers a client to a specific session.
   static void _registerClient(String sessionId, http.Client client) {
@@ -69,15 +113,24 @@ class SearchCoordinator {
     _activeRecoveryTasks.clear();
   }
 
-  /// Fast memory cache lookup. Expired entries must be refreshed automatically in the background.
+  // ─── LRU Cache ──────────────────────────────────────────────────
+
+  /// Fast memory cache lookup (<5ms target).
+  /// Expired entries are still returned for instant playback but trigger a background refresh.
+  /// Accessing an entry promotes it to the most-recently-used position.
   static ResolvedStreamEntry? getCacheEntry(String songId, {Song? songFallback}) {
     final entry = _resolvedCache[songId];
     if (entry != null) {
+      // Promote to MRU position
+      _resolvedCache.remove(songId);
+      _resolvedCache[songId] = entry;
+
       if (entry.isExpired) {
         if (songFallback != null) {
           debugPrint('[SearchCoordinator] Cache entry expired for $songId. Triggering automatic background refresh.');
           unawaited(recoverSong(songFallback, sessionId: 'auto-refresh-$songId'));
         }
+        // Return expired entry for instant playback while refresh runs
         return entry;
       }
       if (entry.isValidated) {
@@ -87,7 +140,7 @@ class SearchCoordinator {
     return null;
   }
 
-  /// Consolidate caching of stream entries.
+  /// Consolidate caching of stream entries with LRU eviction.
   static void cacheStream({
     required String songId,
     required Song song,
@@ -97,6 +150,14 @@ class SearchCoordinator {
     required String provider,
     required int bitrate,
   }) {
+    // Remove existing entry to update its position to MRU
+    _resolvedCache.remove(songId);
+
+    // Evict LRU entries if at capacity
+    while (_resolvedCache.length >= _maxCacheSize) {
+      _resolvedCache.remove(_resolvedCache.keys.first);
+    }
+
     _resolvedCache[songId] = ResolvedStreamEntry(
       songId: songId,
       song: song,
@@ -117,11 +178,13 @@ class SearchCoordinator {
       song: song,
       streamUrl: url,
       isValidated: true,
-      expiresAt: DateTime.now().add(const Duration(hours: 24)),
+      expiresAt: DateTime.now().add(_cacheTtl),
       provider: provider,
       bitrate: bitrate,
     );
   }
+
+  // ─── Recovery Engine ─────────────────────────────────────────────
 
   /// Launch parallel search tasks for recovery.
   /// Returns the first playable stream URL, or null if all fail.
@@ -138,7 +201,7 @@ class SearchCoordinator {
 
     // 0. Fast Memory Cache Lookup (occur before any network search)
     final cached = getCacheEntry(song.id, songFallback: song);
-    if (cached != null) {
+    if (cached != null && !isBlacklisted(cached.streamUrl)) {
       debugPrint('[SearchCoordinator] Memory cache hit for ${song.id}');
       return Future.value(cached.song.copyWith(streamUrl: cached.streamUrl));
     }
@@ -243,6 +306,12 @@ class SearchCoordinator {
 
       if (isFinished || !StreamResolver.hasStreamUrl(resolvedCandidate.toStreamMetadata())) return;
 
+      // Skip candidates whose stream URL is already blacklisted
+      if (isBlacklisted(resolvedCandidate.streamUrl!)) {
+        debugPrint('[SearchCoordinator] Skipping blacklisted URL for candidate ${resolvedCandidate.id}');
+        return;
+      }
+
       // VALIDATION WITH CDN FALLBACK
       final validatedUrl = await _validateAndFallbackCdn(resolvedCandidate.streamUrl!, taskClient);
 
@@ -258,13 +327,13 @@ class SearchCoordinator {
               : song.duration,
         );
 
-        // Update Memory Cache (24 hour expiration)
+        // Update Memory Cache (10-minute TTL)
         cacheStream(
           songId: song.id,
           song: winnerSong,
           streamUrl: validatedUrl,
           isValidated: true,
-          expiresAt: DateTime.now().add(const Duration(hours: 24)),
+          expiresAt: DateTime.now().add(_cacheTtl),
           provider: 'recovery_engine',
           bitrate: resolvedCandidate.duration != null ? 320 : 160,
         );
@@ -339,7 +408,12 @@ class SearchCoordinator {
     return winner;
   }
 
+  // ─── Stream Validation ───────────────────────────────────────────
+
   static Future<String?> _validateAndFallbackCdn(String urlStr, http.Client client) async {
+    // Skip entirely blacklisted URLs
+    if (isBlacklisted(urlStr)) return null;
+
     Uri? originalUri = Uri.tryParse(urlStr);
     if (originalUri == null) return null;
 
@@ -347,6 +421,8 @@ class SearchCoordinator {
     if (await _validateStream(originalUri, client)) {
       return originalUri.toString();
     }
+    // Blacklist the original URL that failed
+    blacklistUrl(originalUri.toString());
 
     // 2. Try alternate CDNs
     final host = originalUri.host;
@@ -354,9 +430,14 @@ class SearchCoordinator {
       if (cdn == host) continue;
 
       final altUri = originalUri.replace(host: cdn);
+      final altUrlStr = altUri.toString();
+      if (isBlacklisted(altUrlStr)) continue;
+
       if (await _validateStream(altUri, client)) {
-        return altUri.toString();
+        return altUrlStr;
       }
+      // Blacklist the CDN variant that also failed
+      blacklistUrl(altUrlStr);
     }
 
     return null;

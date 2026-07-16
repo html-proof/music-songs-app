@@ -6358,17 +6358,15 @@ class PlayerService {
           }
         }
 
-        // Blacklist URLs that return definitive failures (403, 404, 410)
-        final status = streamedResponse.statusCode;
-        if (status == 403 || status == 404 || status == 410) {
-          SearchCoordinator.blacklistUrl(cleanUrl);
-        }
+        // Blacklist URLs that fail validation
+        SearchCoordinator.blacklistUrl(cleanUrl);
         return false;
       }
 
       final contentType = (response.headers['content-type'] ?? '')
           .toLowerCase();
       if (contentType.contains('html')) {
+        SearchCoordinator.blacklistUrl(cleanUrl);
         return false;
       }
       final contentLengthStr = response.headers['content-length'] ?? '0';
@@ -6384,9 +6382,11 @@ class PlayerService {
       if (contentLength > 0) {
         return true;
       }
+      SearchCoordinator.blacklistUrl(cleanUrl);
       return false;
     } catch (e) {
       debugPrint('Stream validation failed for $cleanUrl: $e');
+      SearchCoordinator.blacklistUrl(cleanUrl);
       return false;
     }
   }

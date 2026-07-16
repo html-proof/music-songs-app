@@ -446,11 +446,31 @@ class SearchCoordinator {
   static Future<bool> _validateStream(Uri uri, http.Client client) async {
     try {
       final request = http.Request('HEAD', uri);
-      final response = await client.send(request).timeout(const Duration(milliseconds: 300));
+      final response = await client.send(request).timeout(const Duration(milliseconds: 1200));
 
       if (response.statusCode == 200) {
         final contentType = response.headers['content-type']?.toLowerCase() ?? '';
-        if (contentType.startsWith('audio/') || contentType == 'application/mp4' || contentType == 'video/mp4') {
+        if (contentType.contains('html')) {
+          return false;
+        }
+        if (contentType.startsWith('audio/') ||
+            contentType == 'application/mp4' ||
+            contentType == 'video/mp4' ||
+            contentType.contains('octet-stream') ||
+            contentType.contains('mpeg') ||
+            contentType.contains('application/x-mpegurl')) {
+          return true;
+        }
+      }
+
+      // Fallback to GET range request if HEAD fails or returns non-200
+      final getRequest = http.Request('GET', uri);
+      getRequest.headers['Range'] = 'bytes=0-1'; // Request first 2 bytes
+      final getResponse = await client.send(getRequest).timeout(const Duration(milliseconds: 1200));
+
+      if (getResponse.statusCode == 200 || getResponse.statusCode == 206) {
+        final contentType = getResponse.headers['content-type']?.toLowerCase() ?? '';
+        if (contentType.isNotEmpty && !contentType.contains('html')) {
           return true;
         }
       }

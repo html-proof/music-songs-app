@@ -124,6 +124,10 @@ class LyricsService {
     } catch (_) {}
   }
 
+  static bool _isClosedError(Object e) {
+    return e.toString().toLowerCase().contains('client is already closed');
+  }
+
   static String normalizeQuery(String text) {
     var cleaned = text.toLowerCase();
     
@@ -430,6 +434,8 @@ class LyricsService {
     final client = ApiService.createSecureHttpClient(pinCertificates: false);
     _activeClient = client;
 
+    bool isCancelled() => _activeClient != client;
+
     final lookup = _LyricsLookup.fromMetadata(song);
     final candidates = <_LyricsCandidate>[];
 
@@ -453,6 +459,7 @@ class LyricsService {
 
     // Step 1: Direct JioSaavn Song ID Lookup
     if (songId.isNotEmpty) {
+      if (isCancelled()) return null;
       try {
         final directCandidate = await _scrapeJioSaavnLyricsDirect(
           songId,
@@ -462,11 +469,13 @@ class LyricsService {
           duration: duration,
           client: client,
         );
+        if (isCancelled()) return null;
         if (directCandidate != null) {
           candidates.add(directCandidate);
         }
       } catch (_) {}
 
+      if (isCancelled()) return null;
       final winner = _findBestCandidate(lookup, candidates, 0.75);
       if (winner != null) {
         if (_activeClient == client) _activeClient = null;
@@ -498,12 +507,15 @@ class LyricsService {
 
     // Step 2: JioSaavn Search-by-Name Fallback
     if (titleWithoutMovie.isNotEmpty && cleanArtist.isNotEmpty) {
+      if (isCancelled()) return null;
       try {
         final jioCandidates = await _searchJioSaavnCandidates(
           '$titleWithoutMovie $cleanArtist',
           client: client,
         );
+        if (isCancelled()) return null;
         for (final jioCand in jioCandidates) {
+          if (isCancelled()) return null;
           if (jioCand.plainLyrics != null || jioCand.syncedLyrics != null) {
             final conf = _calculateConfidenceScore(lookup, jioCand);
             if (conf >= 0.75) {
@@ -520,6 +532,7 @@ class LyricsService {
                 duration: jioCand.durationSeconds,
                 client: client,
               );
+              if (isCancelled()) return null;
               if (fetchedCand != null) {
                 candidates.add(fetchedCand);
               }
@@ -528,6 +541,7 @@ class LyricsService {
         }
       } catch (_) {}
 
+      if (isCancelled()) return null;
       final winner = _findBestCandidate(lookup, candidates, 0.75);
       if (winner != null) {
         if (_activeClient == client) _activeClient = null;
@@ -558,10 +572,13 @@ class LyricsService {
 
     // A. ISRC Lookup (Direct & highest confidence)
     if (isrc.isNotEmpty) {
+      if (isCancelled()) return null;
       try {
         final res = await _lrclibGetEntry(artist: '', title: '', isrc: isrc, client: client);
+        if (isCancelled()) return null;
         addResult(res);
       } catch (_) {}
+      if (isCancelled()) return null;
       final winner = _findBestCandidate(lookup, candidates, 0.90);
       if (winner != null) {
         if (_activeClient == client) _activeClient = null;
@@ -572,6 +589,7 @@ class LyricsService {
 
     // B. Song Title (without movie) + Artist
     if (titleWithoutMovie.isNotEmpty && cleanArtist.isNotEmpty) {
+      if (isCancelled()) return null;
       try {
         final res = await _lrclibGetEntry(
           artist: cleanArtist,
@@ -579,12 +597,15 @@ class LyricsService {
           durationSeconds: duration > 0 ? duration : null,
           client: client,
         );
+        if (isCancelled()) return null;
         addResult(res);
 
         final searchRes = await _lrclibSearchEntries('$titleWithoutMovie $cleanArtist', client: client);
+        if (isCancelled()) return null;
         addResults(searchRes);
       } catch (_) {}
 
+      if (isCancelled()) return null;
       final winner = _findBestCandidate(lookup, candidates, 0.82);
       if (winner != null) {
         if (_activeClient == client) _activeClient = null;
@@ -595,6 +616,7 @@ class LyricsService {
 
     // C. Song Title + Artist + Album
     if (titleWithoutMovie.isNotEmpty && cleanArtist.isNotEmpty && album.isNotEmpty) {
+      if (isCancelled()) return null;
       try {
         final res = await _lrclibGetEntry(
           artist: cleanArtist,
@@ -603,12 +625,15 @@ class LyricsService {
           durationSeconds: duration > 0 ? duration : null,
           client: client,
         );
+        if (isCancelled()) return null;
         addResult(res);
 
         final searchRes = await _lrclibSearchEntries('$titleWithoutMovie $cleanArtist $album', client: client);
+        if (isCancelled()) return null;
         addResults(searchRes);
       } catch (_) {}
 
+      if (isCancelled()) return null;
       final winner = _findBestCandidate(lookup, candidates, 0.82);
       if (winner != null) {
         if (_activeClient == client) _activeClient = null;
@@ -619,6 +644,7 @@ class LyricsService {
 
     // D. Clean Song Title + Artist
     if (cleanTitle.isNotEmpty && cleanArtist.isNotEmpty) {
+      if (isCancelled()) return null;
       try {
         final res = await _lrclibGetEntry(
           artist: cleanArtist,
@@ -626,12 +652,15 @@ class LyricsService {
           durationSeconds: duration > 0 ? duration : null,
           client: client,
         );
+        if (isCancelled()) return null;
         addResult(res);
 
         final searchRes = await _lrclibSearchEntries('$cleanTitle $cleanArtist', client: client);
+        if (isCancelled()) return null;
         addResults(searchRes);
       } catch (_) {}
 
+      if (isCancelled()) return null;
       final winner = _findBestCandidate(lookup, candidates, 0.82);
       if (winner != null) {
         if (_activeClient == client) _activeClient = null;
@@ -642,11 +671,14 @@ class LyricsService {
 
     // E. Song Title only
     if (titleWithoutMovie.isNotEmpty) {
+      if (isCancelled()) return null;
       try {
         final searchRes = await _lrclibSearchEntries(titleWithoutMovie, client: client);
+        if (isCancelled()) return null;
         addResults(searchRes);
       } catch (_) {}
 
+      if (isCancelled()) return null;
       final winner = _findBestCandidate(lookup, candidates, 0.80);
       if (winner != null) {
         if (_activeClient == client) _activeClient = null;
@@ -659,8 +691,10 @@ class LyricsService {
 
     // A. JioSaavn Web Scraper
     if (song.songUrl != null && song.songUrl!.isNotEmpty) {
+      if (isCancelled()) return null;
       try {
         final scraped = await _scrapeJioSaavnLyrics(song.songUrl!, client: client);
+        if (isCancelled()) return null;
         if (scraped != null) {
           candidates.add(_LyricsCandidate(
             plainLyrics: scraped.plainLyrics,
@@ -676,8 +710,10 @@ class LyricsService {
     }
 
     // B. Search Engine Scraper with movie/album search queries
+    if (isCancelled()) return null;
     try {
       final scraped = await _scrapeLyricsFromSearchEngine(title, artist, album, language, client);
+      if (isCancelled()) return null;
       if (scraped != null) {
         candidates.add(_LyricsCandidate(
           plainLyrics: scraped.plainLyrics,
@@ -693,6 +729,7 @@ class LyricsService {
 
     // C. Original title queries containing movie/album name as a last resort
     if (title.isNotEmpty && artist.isNotEmpty) {
+      if (isCancelled()) return null;
       try {
         final res = await _lrclibGetEntry(
           artist: artist,
@@ -701,6 +738,7 @@ class LyricsService {
           durationSeconds: duration > 0 ? duration : null,
           client: client,
         );
+        if (isCancelled()) return null;
         addResult(res);
       } catch (_) {}
     }
@@ -873,6 +911,7 @@ class LyricsService {
               }
             }
           } catch (e) {
+            if (_isClosedError(e)) rethrow;
             debugPrint('[LyricsService] DuckDuckGo query failed: $e');
           }
 
@@ -912,6 +951,7 @@ class LyricsService {
                 }
               }
             } catch (e) {
+              if (_isClosedError(e)) rethrow;
               debugPrint('[LyricsService] Google query failed: $e');
             }
           }
@@ -966,15 +1006,19 @@ class LyricsService {
                 }
               }
             } catch (e) {
+              if (_isClosedError(e)) rethrow;
               debugPrint('[LyricsService] Scraper failed for $url: $e');
             }
           }
         } catch (e) {
+          if (_isClosedError(e)) rethrow;
           debugPrint('[LyricsService] DuckDuckGo request failed for query $queryStr: $e');
         }
       }
     } catch (e) {
-      debugPrint('[LyricsService] Error during search engine lyrics scraping: $e');
+      if (!_isClosedError(e)) {
+        debugPrint('[LyricsService] Error during search engine lyrics scraping: $e');
+      }
     }
     return null;
   }
@@ -1036,6 +1080,7 @@ class LyricsService {
         }
       }
     } catch (e) {
+      if (_isClosedError(e)) rethrow;
       debugPrint('[LyricsService] Direct JioSaavn api.php lyrics retrieval failed: $e');
     }
 
@@ -1072,7 +1117,9 @@ class LyricsService {
             );
           }
         }
-      } catch (_) {}
+      } catch (e) {
+        if (_isClosedError(e)) rethrow;
+      }
     }
 
     // 3. Fallback to existing _fetchSaavnCandidate (which uses baseUrl /api/songs/:id/lyrics)
@@ -1088,7 +1135,9 @@ class LyricsService {
       if (saavnCandidate != null) {
         return saavnCandidate;
       }
-    } catch (_) {}
+    } catch (e) {
+      if (_isClosedError(e)) rethrow;
+    }
 
     return null;
   }
@@ -1191,7 +1240,9 @@ class LyricsService {
             }
           }
         }
-      } catch (_) {}
+      } catch (e) {
+        if (_isClosedError(e)) rethrow;
+      }
       if (results.isNotEmpty) break;
     }
     return results;
@@ -1248,6 +1299,7 @@ class LyricsService {
         provider: 'jiosaavn API',
       );
     } catch (e) {
+      if (_isClosedError(e)) rethrow;
       debugPrint('[LyricsService] JioSaavn scrape failed: $e');
       return null;
     } finally {
@@ -1458,7 +1510,8 @@ class LyricsService {
           return res;
         }
       } catch (e) {
-        if (attempt >= maxRetries + 1) {
+        final isClosed = e.toString().toLowerCase().contains('client is already closed');
+        if (isClosed || attempt >= maxRetries + 1) {
           rethrow;
         }
       }
@@ -1501,6 +1554,7 @@ class LyricsService {
       if (decoded is! Map) return null;
       return Map<String, dynamic>.from(decoded);
     } catch (e) {
+      if (_isClosedError(e)) rethrow;
       debugPrint('[LyricsService] LRCLIB get failed: $e');
       return null;
     } finally {
@@ -1538,6 +1592,7 @@ class LyricsService {
           .map((entry) => Map<String, dynamic>.from(entry))
           .toList(growable: false);
     } catch (e) {
+      if (_isClosedError(e)) rethrow;
       debugPrint('[LyricsService] LRCLIB search failed: $e');
       return const <Map<String, dynamic>>[];
     } finally {
@@ -1588,6 +1643,7 @@ class LyricsService {
         songId: trackId,
       );
     } catch (e) {
+      if (_isClosedError(e)) rethrow;
       debugPrint('[LyricsService] Saavn candidate fetch failed: $e');
       return null;
     } finally {

@@ -542,6 +542,19 @@ class PlayerService {
             if (_playbackState != PlaybackState.buffering) {
               _updatePlaybackState(PlaybackState.idle);
             }
+            if (_currentSong != null &&
+                !_userPausedOrStoppedPlayback &&
+                !_isSourceMutationInProgress &&
+                !_isQualitySwitching &&
+                !_isSwitchingSource &&
+                !_isLoadingNewSong &&
+                (_playbackState == PlaybackState.playing ||
+                    _playbackState == PlaybackState.buffering)) {
+              debugPrint(
+                'Player source is dead (state=ProcessingState.idle). Re-resolving source for ${_currentSong!.id}...',
+              );
+              unawaited(_recoverPlayback());
+            }
             break;
           case ProcessingState.loading:
             if (_playbackState != PlaybackState.buffering) {

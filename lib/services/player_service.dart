@@ -3546,28 +3546,9 @@ class PlayerService {
         }
       }
 
-      if (!forceRefresh &&
-          _hasStreamUrl(candidateSong) &&
-          !_shouldUpgradeStreamQuality(candidateSong)) {
-        if (_isSessionStale(requestId, song.id)) return null;
-        final isValid = await _validateStreamUrl(
-          candidateSong.streamUrl!,
-          localClient,
-        );
-        if (_isSessionStale(requestId, song.id)) return null;
-
-        if (PlaybackCoordinator.isValid(requestId)) {
-          _activeLogger?.logStep(
-            'Existing URL validation',
-            isValid,
-            detail: isValid ? 'SUCCESS' : 'FAILED',
-          );
-        }
-
-        if (isValid) {
-          return candidateSong;
-        }
-      }
+      // ─── PARALLEL RESOLUTION RACE ──────────────────────────────────
+      // Launch all resolution lanes concurrently. First valid stream wins.
+      // Hard timeout: 3 seconds. Never leave the player stuck loading.
 
       // Skip resolution if offline; we can't upgrade or fetch details anyway.
       if (!hasNetwork) {
@@ -3585,150 +3566,201 @@ class PlayerService {
         return null;
       }
 
-      Song? resolvedSong;
-      try {
-        resolvedSong = await _fetchSongDetailsForPlaybackWithClient(
-          candidateSong,
-          localClient,
-          forceRefresh: forceRefresh,
-        );
-      } catch (e) {
-        debugPrint('Error fetching song details for playback: $e.');
+      final raceCompleter = Completer<Song?>();
+      int pendingLanes = 0;
+      bool raceFinished = false;
+
+      void finishRace(Song? winner, String laneName) {
+        if (raceFinished) return;
+        if (winner != null) {
+          raceFinished = true;
+          if (!raceCompleter.isCompleted) {
+            debugPrint('[ParallelResolve] Winner from $laneName for ${song.id}');
+            raceCompleter.complete(winner);
+          }
+        }
       }
 
-      if (PlaybackCoordinator.isValid(requestId)) {
-        _activeLogger?.logStep(
-          'Main API resolve',
-          resolvedSong != null,
-          detail: resolvedSong != null ? 'SUCCESS' : 'FAILED',
-        );
+      void laneCompleted() {
+        pendingLanes--;
+        if (pendingLanes <= 0 && !raceFinished) {
+          raceFinished = true;
+          if (!raceCompleter.isCompleted) {
+            debugPrint('[ParallelResolve] All lanes exhausted for ${song.id}');
+            raceCompleter.complete(null);
+          }
+        }
       }
 
-      if (_isSessionStale(requestId, song.id)) return null;
+      // ── Lane 1: Existing URL Validation ──
+      if (!forceRefresh &&
+          _hasStreamUrl(candidateSong) &&
+          !_shouldUpgradeStreamQuality(candidateSong)) {
+        pendingLanes++;
+        () async {
+          try {
+            if (_isSessionStale(requestId, song.id) || raceFinished) return;
+            final isValid = await _validateStreamUrl(
+              candidateSong.streamUrl!,
+              localClient,
+            );
+            if (_isSessionStale(requestId, song.id) || raceFinished) return;
 
-      if (resolvedSong == null || !_hasStreamUrl(resolvedSong)) {
-        debugPrint(
-          'Song URL failed to fetch. Retrying 1 time immediately with 10 microseconds delay...',
-        );
-        await Future.delayed(const Duration(microseconds: 10));
-        if (_isSessionStale(requestId, song.id)) return null;
+            if (PlaybackCoordinator.isValid(requestId)) {
+              _activeLogger?.logStep(
+                'Existing URL validation',
+                isValid,
+                detail: isValid ? 'SUCCESS' : 'FAILED',
+              );
+            }
 
+            if (isValid) {
+              finishRace(candidateSong, 'Existing URL');
+            }
+          } catch (_) {}
+          laneCompleted();
+        }();
+      }
+
+      // ── Lane 2: Main API Resolve ──
+      pendingLanes++;
+      () async {
         try {
-          resolvedSong = await _fetchSongDetailsForPlaybackWithClient(
-            candidateSong,
-            localClient,
-            forceRefresh: forceRefresh,
-          );
-        } catch (e2) {
-          debugPrint('Retry fetching song details failed: $e2');
-        }
-      }
+          if (_isSessionStale(requestId, song.id) || raceFinished) return;
 
-      if (_isSessionStale(requestId, song.id)) return null;
+          Song? resolvedSong;
+          try {
+            resolvedSong = await _fetchSongDetailsForPlaybackWithClient(
+              candidateSong,
+              localClient,
+              forceRefresh: forceRefresh,
+            );
+          } catch (e) {
+            debugPrint('Error fetching song details for playback: $e.');
+          }
 
-      if (resolvedSong != null && _hasStreamUrl(resolvedSong)) {
-        final confidence = VerificationEngine.calculateConfidence(
-          resolvedSong,
-          song,
-        );
-        final isVerified = confidence >= VerificationEngine.threshold;
-
-        if (PlaybackCoordinator.isValid(requestId)) {
-          _activeLogger?.logStep(
-            'Verification Engine',
-            isVerified,
-            detail: 'Score: $confidence%',
-          );
-        }
-
-        if (isVerified) {
-          final newUrl = (resolvedSong.streamUrl ?? '').trim();
-          final isValid = await _validateStreamUrl(newUrl, localClient);
-          if (_isSessionStale(requestId, song.id)) return null;
+          if (_isSessionStale(requestId, song.id) || raceFinished) return;
 
           if (PlaybackCoordinator.isValid(requestId)) {
             _activeLogger?.logStep(
-              'URL validation',
-              isValid,
-              detail: isValid ? 'SUCCESS' : 'FAILED',
+              'Main API resolve',
+              resolvedSong != null,
+              detail: resolvedSong != null ? 'SUCCESS' : 'FAILED',
             );
           }
 
-          if (isValid) {
-            if (forceRefresh &&
-                newUrl.isNotEmpty &&
-                newUrl == existingStreamUrl) {
-              debugPrint(
-                'Resolved stream URL is identical to failed URL. Triggering search fallback...',
-              );
-              final fallback = await SearchCoordinator.recoverSong(
+          // Retry once if primary failed
+          if ((resolvedSong == null || !_hasStreamUrl(resolvedSong)) && !raceFinished) {
+            await Future.delayed(const Duration(microseconds: 10));
+            if (_isSessionStale(requestId, song.id) || raceFinished) return;
+            try {
+              resolvedSong = await _fetchSongDetailsForPlaybackWithClient(
                 candidateSong,
-                sessionId: requestId,
+                localClient,
+                forceRefresh: forceRefresh,
               );
-              if (fallback != null) {
-                return _mergeSongWithResolvedStream(
-                  base: candidateSong,
-                  resolved: fallback,
-                );
-              }
+            } catch (_) {}
+          }
+
+          if (_isSessionStale(requestId, song.id) || raceFinished) return;
+
+          if (resolvedSong != null && _hasStreamUrl(resolvedSong)) {
+            final confidence = VerificationEngine.calculateConfidence(
+              resolvedSong,
+              song,
+            );
+            final isVerified = confidence >= VerificationEngine.threshold;
+
+            if (PlaybackCoordinator.isValid(requestId)) {
+              _activeLogger?.logStep(
+                'Verification Engine',
+                isVerified,
+                detail: 'Score: $confidence%',
+              );
             }
 
-            _setCachedSongUrl(candidateSong, newUrl);
-            return _mergeSongWithResolvedStream(
-              base: candidateSong,
-              resolved: resolvedSong,
+            if (isVerified && !raceFinished) {
+              final newUrl = (resolvedSong.streamUrl ?? '').trim();
+
+              // Skip validation if URL is identical to the one that already failed
+              if (forceRefresh && newUrl.isNotEmpty && newUrl == existingStreamUrl) {
+                // Don't validate, let search fallback lane handle this
+              } else {
+                final isValid = await _validateStreamUrl(newUrl, localClient);
+                if (_isSessionStale(requestId, song.id) || raceFinished) return;
+
+                if (PlaybackCoordinator.isValid(requestId)) {
+                  _activeLogger?.logStep(
+                    'URL validation',
+                    isValid,
+                    detail: isValid ? 'SUCCESS' : 'FAILED',
+                  );
+                }
+
+                if (isValid) {
+                  _setCachedSongUrl(candidateSong, newUrl);
+                  finishRace(
+                    _mergeSongWithResolvedStream(
+                      base: candidateSong,
+                      resolved: resolvedSong,
+                    ),
+                    'Main API',
+                  );
+                }
+              }
+            }
+          }
+        } catch (_) {}
+        laneCompleted();
+      }();
+
+      // ── Lane 3: Search Fallback (recoverSong) ──
+      pendingLanes++;
+      () async {
+        try {
+          if (_isSessionStale(requestId, song.id) || raceFinished) return;
+          final fallback = await SearchCoordinator.recoverSong(
+            candidateSong,
+            sessionId: requestId,
+          );
+          if (_isSessionStale(requestId, song.id) || raceFinished) return;
+
+          if (fallback != null) {
+            if (PlaybackCoordinator.isValid(requestId)) {
+              _activeLogger?.logStep(
+                'Search fallback',
+                true,
+                detail: 'SUCCESS',
+              );
+            }
+            finishRace(
+              _mergeSongWithResolvedStream(
+                base: candidateSong,
+                resolved: fallback,
+              ),
+              'Search Fallback',
             );
           }
-        } else {
-          debugPrint(
-            'Resolved song failed verification (confidence: $confidence%). Rejecting candidate.',
-          );
-        }
-      }
+        } catch (_) {}
+        laneCompleted();
+      }();
 
-      // Fallbacks if resolution ultimately failed, returned invalid URL, or failed verification
-      if (_hasStreamUrl(candidateSong)) {
-        final confidence = VerificationEngine.calculateConfidence(
-          candidateSong,
-          song,
-        );
-        if (confidence >= VerificationEngine.threshold) {
-          final isValid = await _validateStreamUrl(
-            candidateSong.streamUrl!,
-            localClient,
-          );
-          if (_isSessionStale(requestId, song.id)) return null;
-
-          if (isValid) {
-            if (forceRefresh) {
-              final fallback = await SearchCoordinator.recoverSong(
-                candidateSong,
-                sessionId: requestId,
-              );
-              if (fallback != null) {
-                return _mergeSongWithResolvedStream(
-                  base: candidateSong,
-                  resolved: fallback,
-                );
-              }
-            }
-            return candidateSong;
-          }
-        }
-      }
-
-      final fallback = await SearchCoordinator.recoverSong(
-        candidateSong,
-        sessionId: requestId,
+      // ── Hard Timeout: 3 seconds ──
+      final winner = await raceCompleter.future.timeout(
+        const Duration(seconds: 3),
+        onTimeout: () {
+          debugPrint('[ParallelResolve] 3s hard timeout reached for ${song.id}');
+          raceFinished = true;
+          return null;
+        },
       );
-      if (fallback != null) {
-        return _mergeSongWithResolvedStream(
-          base: candidateSong,
-          resolved: fallback,
-        );
+
+      // Cancel search session on completion
+      if (requestId != null) {
+        SearchCoordinator.cancelSession(requestId);
       }
 
-      return null;
+      return winner;
     } finally {
       if (client == null) {
         localClient.close();

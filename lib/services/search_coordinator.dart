@@ -456,7 +456,7 @@ class SearchCoordinator {
   static Future<bool> _validateStream(Uri uri, http.Client client) async {
     try {
       final request = http.Request('HEAD', uri);
-      final response = await client.send(request).timeout(const Duration(milliseconds: 1200));
+      final response = await client.send(request).timeout(const Duration(milliseconds: 800));
 
       if (response.statusCode == 200) {
         final contentType = response.headers['content-type']?.toLowerCase() ?? '';
@@ -476,7 +476,7 @@ class SearchCoordinator {
       // Fallback to GET range request if HEAD fails or returns non-200
       final getRequest = http.Request('GET', uri);
       getRequest.headers['Range'] = 'bytes=0-1'; // Request first 2 bytes
-      final getResponse = await client.send(getRequest).timeout(const Duration(milliseconds: 1200));
+      final getResponse = await client.send(getRequest).timeout(const Duration(milliseconds: 800));
 
       if (getResponse.statusCode == 200 || getResponse.statusCode == 206) {
         final contentType = getResponse.headers['content-type']?.toLowerCase() ?? '';

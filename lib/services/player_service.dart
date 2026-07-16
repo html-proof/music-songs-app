@@ -382,6 +382,27 @@ class PlayerService {
     final song = _currentSong;
     if (song == null) return;
 
+    final attempts = _songRecoveryAttempts[song.id] ?? 0;
+    if (attempts >= 1) {
+      StabilityLogger.warning(
+        'Playback',
+        'Recovery attempts exceeded limit for song ${song.id}. Enforcing playback failure.',
+      );
+      _updatePlaybackState(PlaybackState.idle);
+      _showThrottledToast(
+        "Sorry, this song couldn't be played. Please try another version or search for it manually.",
+        toastLength: Toast.LENGTH_LONG,
+      );
+      return;
+    }
+    _songRecoveryAttempts[song.id] = attempts + 1;
+
+    // Blacklist the failed stream URL to prevent retrying it
+    final failedUrl = (song.streamUrl ?? '').trim();
+    if (failedUrl.isNotEmpty && !_isLocalFilePath(failedUrl)) {
+      SearchCoordinator.blacklistUrl(failedUrl);
+    }
+
     final savePosition = _lastKnownPosition > Duration.zero
         ? _lastKnownPosition
         : _player.position;

@@ -300,8 +300,17 @@ class SearchCoordinator {
       var resolvedCandidate = candidateSong;
       if (!StreamResolver.hasStreamUrl(resolvedCandidate.toStreamMetadata())) {
         try {
-           final details = await ApiService.getSong(candidateSong.id, client: taskClient);
-           resolvedCandidate = Song.fromJson(details);
+          final details = await ApiService.getSong(candidateSong.id, client: taskClient);
+          dynamic songMap = details;
+          if (details.containsKey('data')) {
+            dynamic d = details['data'];
+            if (d is List && d.isNotEmpty) {
+              songMap = d.first;
+            } else if (d is Map) {
+              songMap = d;
+            }
+          }
+          resolvedCandidate = Song.fromJson(Map<String, dynamic>.from(songMap));
         } catch (_) {}
       }
 

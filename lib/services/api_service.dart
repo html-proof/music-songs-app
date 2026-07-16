@@ -114,6 +114,22 @@ class ApiService {
     }
   }
 
+  static Future<raw_http.Response> _makeGetRequest({
+    required Uri uri,
+    raw_http.Client? client,
+    Map<String, String>? headers,
+  }) async {
+    final Map<String, String> mergedHeaders = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      ...?headers,
+    };
+    if (client != null) {
+      return client.get(uri, headers: mergedHeaders);
+    } else {
+      return http.get(uri, headers: mergedHeaders);
+    }
+  }
+
   /// Fire-and-forget: ping the backend health endpoint to wake it up from
   /// Render's free-tier sleep. Call this as early as possible in app startup
   /// so the cold-start completes while the user sees cached/local content.
@@ -617,10 +633,10 @@ class ApiService {
     dynamic responseData;
     if (_shouldUsePrimaryApi) {
       try {
-        final res = await (client != null
-                ? client.get(Uri.parse('$baseUrl/api/search').replace(queryParameters: queryParams))
-                : http.get(Uri.parse('$baseUrl/api/search').replace(queryParameters: queryParams)))
-            .timeout(_searchRequestTimeout);
+        final res = await _makeGetRequest(
+          uri: Uri.parse('$baseUrl/api/search').replace(queryParameters: queryParams),
+          client: client,
+        ).timeout(_searchRequestTimeout);
         if (res.statusCode != 200) throw Exception('Search failed');
         responseData = jsonDecode(res.body);
       } catch (e) {
@@ -638,10 +654,10 @@ class ApiService {
           'query': normalizedQuery,
           'limit': safeLimit.toString(),
         };
-        final retryRes = await (client != null
-                ? client.get(Uri.parse('$baseUrl/api/search').replace(queryParameters: retryParams))
-                : http.get(Uri.parse('$baseUrl/api/search').replace(queryParameters: retryParams)))
-            .timeout(_searchRequestTimeout);
+        final retryRes = await _makeGetRequest(
+          uri: Uri.parse('$baseUrl/api/search').replace(queryParameters: retryParams),
+          client: client,
+        ).timeout(_searchRequestTimeout);
         if (retryRes.statusCode == 200) {
           responseData = jsonDecode(retryRes.body);
         } else {
@@ -783,10 +799,10 @@ class ApiService {
     dynamic responseData;
     if (_shouldUsePrimaryApi) {
       try {
-        final res = await (client != null
-                ? client.get(Uri.parse('$baseUrl/api/search').replace(queryParameters: queryParams))
-                : http.get(Uri.parse('$baseUrl/api/search').replace(queryParameters: queryParams)))
-            .timeout(_searchRequestTimeout);
+        final res = await _makeGetRequest(
+          uri: Uri.parse('$baseUrl/api/search').replace(queryParameters: queryParams),
+          client: client,
+        ).timeout(_searchRequestTimeout);
         if (res.statusCode != 200) throw Exception('Search failed');
         responseData = jsonDecode(res.body);
       } catch (e) {
@@ -858,10 +874,10 @@ class ApiService {
 
     if (_shouldUsePrimaryApi) {
       try {
-        final res = await (client != null
-                ? client.get(Uri.parse('$baseUrl/api/songs/$id'))
-                : http.get(Uri.parse('$baseUrl/api/songs/$id')))
-            .timeout(const Duration(seconds: 3));
+        final res = await _makeGetRequest(
+          uri: Uri.parse('$baseUrl/api/songs/$id'),
+          client: client,
+        ).timeout(const Duration(seconds: 3));
         if (res.statusCode == 200) {
           final parsed = jsonDecode(res.body);
           await _writeCache(songCacheKey, parsed);
@@ -878,10 +894,10 @@ class ApiService {
     // Fallback to Vercel API
     debugPrint('Using Vercel fallback for getSong...');
     try {
-      final res = await (client != null
-              ? client.get(Uri.parse('$_fallbackSearchBaseUrl/api/songs?ids=$id'))
-              : http.get(Uri.parse('$_fallbackSearchBaseUrl/api/songs?ids=$id')))
-          .timeout(const Duration(seconds: 3));
+      final res = await _makeGetRequest(
+        uri: Uri.parse('$_fallbackSearchBaseUrl/api/songs?ids=$id'),
+        client: client,
+      ).timeout(const Duration(seconds: 3));
       if (res.statusCode == 200) {
         final parsed = jsonDecode(res.body);
         dynamic songData = parsed;
@@ -946,10 +962,10 @@ class ApiService {
     final requestKey = 'get_albums_${normalizedId}_${normalizedQuery}_${normalizedLanguages.join(",")}';
     return _deduplicateRequest<Map<String, dynamic>>(requestKey, () async {
       try {
-        final res = await (client != null
-                ? client.get(Uri.parse('$baseUrl/api/albums').replace(queryParameters: queryParams))
-                : http.get(Uri.parse('$baseUrl/api/albums').replace(queryParameters: queryParams)))
-            .timeout(_albumRequestTimeout);
+        final res = await _makeGetRequest(
+          uri: Uri.parse('$baseUrl/api/albums').replace(queryParameters: queryParams),
+          client: client,
+        ).timeout(_albumRequestTimeout);
 
         if (res.statusCode == 200) {
           final parsed = jsonDecode(res.body);
@@ -2264,10 +2280,10 @@ class ApiService {
 
   static Future<List<dynamic>> _searchSongsFallback(String query, {raw_http.Client? client}) async {
     try {
-      final res = await (client != null
-              ? client.get(Uri.parse('$_fallbackSearchBaseUrl/api/search/songs?query=${Uri.encodeComponent(query)}'))
-              : http.get(Uri.parse('$_fallbackSearchBaseUrl/api/search/songs?query=${Uri.encodeComponent(query)}')))
-          .timeout(_fallbackSearchTimeout);
+      final res = await _makeGetRequest(
+        uri: Uri.parse('$_fallbackSearchBaseUrl/api/search/songs?query=${Uri.encodeComponent(query)}'),
+        client: client,
+      ).timeout(_fallbackSearchTimeout);
       if (res.statusCode != 200) return const [];
 
       final payload = jsonDecode(res.body);
@@ -2524,7 +2540,11 @@ class _HttpLogWrapper {
     }
     StabilityLogger.debug('API', 'GET request: $url');
     try {
-      final response = await _client.get(url, headers: headers);
+      final Map<String, String> mergedHeaders = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        ...?headers,
+      };
+      final response = await _client.get(url, headers: mergedHeaders);
       StabilityLogger.debug('API', 'GET response: ${response.statusCode} for $url');
       return response;
     } catch (e) {
@@ -2539,7 +2559,11 @@ class _HttpLogWrapper {
     }
     StabilityLogger.debug('API', 'POST request: $url');
     try {
-      final response = await _client.post(url, headers: headers, body: body, encoding: encoding);
+      final Map<String, String> mergedHeaders = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        ...?headers,
+      };
+      final response = await _client.post(url, headers: mergedHeaders, body: body, encoding: encoding);
       StabilityLogger.debug('API', 'POST response: ${response.statusCode} for $url');
       return response;
     } catch (e) {
